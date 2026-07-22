@@ -1,0 +1,14 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 0.9.7-pre: 0.9.6 stable reads 0 for Tctl/Tdie on Zen5 X3D (9950X3D) -->
+    <PackageReference Include="LibreHardwareMonitorLib" Version="0.9.7-pre708" />
+  </ItemGroup>
+
+</Project>

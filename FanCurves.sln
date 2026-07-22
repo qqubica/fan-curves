@@ -1,0 +1,34 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{1147A865-192C-4106-9D97-0FA9EC15FE24}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FanCurves", "src\FanCurves\FanCurves.csproj", "{37838E55-61EE-472C-842D-834F80542DE6}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FanCurves.Core", "src\FanCurves.Core\FanCurves.Core.csproj", "{BE92B5A5-2D35-4510-89DC-618A1987DCD8}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{37838E55-61EE-472C-842D-834F80542DE6}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{37838E55-61EE-472C-842D-834F80542DE6}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{37838E55-61EE-472C-842D-834F80542DE6}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{37838E55-61EE-472C-842D-834F80542DE6}.Release|Any CPU.Build.0 = Release|Any CPU
+		{BE92B5A5-2D35-4510-89DC-618A1987DCD8}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{BE92B5A5-2D35-4510-89DC-618A1987DCD8}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{BE92B5A5-2D35-4510-89DC-618A1987DCD8}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{BE92B5A5-2D35-4510-89DC-618A1987DCD8}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{37838E55-61EE-472C-842D-834F80542DE6} = {1147A865-192C-4106-9D97-0FA9EC15FE24}
+		{BE92B5A5-2D35-4510-89DC-618A1987DCD8} = {1147A865-192C-4106-9D97-0FA9EC15FE24}
+	EndGlobalSection
+EndGlobal

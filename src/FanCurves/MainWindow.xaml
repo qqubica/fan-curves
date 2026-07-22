@@ -1,0 +1,763 @@
+<Window x:Class="FanCurves.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:FanCurves"
+        Title="Fan Curves" Height="660" Width="1010"
+        WindowStyle="None" ResizeMode="CanMinimize" WindowStartupLocation="CenterScreen"
+        Foreground="#f2f2f4" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="13"
+        Background="#0a0a0d">
+
+    <WindowChrome.WindowChrome>
+        <WindowChrome CaptionHeight="52" ResizeBorderThickness="0"
+                      GlassFrameThickness="0,0,0,1" UseAeroCaptionButtons="False"/>
+    </WindowChrome.WindowChrome>
+
+    <Window.Resources>
+        <!-- Instrument look: near-black layered surfaces, monochrome white at graded
+             opacities, ONE accent (warm amber) reserved for live thermal data. -->
+        <Color x:Key="AccentColor">#FF9E5E</Color>
+        <SolidColorBrush x:Key="Accent" Color="{StaticResource AccentColor}"/>
+        <SolidColorBrush x:Key="CardBg" Color="#111116"/>
+        <SolidColorBrush x:Key="TextHi" Color="#f4f4f6"/>
+        <SolidColorBrush x:Key="TextMid" Color="#99ffffff"/>
+        <SolidColorBrush x:Key="TextLow" Color="#66ffffff"/>
+        <SolidColorBrush x:Key="TextMicro" Color="#59ffffff"/>
+        <FontFamily x:Key="Mono">Cascadia Mono, Consolas</FontFamily>
+        <FontFamily x:Key="Display">Segoe UI Variable Display, Segoe UI</FontFamily>
+
+        <!-- Elevated card: light-from-above gradient hairline + soft shadow. -->
+        <LinearGradientBrush x:Key="CardStroke" StartPoint="0,0" EndPoint="0,1">
+            <GradientStop Color="#30ffffff" Offset="0"/>
+            <GradientStop Color="#14ffffff" Offset="0.14"/>
+            <GradientStop Color="#0dffffff" Offset="1"/>
+        </LinearGradientBrush>
+        <Style x:Key="Card" TargetType="Border">
+            <Setter Property="Background" Value="{StaticResource CardBg}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource CardStroke}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="16"/>
+            <Setter Property="Effect">
+                <Setter.Value>
+                    <DropShadowEffect Color="#000000" BlurRadius="32" ShadowDepth="10"
+                                      Direction="270" Opacity="0.45"/>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Ghost button (default): quiet at rest, animated hover wash, press dip. -->
+        <Style TargetType="Button">
+            <Setter Property="Padding" Value="14,7"/>
+            <Setter Property="Background" Value="#0affffff"/>
+            <Setter Property="BorderBrush" Value="#1affffff"/>
+            <Setter Property="Foreground" Value="#e8e8ec"/>
+            <Setter Property="FontSize" Value="12.5"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="RenderTransformOrigin" Value="0.5,0.5"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1"
+                                CornerRadius="10">
+                            <Grid>
+                                <Border x:Name="HoverBd" Background="#10ffffff" CornerRadius="9" Opacity="0"/>
+                                <ContentPresenter Margin="{TemplateBinding Padding}"
+                                                  HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Grid>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="HoverBd"
+                                                             Storyboard.TargetProperty="Opacity"
+                                                             To="1" Duration="0:0:0.10"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="HoverBd"
+                                                             Storyboard.TargetProperty="Opacity"
+                                                             To="0" Duration="0:0:0.22"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.ExitActions>
+                            </Trigger>
+                            <Trigger Property="Tag" Value="on">
+                                <Setter TargetName="Bd" Property="Background" Value="#1cffffff"/>
+                                <Setter TargetName="Bd" Property="BorderBrush" Value="#42ffffff"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.4"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsPressed" Value="True">
+                    <Setter Property="RenderTransform">
+                        <Setter.Value>
+                            <ScaleTransform ScaleX="0.98" ScaleY="0.98"/>
+                        </Setter.Value>
+                    </Setter>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Solid primary (Resume): white pill, dark text — the loud one. -->
+        <Style x:Key="PrimaryButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Background" Value="#f2f2f4"/>
+            <Setter Property="BorderBrush" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#0b0b0e"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
+
+        <!-- Window caption buttons. -->
+        <Style x:Key="WinBtn" TargetType="Button">
+            <Setter Property="Width" Value="42"/>
+            <Setter Property="Height" Value="30"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="WindowChrome.IsHitTestVisibleInChrome" Value="True"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="Transparent" CornerRadius="8">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#14ffffff"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="WinCloseBtn" TargetType="Button" BasedOn="{StaticResource WinBtn}">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="Transparent" CornerRadius="8">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#c42b1c"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Profile cards: selectable, quiet; selection = brighter ring + tick. -->
+        <Style x:Key="PresetCard" TargetType="Button">
+            <Setter Property="Background" Value="#07ffffff"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="Margin" Value="0,0,0,8"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                                BorderBrush="#12ffffff" BorderThickness="1" CornerRadius="12"
+                                Padding="14,11">
+                            <Grid>
+                                <Border x:Name="HoverBd" Background="#0affffff" CornerRadius="11"
+                                        Opacity="0" Margin="-14,-11"/>
+                                <ContentPresenter/>
+                                <Path x:Name="Tick" Data="M 0,4 L 3.2,7.2 L 9,0.6" Stroke="#f2f2f4"
+                                      StrokeThickness="1.7" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                      StrokeLineJoin="Round" HorizontalAlignment="Right" VerticalAlignment="Top"
+                                      Margin="0,3,1,0" Visibility="Collapsed"/>
+                            </Grid>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="HoverBd"
+                                                             Storyboard.TargetProperty="Opacity"
+                                                             To="1" Duration="0:0:0.10"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="HoverBd"
+                                                             Storyboard.TargetProperty="Opacity"
+                                                             To="0" Duration="0:0:0.22"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.ExitActions>
+                            </Trigger>
+                            <Trigger Property="Tag" Value="on">
+                                <Setter TargetName="Bd" Property="Background" Value="#10ffffff"/>
+                                <Setter TargetName="Bd" Property="BorderBrush" Value="#4dffffff"/>
+                                <Setter TargetName="Tick" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Sliders: thin bright track, macOS-style shadowed knob. -->
+        <Style TargetType="Slider">
+            <Setter Property="Margin" Value="0,7,0,14"/>
+            <Setter Property="Height" Value="18"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Slider">
+                        <Grid>
+                            <Border Height="3" CornerRadius="999" Background="#1fffffff" VerticalAlignment="Center"/>
+                            <Track x:Name="PART_Track">
+                                <Track.DecreaseRepeatButton>
+                                    <RepeatButton Command="Slider.DecreaseLarge" Focusable="False">
+                                        <RepeatButton.Template>
+                                            <ControlTemplate TargetType="RepeatButton">
+                                                <Grid Background="Transparent">
+                                                    <Border Height="3" CornerRadius="999" Background="#e0ffffff" VerticalAlignment="Center"/>
+                                                </Grid>
+                                            </ControlTemplate>
+                                        </RepeatButton.Template>
+                                    </RepeatButton>
+                                </Track.DecreaseRepeatButton>
+                                <Track.IncreaseRepeatButton>
+                                    <RepeatButton Command="Slider.IncreaseLarge" Focusable="False">
+                                        <RepeatButton.Template>
+                                            <ControlTemplate TargetType="RepeatButton">
+                                                <Grid Background="Transparent"/>
+                                            </ControlTemplate>
+                                        </RepeatButton.Template>
+                                    </RepeatButton>
+                                </Track.IncreaseRepeatButton>
+                                <Track.Thumb>
+                                    <Thumb Width="18" Height="18">
+                                        <Thumb.Template>
+                                            <ControlTemplate TargetType="Thumb">
+                                                <Grid Background="Transparent">
+                                                    <Ellipse x:Name="Knob" Width="14" Height="14" Fill="#ffffff"
+                                                             Stroke="#33000000" StrokeThickness="0.5">
+                                                        <Ellipse.Effect>
+                                                            <DropShadowEffect Color="#000000" BlurRadius="6"
+                                                                              ShadowDepth="1" Direction="270" Opacity="0.55"/>
+                                                        </Ellipse.Effect>
+                                                    </Ellipse>
+                                                </Grid>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter TargetName="Knob" Property="Width" Value="16"/>
+                                                        <Setter TargetName="Knob" Property="Height" Value="16"/>
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Thumb.Template>
+                                    </Thumb>
+                                </Track.Thumb>
+                            </Track>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Overlay scrollbar. -->
+        <Style TargetType="ScrollBar">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Width" Value="8"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ScrollBar">
+                        <Track x:Name="PART_Track" IsDirectionReversed="True">
+                            <Track.DecreaseRepeatButton>
+                                <RepeatButton Command="ScrollBar.PageUpCommand" Focusable="False">
+                                    <RepeatButton.Template>
+                                        <ControlTemplate TargetType="RepeatButton">
+                                            <Rectangle Fill="Transparent"/>
+                                        </ControlTemplate>
+                                    </RepeatButton.Template>
+                                </RepeatButton>
+                            </Track.DecreaseRepeatButton>
+                            <Track.IncreaseRepeatButton>
+                                <RepeatButton Command="ScrollBar.PageDownCommand" Focusable="False">
+                                    <RepeatButton.Template>
+                                        <ControlTemplate TargetType="RepeatButton">
+                                            <Rectangle Fill="Transparent"/>
+                                        </ControlTemplate>
+                                    </RepeatButton.Template>
+                                </RepeatButton>
+                            </Track.IncreaseRepeatButton>
+                            <Track.Thumb>
+                                <Thumb>
+                                    <Thumb.Template>
+                                        <ControlTemplate TargetType="Thumb">
+                                            <Border x:Name="Bar" Background="#2effffff" CornerRadius="2" Margin="2,0"/>
+                                            <ControlTemplate.Triggers>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter TargetName="Bar" Property="Background" Value="#59ffffff"/>
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </Thumb.Template>
+                                </Thumb>
+                            </Track.Thumb>
+                        </Track>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Round-cap checkbox. -->
+        <Style TargetType="CheckBox">
+            <Setter Property="Foreground" Value="#d9ffffff"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Margin" Value="0,2,0,2"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="CheckBox">
+                        <StackPanel Orientation="Horizontal" Background="Transparent">
+                            <Border x:Name="Box" Width="16" Height="16" CornerRadius="5"
+                                    BorderBrush="#40ffffff" BorderThickness="1" Background="Transparent"
+                                    VerticalAlignment="Center">
+                                <Path x:Name="Check" Data="M 3.5,8 L 6.5,11 L 12,4.5" Stroke="#0b0b0e"
+                                      StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                      StrokeLineJoin="Round" Visibility="Collapsed"/>
+                            </Border>
+                            <ContentPresenter Margin="8,0,0,0" VerticalAlignment="Center" RecognizesAccessKey="True"/>
+                        </StackPanel>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Box" Property="BorderBrush" Value="#73ffffff"/>
+                                <Setter TargetName="Box" Property="Background" Value="#0dffffff"/>
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Box" Property="Background" Value="#ffffff"/>
+                                <Setter TargetName="Box" Property="BorderBrush" Value="#ffffff"/>
+                                <Setter TargetName="Check" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Channel segments (the ListBox becomes a segmented switcher). -->
+        <Style x:Key="SegmentItem" TargetType="ListBoxItem">
+            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListBoxItem">
+                        <Border x:Name="Seg" CornerRadius="8" Padding="13,6" Background="Transparent"
+                                TextElement.Foreground="#8cffffff">
+                            <ContentPresenter/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Seg" Property="TextElement.Foreground" Value="#c4c4cc"/>
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="Seg" Property="Background" Value="#1affffff"/>
+                                <Setter TargetName="Seg" Property="TextElement.Foreground" Value="#f2f2f4"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="MicroLabel" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="10"/>
+            <Setter Property="Foreground" Value="{StaticResource TextMicro}"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
+    </Window.Resources>
+
+    <!-- RootBorder gets padding when maximized (borderless windows overflow otherwise). -->
+    <Border x:Name="RootBorder">
+        <Grid>
+            <!-- Faint ambient light, top-left — depth without color. -->
+            <Ellipse Width="760" Height="420" HorizontalAlignment="Left" VerticalAlignment="Top"
+                     Margin="-180,-190,0,0" IsHitTestVisible="False">
+                <Ellipse.Fill>
+                    <RadialGradientBrush>
+                        <GradientStop Color="#0Cffffff" Offset="0"/>
+                        <GradientStop Color="#00ffffff" Offset="1"/>
+                    </RadialGradientBrush>
+                </Ellipse.Fill>
+            </Ellipse>
+
+            <Grid x:Name="ContentRoot">
+                <Grid.RenderTransform>
+                    <TranslateTransform x:Name="ContentShift"/>
+                </Grid.RenderTransform>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="52"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <!-- ======== Title bar ======== -->
+                <Grid Grid.Row="0" Margin="20,0,10,0">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <Canvas Width="20" Height="20" RenderTransformOrigin="0.5,0.5" Margin="0,0,10,0">
+                            <Canvas.RenderTransform>
+                                <RotateTransform x:Name="FanSpin"/>
+                            </Canvas.RenderTransform>
+                            <Path Fill="#d9ffffff">
+                                <Path.Data>
+                                    <GeometryGroup FillRule="Nonzero">
+                                        <EllipseGeometry Center="10,4.8" RadiusX="2.5" RadiusY="4.2"/>
+                                        <EllipseGeometry Center="10,4.8" RadiusX="2.5" RadiusY="4.2">
+                                            <EllipseGeometry.Transform>
+                                                <RotateTransform Angle="120" CenterX="10" CenterY="10"/>
+                                            </EllipseGeometry.Transform>
+                                        </EllipseGeometry>
+                                        <EllipseGeometry Center="10,4.8" RadiusX="2.5" RadiusY="4.2">
+                                            <EllipseGeometry.Transform>
+                                                <RotateTransform Angle="240" CenterX="10" CenterY="10"/>
+                                            </EllipseGeometry.Transform>
+                                        </EllipseGeometry>
+                                        <EllipseGeometry Center="10,10" RadiusX="2.1" RadiusY="2.1"/>
+                                    </GeometryGroup>
+                                </Path.Data>
+                            </Path>
+                        </Canvas>
+                        <TextBlock Text="Fan Curves" FontSize="13" FontWeight="SemiBold"
+                                   Foreground="#e8e8ec" VerticalAlignment="Center"/>
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                        <Button x:Name="DevButton" Content="Developer" Click="OnToggleDev"
+                                WindowChrome.IsHitTestVisibleInChrome="True"
+                                Padding="12,5" FontSize="12" Margin="0,0,14,0"/>
+                        <Button Style="{StaticResource WinBtn}" Click="OnMinimize">
+                            <Path Data="M 0,0 H 10" Stroke="#ccffffff" StrokeThickness="1.2"/>
+                        </Button>
+                        <Button Style="{StaticResource WinBtn}" Click="OnMaximize" Margin="4,0,0,0">
+                            <Path x:Name="MaxGlyph" Data="M 0,0 H 9 V 9 H 0 Z M 4.5,9 V 4.5 H 9"
+                                  Stroke="#ccffffff" StrokeThickness="1.2"/>
+                        </Button>
+                        <Button Style="{StaticResource WinCloseBtn}" Click="OnCloseButton" Margin="4,0,0,0">
+                            <Path Data="M 0,0 L 9,9 M 9,0 L 0,9" Stroke="#ccffffff" StrokeThickness="1.2"/>
+                        </Button>
+                    </StackPanel>
+                </Grid>
+
+                <!-- ======== Content ======== -->
+                <Grid Grid.Row="1" Margin="26,8,26,22">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="252"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Sidebar -->
+                    <DockPanel Grid.Column="0" Margin="0,4,26,0">
+                        <StackPanel DockPanel.Dock="Bottom">
+                            <Button x:Name="PauseButton" Content="Pause — fans to BIOS" Click="OnTogglePause"
+                                    HorizontalAlignment="Stretch" Padding="14,9"/>
+                            <CheckBox x:Name="TrayCheck" Content="Keep running in tray on close"
+                                      FontSize="11.5" Foreground="#8cffffff" Margin="2,12,0,0"
+                                      Checked="OnTrayCheckChanged" Unchecked="OnTrayCheckChanged"/>
+                            <CheckBox x:Name="AutostartCheck" Content="Start with Windows"
+                                      FontSize="11.5" Foreground="#8cffffff" Margin="2,8,0,0"
+                                      Checked="OnAutostartCheckChanged" Unchecked="OnAutostartCheckChanged"/>
+                        </StackPanel>
+
+                        <StackPanel>
+                            <TextBlock x:Name="HeroLabel" Style="{StaticResource MicroLabel}"/>
+                            <TextBlock Margin="0,2,0,0" Typography.NumeralAlignment="Tabular"><Run
+                                x:Name="HeroInt" Text="—" FontFamily="{StaticResource Display}"
+                                FontWeight="Light" FontSize="58" Foreground="{StaticResource TextHi}"/><Run
+                                x:Name="HeroFrac" Text="" FontFamily="{StaticResource Display}"
+                                FontWeight="Light" FontSize="26" Foreground="{StaticResource TextLow}"/></TextBlock>
+
+                            <Border x:Name="Chip" CornerRadius="999" Background="#0affffff"
+                                    BorderBrush="#14ffffff" BorderThickness="1" Padding="10,6"
+                                    HorizontalAlignment="Left" Margin="0,10,0,0">
+                                <StackPanel Orientation="Horizontal">
+                                    <Ellipse x:Name="ChipDot" Width="7" Height="7" Fill="{StaticResource Accent}"
+                                             VerticalAlignment="Center">
+                                        <Ellipse.Effect>
+                                            <DropShadowEffect x:Name="ChipGlow" Color="{StaticResource AccentColor}"
+                                                              BlurRadius="9" ShadowDepth="0" Opacity="0.9"/>
+                                        </Ellipse.Effect>
+                                    </Ellipse>
+                                    <TextBlock x:Name="ChipText" Text="Curves active" FontSize="11"
+                                               Foreground="#b3ffffff" Margin="7,0,0,0" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </Border>
+
+                            <TextBlock local:Tracked.Text="PROFILE" Style="{StaticResource MicroLabel}"
+                                       Margin="1,32,0,10"/>
+                            <Button x:Name="QuietPresetButton" Style="{StaticResource PresetCard}" Click="OnQuietPreset">
+                                <StackPanel>
+                                    <TextBlock Text="Quiet" FontSize="13" FontWeight="SemiBold" Foreground="#f2f2f4"/>
+                                    <TextBlock Text="MacBook-like — silent floor, unhurried ramps"
+                                               FontSize="11" Foreground="#80ffffff" Margin="0,3,0,0" TextWrapping="Wrap"/>
+                                </StackPanel>
+                            </Button>
+                            <Button x:Name="PerfPresetButton" Style="{StaticResource PresetCard}" Click="OnPerformancePreset">
+                                <StackPanel>
+                                    <TextBlock Text="Performance" FontSize="13" FontWeight="SemiBold" Foreground="#f2f2f4"/>
+                                    <TextBlock Text="Cooling first — earlier, steeper steps"
+                                               FontSize="11" Foreground="#80ffffff" Margin="0,3,0,0" TextWrapping="Wrap"/>
+                                </StackPanel>
+                            </Button>
+                            <TextBlock x:Name="CustomNote" Text="Custom curve — tuned by hand"
+                                       FontSize="11" Foreground="#66ffffff" Margin="2,2,0,0"
+                                       Visibility="Collapsed"/>
+                        </StackPanel>
+                    </DockPanel>
+
+                    <!-- Hero card: channel switcher + chart -->
+                    <Border Grid.Column="1" Style="{StaticResource Card}">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+
+                            <Grid Grid.Row="0" Margin="16,14,16,4">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <Border Grid.Column="0" Background="#0affffff" CornerRadius="11"
+                                        BorderBrush="#12ffffff" BorderThickness="1" Padding="3"
+                                        HorizontalAlignment="Left">
+                                    <ListBox x:Name="ChannelList" Background="Transparent" BorderThickness="0"
+                                             SelectionChanged="OnChannelSelected"
+                                             ItemContainerStyle="{StaticResource SegmentItem}"
+                                             ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                        <ListBox.ItemsPanel>
+                                            <ItemsPanelTemplate>
+                                                <StackPanel Orientation="Horizontal"/>
+                                            </ItemsPanelTemplate>
+                                        </ListBox.ItemsPanel>
+                                        <ListBox.ItemTemplate>
+                                            <DataTemplate>
+                                                <StackPanel Orientation="Horizontal">
+                                                    <TextBlock Text="{Binding Name}" FontSize="12.5" FontWeight="Medium"/>
+                                                    <TextBlock Text="{Binding Segment}" FontFamily="{StaticResource Mono}"
+                                                               FontSize="11" Opacity="0.62" Margin="9,1.5,0,0"/>
+                                                </StackPanel>
+                                            </DataTemplate>
+                                        </ListBox.ItemTemplate>
+                                    </ListBox>
+                                </Border>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                    <Border x:Name="SimTag" CornerRadius="6" BorderBrush="#26ffffff"
+                                            BorderThickness="1" Padding="7,2.5" Margin="0,0,10,0"
+                                            Visibility="Collapsed" VerticalAlignment="Center">
+                                        <TextBlock local:Tracked.Text="SIM" FontSize="9"
+                                                   Foreground="#8cffffff" FontWeight="SemiBold"/>
+                                    </Border>
+                                    <TextBlock x:Name="DetailText" FontFamily="{StaticResource Mono}" FontSize="11.5"
+                                               Foreground="#8cffffff" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </Grid>
+
+                            <local:CurveEditor x:Name="Editor" Grid.Row="1" ClipToBounds="True" Margin="6,4,10,2"/>
+
+                            <!-- Why the fan isn't at the curve's configured % right now
+                                 (slew ramp, step-down hold, zero snap, kick, trial stop, …).
+                                 Sits in the chart's top-left corner; hidden when output = curve. -->
+                            <Border x:Name="WhyChip" Grid.Row="1" HorizontalAlignment="Left"
+                                    VerticalAlignment="Top" Margin="48,10,0,0" CornerRadius="8"
+                                    Background="#D9131318" BorderBrush="#1affffff" BorderThickness="1"
+                                    Padding="9,4" IsHitTestVisible="False" Visibility="Collapsed">
+                                <TextBlock x:Name="WhyText" FontSize="11" Foreground="#a6ffffff"
+                                           FontFamily="{StaticResource Mono}"/>
+                            </Border>
+
+                            <local:HistoryChart x:Name="HistoryView" Grid.Row="2" Height="148"
+                                                ClipToBounds="True" Margin="6,0,10,6"
+                                                Visibility="Collapsed"/>
+
+                            <TextBlock x:Name="EditorHint" Grid.Row="3" FontSize="10.5" Foreground="#59ffffff"
+                                       Margin="18,0,18,12" TextWrapping="Wrap" Visibility="Collapsed"
+                                       Text="Drag points · double-click adds · right-click removes · Ctrl+Z undo, Ctrl+Y redo. Each point starts a flat band. Dashed line = raw temp; the dot is the 20 s average meeting the commanded fan %."/>
+                        </Grid>
+                    </Border>
+
+                    <!-- Developer panel -->
+                    <Border x:Name="DevPanel" Grid.Column="2" Width="272" Visibility="Collapsed"
+                            Style="{StaticResource Card}" Padding="18,16" Margin="26,0,0,0">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <StackPanel Margin="0,0,12,0">
+                                <TextBlock local:Tracked.Text="BEHAVIOUR" Style="{StaticResource MicroLabel}" Margin="0,0,0,12"/>
+
+                                <DockPanel>
+                                    <TextBlock DockPanel.Dock="Right" x:Name="AvgValue" FontFamily="{StaticResource Mono}"
+                                               FontSize="12" Foreground="#f2f2f4"/>
+                                    <TextBlock Text="Averaging window" FontSize="12" Foreground="#99ffffff"/>
+                                </DockPanel>
+                                <!-- Value is a notch index, not seconds: 0–24 → 0–120 s (5 s steps), 25–30 → 150–300 s (30 s steps). -->
+                                <Slider x:Name="AvgSlider" Minimum="0" Maximum="30" TickFrequency="1"
+                                        IsSnapToTickEnabled="True" ValueChanged="OnParamChanged"/>
+
+                                <DockPanel>
+                                    <TextBlock DockPanel.Dock="Right" x:Name="HystValue" FontFamily="{StaticResource Mono}"
+                                               FontSize="12" Foreground="#f2f2f4"/>
+                                    <TextBlock Text="Step-down hysteresis" FontSize="12" Foreground="#99ffffff"/>
+                                </DockPanel>
+                                <Slider x:Name="HystSlider" Minimum="0" Maximum="8" TickFrequency="0.5"
+                                        IsSnapToTickEnabled="True" ValueChanged="OnParamChanged"/>
+
+                                <DockPanel>
+                                    <TextBlock DockPanel.Dock="Right" x:Name="HoldValue" FontFamily="{StaticResource Mono}"
+                                               FontSize="12" Foreground="#f2f2f4"/>
+                                    <TextBlock Text="Step-down hold" FontSize="12" Foreground="#99ffffff"/>
+                                </DockPanel>
+                                <Slider x:Name="HoldSlider" Minimum="0" Maximum="60" TickFrequency="5"
+                                        IsSnapToTickEnabled="True" ValueChanged="OnParamChanged"/>
+
+                                <DockPanel>
+                                    <TextBlock DockPanel.Dock="Right" x:Name="SlewUpValue" FontFamily="{StaticResource Mono}"
+                                               FontSize="12" Foreground="#f2f2f4"/>
+                                    <TextBlock Text="Ramp up" FontSize="12" Foreground="#99ffffff"/>
+                                </DockPanel>
+                                <Slider x:Name="SlewUpSlider" Minimum="0.5" Maximum="20" TickFrequency="0.5"
+                                        IsSnapToTickEnabled="True" ValueChanged="OnParamChanged"/>
+
+                                <DockPanel>
+                                    <TextBlock DockPanel.Dock="Right" x:Name="SlewDownValue" FontFamily="{StaticResource Mono}"
+                                               FontSize="12" Foreground="#f2f2f4"/>
+                                    <TextBlock Text="Ramp down" FontSize="12" Foreground="#99ffffff"/>
+                                </DockPanel>
+                                <Slider x:Name="SlewDownSlider" Minimum="0.5" Maximum="10" TickFrequency="0.5"
+                                        IsSnapToTickEnabled="True" ValueChanged="OnParamChanged"/>
+
+                                <DockPanel>
+                                    <TextBlock DockPanel.Dock="Right" x:Name="FloorValue" FontFamily="{StaticResource Mono}"
+                                               FontSize="12" Foreground="#f2f2f4"/>
+                                    <TextBlock Text="Safety floor" FontSize="12" Foreground="#99ffffff"/>
+                                </DockPanel>
+                                <Slider x:Name="FloorSlider" Minimum="0" Maximum="60" TickFrequency="5"
+                                        IsSnapToTickEnabled="True" ValueChanged="OnParamChanged"/>
+
+                                <CheckBox x:Name="IdleKickCheck" Content="Stopped-fan kick (all channels)"
+                                          FontSize="11.5" Foreground="#8cffffff" Margin="0,10,0,0"
+                                          Checked="OnIdleKickCheckChanged" Unchecked="OnIdleKickCheckChanged"
+                                          ToolTip="Periodically spin up fans that have fully stopped, then let them stop again."/>
+
+                                <StackPanel Margin="0,4,0,0">
+                                    <DockPanel>
+                                        <TextBlock DockPanel.Dock="Right" x:Name="KickIdleValue" FontFamily="{StaticResource Mono}"
+                                                   FontSize="12" Foreground="#f2f2f4"/>
+                                        <TextBlock Text="Kick after stopped for" FontSize="12" Foreground="#99ffffff"/>
+                                    </DockPanel>
+                                    <Slider x:Name="KickIdleSlider" Minimum="10" Maximum="300" TickFrequency="10"
+                                            IsSnapToTickEnabled="True" ValueChanged="OnKickParamChanged"/>
+
+                                    <DockPanel>
+                                        <TextBlock DockPanel.Dock="Right" x:Name="KickSpeedValue" FontFamily="{StaticResource Mono}"
+                                                   FontSize="12" Foreground="#f2f2f4"/>
+                                        <TextBlock Text="Kick speed" FontSize="12" Foreground="#99ffffff"/>
+                                    </DockPanel>
+                                    <Slider x:Name="KickSpeedSlider" Minimum="5" Maximum="100" TickFrequency="5"
+                                            IsSnapToTickEnabled="True" ValueChanged="OnKickParamChanged"/>
+
+                                    <DockPanel>
+                                        <TextBlock DockPanel.Dock="Right" x:Name="KickTimeValue" FontFamily="{StaticResource Mono}"
+                                                   FontSize="12" Foreground="#f2f2f4"/>
+                                        <TextBlock Text="Kick duration" FontSize="12" Foreground="#99ffffff"/>
+                                    </DockPanel>
+                                    <Slider x:Name="KickTimeSlider" Minimum="5" Maximum="60" TickFrequency="5"
+                                            IsSnapToTickEnabled="True" ValueChanged="OnKickParamChanged"/>
+                                </StackPanel>
+
+                                <CheckBox x:Name="ZeroSnapCheck" Content="Stop fans instead of running slow (all channels)"
+                                          FontSize="11.5" Foreground="#8cffffff" Margin="0,10,0,0"
+                                          Checked="OnZeroSnapCheckChanged" Unchecked="OnZeroSnapCheckChanged"
+                                          ToolTip="Any curve target below the threshold runs the fan at 0% instead — meaningful speed or fully stopped, never a slow crawl."/>
+
+                                <StackPanel Margin="0,4,0,0">
+                                    <DockPanel>
+                                        <TextBlock DockPanel.Dock="Right" x:Name="ZeroSnapValue" FontFamily="{StaticResource Mono}"
+                                                   FontSize="12" Foreground="#f2f2f4"/>
+                                        <TextBlock Text="Stop below" FontSize="12" Foreground="#99ffffff"/>
+                                    </DockPanel>
+                                    <Slider x:Name="ZeroSnapSlider" Minimum="1" Maximum="50" TickFrequency="1"
+                                            IsSnapToTickEnabled="True" ValueChanged="OnZeroSnapParamChanged"/>
+                                </StackPanel>
+
+                                <CheckBox x:Name="StopProbeCheck" Content="Trial-stop fans when temps are stable (all channels)"
+                                          FontSize="11.5" Foreground="#8cffffff" Margin="0,10,0,0"
+                                          Checked="OnStopProbeCheckChanged" Unchecked="OnStopProbeCheckChanged"
+                                          ToolTip="After a fan has run steadily with a stable temperature, stop it as a trial — if the temperature starts climbing, curve control resumes at once; if it stays flat or falls, the fan simply stays off."/>
+
+                                <StackPanel Margin="0,4,0,0">
+                                    <DockPanel>
+                                        <TextBlock DockPanel.Dock="Right" x:Name="ProbeRunValue" FontFamily="{StaticResource Mono}"
+                                                   FontSize="12" Foreground="#f2f2f4"/>
+                                        <TextBlock Text="Steady running before trial" FontSize="12" Foreground="#99ffffff"/>
+                                    </DockPanel>
+                                    <Slider x:Name="ProbeRunSlider" Minimum="10" Maximum="300" TickFrequency="10"
+                                            IsSnapToTickEnabled="True" ValueChanged="OnStopProbeParamChanged"/>
+
+                                    <DockPanel>
+                                        <TextBlock DockPanel.Dock="Right" x:Name="ProbeLenValue" FontFamily="{StaticResource Mono}"
+                                                   FontSize="12" Foreground="#f2f2f4"/>
+                                        <TextBlock Text="Trial stop length" FontSize="12" Foreground="#99ffffff"/>
+                                    </DockPanel>
+                                    <Slider x:Name="ProbeLenSlider" Minimum="5" Maximum="60" TickFrequency="5"
+                                            IsSnapToTickEnabled="True" ValueChanged="OnStopProbeParamChanged"/>
+
+                                    <DockPanel>
+                                        <TextBlock DockPanel.Dock="Right" x:Name="ProbeBandValue" FontFamily="{StaticResource Mono}"
+                                                   FontSize="12" Foreground="#f2f2f4"/>
+                                        <TextBlock Text="Stable band · rise to resume" FontSize="12" Foreground="#99ffffff"/>
+                                    </DockPanel>
+                                    <Slider x:Name="ProbeBandSlider" Minimum="0.5" Maximum="5" TickFrequency="0.5"
+                                            IsSnapToTickEnabled="True" ValueChanged="OnStopProbeParamChanged"/>
+
+                                    <DockPanel>
+                                        <TextBlock DockPanel.Dock="Right" x:Name="ProbeRetryValue" FontFamily="{StaticResource Mono}"
+                                                   FontSize="12" Foreground="#f2f2f4"/>
+                                        <TextBlock Text="Retry after failed trial" FontSize="12" Foreground="#99ffffff"/>
+                                    </DockPanel>
+                                    <Slider x:Name="ProbeRetrySlider" Minimum="60" Maximum="900" TickFrequency="30"
+                                            IsSnapToTickEnabled="True" ValueChanged="OnStopProbeParamChanged"/>
+                                </StackPanel>
+
+                                <Border Height="1" Background="#14ffffff" Margin="0,10,0,16"/>
+                                <TextBlock local:Tracked.Text="SOURCES" Style="{StaticResource MicroLabel}" Margin="0,0,0,8"/>
+                                <TextBlock Text="Temperature sensors — max wins" FontSize="11.5" Foreground="#8cffffff"/>
+                                <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled"
+                                              Margin="0,6,0,12" PanningMode="HorizontalOnly"
+                                              PreviewMouseWheel="OnHorizontalListWheel">
+                                    <ItemsControl x:Name="SensorChecks"/>
+                                </ScrollViewer>
+                                <TextBlock Text="Fan headers driven" FontSize="11.5" Foreground="#8cffffff"/>
+                                <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled"
+                                              Margin="0,6,0,12" PanningMode="HorizontalOnly"
+                                              PreviewMouseWheel="OnHorizontalListWheel">
+                                    <ItemsControl x:Name="ControlChecks"/>
+                                </ScrollViewer>
+
+                                <Border Height="1" Background="#14ffffff" Margin="0,4,0,16"/>
+                                <TextBlock local:Tracked.Text="BACKEND" Style="{StaticResource MicroLabel}" Margin="0,0,0,8"/>
+                                <TextBlock x:Name="BackendText" FontFamily="{StaticResource Mono}" FontSize="10.5"
+                                           Foreground="#66ffffff" TextWrapping="Wrap"/>
+                                <TextBlock x:Name="ConfigPathText" FontFamily="{StaticResource Mono}" FontSize="10.5"
+                                           Foreground="#66ffffff" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </Border>
+                </Grid>
+            </Grid>
+        </Grid>
+    </Border>
+</Window>
