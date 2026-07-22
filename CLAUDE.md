@@ -6,6 +6,25 @@ ramp only under sustained load (class-level default slew 8 %/s both directions; 
 (ASRock X870 Steel Legend WiFi + 9950X3D + NH-D15 + Arctic P14 Pro chain in a
 Phanteks P600S), but hardware-agnostic.
 
+## Repo / releases
+
+**Public GitHub repo `qqubica/fan-curves`** (MIT) since 2026-07-22 — nested repo
+gitignored by the workspace parent; earlier history stays in the workspace repo.
+No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
+(CLAUDE.md is published too — keep it accurate, nothing secret in it).
+
+- README screenshots: exit the running instance (`exit.signal`), move
+  `profile.json` aside so the pristine defaults show (Quiet preset checked), run
+  the built **DLL** — `dotnet src/FanCurves/bin/Debug/net8.0-windows/FanCurves.dll
+  --sim --screenshot docs/screenshot-simple.png` (+ `--dev` for the second shot) —
+  which bypasses the requireAdministrator manifest (it lives only in the apphost
+  exe), then restore profile.json and `schtasks /Run /TN FanCurves`.
+- Release: bump `<Version>` in `src/FanCurves/FanCurves.csproj` →
+  `dotnet publish src/FanCurves -c Release -r win-x64 --self-contained
+  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish`
+  → `Compress-Archive` the exe as `FanCurves-X.Y.Z-win-x64.zip` →
+  `gh release create vX.Y.Z <zip>`. publish/ and *.zip are gitignored.
+
 ## Layout
 
 - `src/FanCurves.Core` — engine, no UI deps:
