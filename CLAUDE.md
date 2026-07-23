@@ -250,6 +250,12 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   zero controllable headers (channels then show "[no fan header]").
 - Diagnostics in `%AppData%\FanCurves\`: `sensors.txt` (all sensors + values at
   launch and +15 s), `events.txt` (startup/backend/crash/exit log).
-- Fully working in simulation; **real-hardware fan control still untested** — needs
-  the assembled X870 Steel Legend PC: verify Nuvoton Super I/O controls appear (via
-  PawnIO) and that Fan #N ↔ Fan Control #N pairing holds on this board.
+- **Installed & verified on real hardware 2026-07-23** (the X870 Steel Legend /
+  9950X3D build): v0.1.0 exe at `%LOCALAPPDATA%\Programs\FanCurves\FanCurves.exe`,
+  autostart task registered, PawnIO 2.2.0 installed (silent flags are
+  `-install -silent`, dash-style — `/S` fails with exit 87). LhmBackend sees the
+  NCT6686D: 8 controllable headers + all board temps; CPU temp from
+  `/amdcpu/0/temperature/2` (Tctl/Tdie). Control works — the Quiet preset stopped
+  the CPU fans at idle within the first minute. Kuba manually assigned the
+  "Pump Fan" header (`/lpc/nct6686d/0/control/1`, physically the second NH-D15
+  fan) to the CPU cooler channel, as on the previous test setup.
