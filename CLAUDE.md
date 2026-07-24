@@ -87,8 +87,10 @@ No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
     edits, history in MainWindow via before/after snapshots, cleared on preset
     adoption), behaviour sliders (averaging window covers 0–5 min on a
     non-linear slider — its Value is a notch index: 5 s steps up to 2 min, 30 s steps
-    beyond; mapping in `MainWindow.AvgNotchToSeconds`), sensor/header assignment, backend +
-    config-path info. Any manual tweak marks the profile "Custom" (preset highlight
+    beyond; mapping in `MainWindow.AvgNotchToSeconds`), sensor/header assignment (since
+    2026-07-24 each sensor row leads with its live temp and each fan-header row with its
+    live rpm — right-aligned mono column, refreshed per engine tick via
+    `RefreshSourceReadouts`, "—" when unreadable), backend + config-path info. Any manual tweak marks the profile "Custom" (preset highlight
     clears). Presets overwrite tuning but keep sensor/header assignments
     (`Profile.AdoptTuning`).
   Dark theme, code-behind (no MVVM framework).

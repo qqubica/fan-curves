@@ -31,6 +31,11 @@ public partial class MainWindow : Window
     private readonly List<CurveEdit> _redoStack = new();
     private readonly Dictionary<ChannelConfig, List<CurvePoint>> _pointsBaseline = new();
 
+    // Live readouts in the dev panel's source lists: temp before each sensor name,
+    // rpm before each fan header name. Rebuilt with the lists, refreshed per tick.
+    private readonly List<(TextBlock Value, string Id)> _sensorReadouts = new();
+    private readonly List<(TextBlock Value, string Id)> _controlReadouts = new();
+
     private static string Inv(FormattableString f) => FormattableString.Invariant(f);
 
     // AvgSlider is non-linear: notches 0–24 → 0–120 s in 5 s steps, 25–30 → 150–300 s in 30 s steps.
@@ -337,17 +342,21 @@ public partial class MainWindow : Window
     private void RebuildSourceChecks(ChannelConfig ch)
     {
         SensorChecks.Items.Clear();
+        _sensorReadouts.Clear();
         foreach (var s in _hw.Sensors.Where(s => s.Kind == "temp"))
         {
-            var cb = new CheckBox { Content = s.Name, IsChecked = ch.SensorIds.Contains(s.Id), Tag = s.Id };
+            var cb = new CheckBox { Content = SourceLabel(s.Name, 42, out var val), IsChecked = ch.SensorIds.Contains(s.Id), Tag = s.Id };
+            _sensorReadouts.Add((val, s.Id));
             cb.Checked += (_, _) => { if (!ch.SensorIds.Contains(s.Id)) ch.SensorIds.Add(s.Id); _profile.Save(); };
             cb.Unchecked += (_, _) => { ch.SensorIds.Remove(s.Id); _profile.Save(); };
             SensorChecks.Items.Add(cb);
         }
         ControlChecks.Items.Clear();
+        _controlReadouts.Clear();
         foreach (var c in _hw.Controls)
         {
-            var cb = new CheckBox { Content = c.Name, IsChecked = ch.ControlIds.Contains(c.Id), Tag = c.Id };
+            var cb = new CheckBox { Content = SourceLabel(c.Name, 58, out var val), IsChecked = ch.ControlIds.Contains(c.Id), Tag = c.Id };
+            _controlReadouts.Add((val, c.Id));
             cb.Checked += (_, _) => { if (!ch.ControlIds.Contains(c.Id)) ch.ControlIds.Add(c.Id); _profile.Save(); };
             cb.Unchecked += (_, _) => { ch.ControlIds.Remove(c.Id); _hw.ReleaseControl(c.Id); _profile.Save(); };
             ControlChecks.Items.Add(cb);
@@ -358,6 +367,35 @@ public partial class MainWindow : Window
                 Text = "No controllable headers found.",
                 Foreground = new SolidColorBrush(Color.FromArgb(0x8c, 0xff, 0xff, 0xff)),
             });
+        RefreshSourceReadouts();
+    }
+
+    /// <summary>Checkbox label "value column · name" — the value TextBlock is filled per tick.</summary>
+    private StackPanel SourceLabel(string name, double valueWidth, out TextBlock value)
+    {
+        value = new TextBlock
+        {
+            Text = "—",
+            FontFamily = (FontFamily)FindResource("Mono"),
+            FontSize = 11,
+            Foreground = new SolidColorBrush(Color.FromArgb(0x8c, 0xff, 0xff, 0xff)),
+            MinWidth = valueWidth,
+            TextAlignment = TextAlignment.Right,
+            Margin = new Thickness(0, 0, 8, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        var panel = new StackPanel { Orientation = Orientation.Horizontal };
+        panel.Children.Add(value);
+        panel.Children.Add(new TextBlock { Text = name, VerticalAlignment = VerticalAlignment.Center });
+        return panel;
+    }
+
+    private void RefreshSourceReadouts()
+    {
+        foreach (var (tb, id) in _sensorReadouts)
+            tb.Text = _hw.ReadValue(id) is double v ? Inv($"{v:0.0}°") : "—";
+        foreach (var (tb, id) in _controlReadouts)
+            tb.Text = _hw.ReadControlRpm(id) is double r ? Inv($"{r:0} rpm") : "—";
     }
 
     // The horizontal-only scrollers around the sensor/header lists would swallow the
@@ -424,6 +462,7 @@ public partial class MainWindow : Window
             UpdateHero();
             UpdateDetail();
             UpdateChip();
+            if (_devMode) RefreshSourceReadouts();
 
             _tray.SetStatus("Fan Curves — " + string.Join(" · ", statuses.Select(t =>
                 $"{(double.IsNaN(t.EffectiveTemp) ? "?" : Inv($"{t.EffectiveTemp:0}°"))}→{t.OutputPercent:0}%")));
