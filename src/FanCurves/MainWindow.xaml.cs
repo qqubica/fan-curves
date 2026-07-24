@@ -345,7 +345,7 @@ public partial class MainWindow : Window
         _sensorReadouts.Clear();
         foreach (var s in _hw.Sensors.Where(s => s.Kind == "temp"))
         {
-            var cb = new CheckBox { Content = SourceLabel(s.Name, 42, out var val), IsChecked = ch.SensorIds.Contains(s.Id), Tag = s.Id };
+            var cb = new CheckBox { Content = SourceLabel(s.Name, 46, out var val), IsChecked = ch.SensorIds.Contains(s.Id), Tag = s.Id };
             _sensorReadouts.Add((val, s.Id));
             cb.Checked += (_, _) => { if (!ch.SensorIds.Contains(s.Id)) ch.SensorIds.Add(s.Id); _profile.Save(); };
             cb.Unchecked += (_, _) => { ch.SensorIds.Remove(s.Id); _profile.Save(); };
@@ -355,7 +355,7 @@ public partial class MainWindow : Window
         _controlReadouts.Clear();
         foreach (var c in _hw.Controls)
         {
-            var cb = new CheckBox { Content = SourceLabel(c.Name, 58, out var val), IsChecked = ch.ControlIds.Contains(c.Id), Tag = c.Id };
+            var cb = new CheckBox { Content = SourceLabel(c.Name, 62, out var val), IsChecked = ch.ControlIds.Contains(c.Id), Tag = c.Id };
             _controlReadouts.Add((val, c.Id));
             cb.Checked += (_, _) => { if (!ch.ControlIds.Contains(c.Id)) ch.ControlIds.Add(c.Id); _profile.Save(); };
             cb.Unchecked += (_, _) => { ch.ControlIds.Remove(c.Id); _hw.ReleaseControl(c.Id); _profile.Save(); };
@@ -370,14 +370,16 @@ public partial class MainWindow : Window
         RefreshSourceReadouts();
     }
 
-    /// <summary>Checkbox label "value column · name" — the value TextBlock is filled per tick.</summary>
+    /// <summary>Checkbox label "value column · name" — the value TextBlock is filled per tick.
+    /// The whole row runs in the mono font so value and name read as one line.</summary>
     private StackPanel SourceLabel(string name, double valueWidth, out TextBlock value)
     {
+        var mono = (FontFamily)FindResource("Mono");
         value = new TextBlock
         {
             Text = "—",
-            FontFamily = (FontFamily)FindResource("Mono"),
-            FontSize = 11,
+            FontFamily = mono,
+            FontSize = 11.5,
             Foreground = new SolidColorBrush(Color.FromArgb(0x8c, 0xff, 0xff, 0xff)),
             MinWidth = valueWidth,
             TextAlignment = TextAlignment.Right,
@@ -386,7 +388,13 @@ public partial class MainWindow : Window
         };
         var panel = new StackPanel { Orientation = Orientation.Horizontal };
         panel.Children.Add(value);
-        panel.Children.Add(new TextBlock { Text = name, VerticalAlignment = VerticalAlignment.Center });
+        panel.Children.Add(new TextBlock
+        {
+            Text = name,
+            FontFamily = mono,
+            FontSize = 11.5,
+            VerticalAlignment = VerticalAlignment.Center,
+        });
         return panel;
     }
 
