@@ -33,7 +33,15 @@ public record ChannelStatus(
     double? Watts = null,      // instantaneous channel power draw (power control only)
     double? WattsAvg = null,   // sustained power average — the demand signal
     double BudgetJoules = 0,   // energy credit left before the budget ceiling
-    double MassJPerC = 0);     // learned thermal mass
+    double MassJPerC = 0,      // learned thermal mass
+    // ---- the rest is thermal-budget telemetry for the developer panel ----
+    double TauSeconds = double.PositiveInfinity, // predicted headroom before the ceiling
+    double DemandLevel = 0,    // ladder level the sustained power average asks for
+    double TrendTempC = double.NaN, // sink-trend temp the budget is measured from
+    double CeilingC = 0,       // budget ceiling in force (override − margin)
+    double SlopeCPerSec = 0,   // measured warming/cooling slope of the trend
+    double BaseTempC = 0,      // learned cool-idle baseline
+    double ResistanceCPerW = 0); // learned cooling resistance at the commanded %
 
 /// <summary>
 /// Ticks roughly once a second (jittered ±15% so sampling never phase-locks onto
@@ -96,6 +104,25 @@ public class FanEngine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Throw away everything the thermal models have learned (live controllers and the
+    /// values persisted in the profile) and start again from the seeds. Control state —
+    /// current level, slew position, fuse — is untouched, so the fans do not jump.
+    /// </summary>
+    public void ResetThermalModels()
+    {
+        lock (_lock)
+        {
+            foreach (var b in _budgets.Values) b.Model.Reset();
+            foreach (var ch in Profile.Channels)
+            {
+                ch.LearnedThermalMassJPerC = 0;
+                ch.LearnedBaseTempC = 0;
+                ch.LearnedResistances.Clear();
+            }
+        }
+    }
+
     private void StopApplyingControlsNotIn(Profile p)
     {
         var keep = p.Channels.SelectMany(c => c.ControlIds).ToHashSet();
@@ -142,6 +169,9 @@ public class FanEngine : IDisposable
                 double effectiveTemp = double.NaN;
                 double? wattsAvg = null;
                 double budgetJoules = 0, massJPerC = 0;
+                double tauSeconds = double.PositiveInfinity, demandLevel = 0;
+                double trendTempC = double.NaN, ceilingC = 0, slopeCPerSec = 0;
+                double baseTempC = 0, resistanceCPerW = 0;
                 if (temp.HasValue)
                 {
                     var curve = new FanCurve(ch.Points);
@@ -162,6 +192,14 @@ public class FanEngine : IDisposable
                         budget.PowerAveragingSeconds = Profile.PowerAveragingSeconds;
                         budget.RampLeadSeconds = Profile.RampLeadSeconds;
                         budget.OverrideTempC = Profile.OverrideTempC;
+                        budget.CeilingMarginC = Profile.BudgetCeilingMarginC;
+                        budget.SteadyTargetMarginC = Profile.SteadyTargetMarginC;
+                        budget.TrendAvgSeconds = Profile.PowerTrendSeconds;
+                        budget.SlopeWindowSeconds = Profile.PowerSlopeSeconds;
+                        budget.ShortPowerSeconds = Profile.PowerNowSeconds;
+                        budget.OverrideReleaseC = Profile.OverrideReleaseC;
+                        budget.OverrideReleaseSeconds = Profile.OverrideReleaseSeconds;
+                        budget.LearningEnabled = Profile.ThermalLearningEnabled;
 
                         filtered = budget.Step(now, temp.Value, watts.Value, curve);
                         budget.Model.StoreTo(ch); // learned values ride along in the profile
@@ -169,6 +207,13 @@ public class FanEngine : IDisposable
                         wattsAvg = budget.PowerAvg;
                         budgetJoules = budget.BudgetJoules;
                         massJPerC = budget.Model.MassJPerC;
+                        tauSeconds = budget.TauSeconds;
+                        demandLevel = budget.DemandLevel;
+                        trendTempC = budget.TrendTempC;
+                        ceilingC = budget.CeilingC;
+                        slopeCPerSec = budget.SlopeCPerSec;
+                        baseTempC = budget.Model.BaseTempC;
+                        resistanceCPerW = budget.Model.R(filtered);
                         overrideActive = budget.OverrideActive;
                         output = Math.Max(ch.MinPercent, filtered);
                         targetPct = Math.Max(ch.MinPercent, budget.TargetLevel);
@@ -317,7 +362,9 @@ public class FanEngine : IDisposable
                 double? rpm = ch.ControlIds.Count > 0 ? _hw.ReadControlRpm(ch.ControlIds[0]) : null;
                 statuses.Add(new ChannelStatus(ch.Name, temp, effectiveTemp, output, rpm, applied,
                     targetPct, reason, reasonLevel, reasonSeconds,
-                    watts, wattsAvg, budgetJoules, massJPerC));
+                    watts, wattsAvg, budgetJoules, massJPerC,
+                    tauSeconds, demandLevel, trendTempC, ceilingC, slopeCPerSec,
+                    baseTempC, resistanceCPerW));
             }
 
             Ticked?.Invoke(statuses);

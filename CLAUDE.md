@@ -41,9 +41,13 @@ No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
     pops back up) — no flapping at band edges,
     slew-rate limit (%/s, default 8 up and 8 down) for gradual audible ramps.
   - `PowerBudget.cs` — `ThermalModel` (learned C / R(fan%) / base, persisted per
-    channel) + `PowerBudgetController` (power-driven control with the heatsink as
-    energy credit + the hard-override fuse) — see the thermal-budget entry in the
-    behaviour contract.
+    channel; `Reset()` returns it to the seeds, `Resistances` exposes the anchors
+    for display) + `PowerBudgetController` (power-driven control with the heatsink
+    as energy credit + the hard-override fuse). Since 2026-07-25 the controller
+    holds **no hard-coded tuning constants** — ceiling/aim margins, trend, slope
+    and live-draw windows, fuse release and the learning switch are all settable
+    properties the engine feeds from the profile each tick — see the
+    thermal-budget entry in the behaviour contract.
   - `FanEngine` — ~1 s tick, jittered (2026-07-22: each tick re-arms a one-shot timer
     with a random 850–1150 ms delay so sampling never phase-locks onto periodic system
     activity; safe because all time logic — averaging window, step-down hold, slew dt,
@@ -235,16 +239,40 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   meaningful in power mode: ladder of allowed levels + fuse fallback + why-chip
   comparison. App-level settings (don't mark "Custom"): `PowerControlEnabled`
   (default true), `PowerAveragingSeconds` (60), `RampLeadSeconds`, `OverrideTempC` —
-  dev-panel checkbox + three sliders + live `draw · avg · buffer · mass` readout;
+  dev-panel checkbox + three sliders + live `draw · avg` / `buffer · needs` / `lead`
+  readout;
   channels without power sensors keep the temp filter. Why-chip reasons: BudgetHold /
-  BudgetRamp / HardOverride. `SimulatedBackend` is now a real plant (sink 420 J/°C
+  BudgetRamp / HardOverride.
+  **Every remaining knob is exposed too (2026-07-25, "add all the new parameters to
+  be shown in developer mode")** — what used to be `private const` in
+  `PowerBudgetController` are now app-level profile settings with dev-panel sliders
+  under a `BUDGET INTERNALS` sub-header: `BudgetCeilingMarginC` (4, ceiling =
+  override − this), `SteadyTargetMarginC` (10, sustained aim; clamped in `Step` so it
+  can never sit above the ceiling), `PowerTrendSeconds` (30), `PowerSlopeSeconds`
+  (25), `PowerNowSeconds` (10), `OverrideReleaseC` (3) and `OverrideReleaseSeconds`
+  (10), plus a live `ceiling · aim` / `trend · °C/s` readout. A `LEARNED MODEL`
+  sub-header follows: `ThermalLearningEnabled` (default true — unchecking freezes the
+  model where it stands), a readout of mass / base / R-at-the-current-speed / the six
+  R anchors (read straight off `ChannelConfig`, which the engine rewrites every tick),
+  and a **Reset learned model** button (`FanEngine.ResetThermalModels()` — clears the
+  live models and the persisted values without touching control state, so the fans
+  don't jump). Dev-panel readout lines are hand-broken with `\n`: the panel fits
+  ~31 mono characters, and past that WPF wraps mid-token (`°C/W` → `°` + `C/W`).
+  The four long setting checkboxes now hold a wrapping `TextBlock` instead of a
+  string `Content` — a plain string clips at the panel edge. `SimulatedBackend` is now a real plant (sink 420 J/°C
   behind fan-dependent resistance, die rides ~0.055 °C/W above sink, power sensors
   `sim/cpu-pwr`/`sim/gpu-pwr`) so `--sim` exercises the controller honestly. All
   scenarios (burst immunity, predictive ramp, fuse with corrupt model, power step-down,
   C/R learning convergence) verified by a scratchpad console harness on 2026-07-24.
   Gotcha: don't lower `OverrideTempC` much below 90 on the 9950X3D — the ceiling is
   `Override − 4` and the steady target `Override − 10`, so 85 forces near-100% fan for
-  loads Kuba's Quiet curve holds at 81% (found in harness scenario 2).
+  loads Kuba's Quiet curve holds at 81% (found in harness scenario 2). Second harness
+  (2026-07-25, the newly exposed knobs): a bigger ceiling margin ramps earlier and
+  peaks cooler (first fan at 156/131/87 s for 4/10/20 °C), a tighter aim settles
+  higher (81/90/100 %), inverted margins clamp instead of misbehaving, extreme windows
+  stay finite — but **long trend/slope windows are the risky end**: at 120 s/120 s the
+  ramp waits until 205 s and the die reaches 89.9 °, i.e. it only just stays under the
+  fuse.
 - Changing ChannelConfig field names breaks saved `%AppData%\FanCurves\profile.json`
   (old fields silently ignored, defaults kick in) — delete it after schema changes.
 - Sensor/control IDs are backend-specific; `AutoAssign` prunes IDs the current backend

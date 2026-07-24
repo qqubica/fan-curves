@@ -654,10 +654,12 @@
                                 <Slider x:Name="FloorSlider" Minimum="0" Maximum="60" TickFrequency="5"
                                         IsSnapToTickEnabled="True" ValueChanged="OnParamChanged"/>
 
-                                <CheckBox x:Name="IdleKickCheck" Content="Stopped-fan kick (all channels)"
+                                <CheckBox x:Name="IdleKickCheck"
                                           FontSize="11.5" Foreground="#8cffffff" Margin="0,10,0,0"
                                           Checked="OnIdleKickCheckChanged" Unchecked="OnIdleKickCheckChanged"
-                                          ToolTip="Periodically spin up fans that have fully stopped, then let them stop again."/>
+                                          ToolTip="Periodically spin up fans that have fully stopped, then let them stop again.">
+                                    <TextBlock Text="Stopped-fan kick (all channels)" TextWrapping="Wrap"/>
+                                </CheckBox>
 
                                 <StackPanel Margin="0,4,0,0">
                                     <DockPanel>
@@ -685,10 +687,12 @@
                                             IsSnapToTickEnabled="True" ValueChanged="OnKickParamChanged"/>
                                 </StackPanel>
 
-                                <CheckBox x:Name="ZeroSnapCheck" Content="Stop fans instead of running slow (all channels)"
+                                <CheckBox x:Name="ZeroSnapCheck"
                                           FontSize="11.5" Foreground="#8cffffff" Margin="0,10,0,0"
                                           Checked="OnZeroSnapCheckChanged" Unchecked="OnZeroSnapCheckChanged"
-                                          ToolTip="Any curve target below the threshold runs the fan at 0% instead — meaningful speed or fully stopped, never a slow crawl."/>
+                                          ToolTip="Any curve target below the threshold runs the fan at 0% instead — meaningful speed or fully stopped, never a slow crawl.">
+                                    <TextBlock Text="Stop fans instead of running slow (all channels)" TextWrapping="Wrap"/>
+                                </CheckBox>
 
                                 <StackPanel Margin="0,4,0,0">
                                     <DockPanel>
@@ -700,10 +704,12 @@
                                             IsSnapToTickEnabled="True" ValueChanged="OnZeroSnapParamChanged"/>
                                 </StackPanel>
 
-                                <CheckBox x:Name="StopProbeCheck" Content="Trial-stop fans when temps are stable (all channels)"
+                                <CheckBox x:Name="StopProbeCheck"
                                           FontSize="11.5" Foreground="#8cffffff" Margin="0,10,0,0"
                                           Checked="OnStopProbeCheckChanged" Unchecked="OnStopProbeCheckChanged"
-                                          ToolTip="After a fan has run steadily with a stable temperature, stop it as a trial — if the temperature starts climbing, curve control resumes at once; if it stays flat or falls, the fan simply stays off."/>
+                                          ToolTip="After a fan has run steadily with a stable temperature, stop it as a trial — if the temperature starts climbing, curve control resumes at once; if it stays flat or falls, the fan simply stays off.">
+                                    <TextBlock Text="Trial-stop fans when temps are stable (all channels)" TextWrapping="Wrap"/>
+                                </CheckBox>
 
                                 <StackPanel Margin="0,4,0,0">
                                     <DockPanel>
@@ -739,10 +745,12 @@
                                             IsSnapToTickEnabled="True" ValueChanged="OnStopProbeParamChanged"/>
                                 </StackPanel>
 
-                                <CheckBox x:Name="PowerCtlCheck" Content="Thermal-budget control from power draw (channels with a power sensor)"
+                                <CheckBox x:Name="PowerCtlCheck"
                                           FontSize="11.5" Foreground="#8cffffff" Margin="0,10,0,0"
                                           Checked="OnPowerCtlCheckChanged" Unchecked="OnPowerCtlCheckChanged"
-                                          ToolTip="Drive fans from measured power instead of temperature: the heatsink's thermal mass works as a credit — short bursts soak into the metal and the fans stay put; they ramp only when the predicted headroom runs low. The hard override below always steps in before throttling."/>
+                                          ToolTip="Drive fans from measured power instead of temperature: the heatsink's thermal mass works as a credit — short bursts soak into the metal and the fans stay put; they ramp only when the predicted headroom runs low. The hard override below always steps in before throttling.">
+                                    <TextBlock Text="Thermal-budget control from power draw (channels with a power sensor)" TextWrapping="Wrap"/>
+                                </CheckBox>
 
                                 <StackPanel Margin="0,4,0,0">
                                     <DockPanel>
@@ -771,6 +779,89 @@
 
                                     <TextBlock x:Name="PowerInfoText" FontFamily="{StaticResource Mono}" FontSize="10.5"
                                                Foreground="#66ffffff" TextWrapping="Wrap" Margin="0,-4,0,0"/>
+
+                                    <!-- The budget's own geometry: where the ceiling sits, how the
+                                         trend/slope/draw windows are measured, how the fuse lets go. -->
+                                    <TextBlock local:Tracked.Text="BUDGET INTERNALS" Style="{StaticResource MicroLabel}"
+                                               Margin="0,14,0,6"/>
+
+                                    <DockPanel ToolTip="The credit E = mass × (ceiling − temp) is measured against this ceiling, which sits below the hard override — the buffer is never spent all the way into the fuse.">
+                                        <TextBlock DockPanel.Dock="Right" x:Name="CeilingMarginValue" FontFamily="{StaticResource Mono}"
+                                                   FontSize="12" Foreground="#f2f2f4"/>
+                                        <TextBlock Text="Buffer ceiling below override" FontSize="12" Foreground="#99ffffff"/>
+                                    </DockPanel>
+                                    <Slider x:Name="CeilingMarginSlider" Minimum="1" Maximum="20" TickFrequency="0.5"
+                                            IsSnapToTickEnabled="True" ValueChanged="OnBudgetParamChanged"/>
+
+                                    <DockPanel ToolTip="Where sustained load is aimed to settle: the fan level is chosen so the predicted equilibrium temperature at the current wattage lands here. Never above the ceiling.">
+                                        <TextBlock DockPanel.Dock="Right" x:Name="SteadyMarginValue" FontFamily="{StaticResource Mono}"
+                                                   FontSize="12" Foreground="#f2f2f4"/>
+                                        <TextBlock Text="Sustained aim below override" FontSize="12" Foreground="#99ffffff"/>
+                                    </DockPanel>
+                                    <Slider x:Name="SteadyMarginSlider" Minimum="2" Maximum="30" TickFrequency="0.5"
+                                            IsSnapToTickEnabled="True" ValueChanged="OnBudgetParamChanged"/>
+
+                                    <DockPanel ToolTip="Short average standing in for the heatsink's temperature: long enough to ignore the die's instant jump when load starts, short enough to track the metal warming up.">
+                                        <TextBlock DockPanel.Dock="Right" x:Name="TrendWindowValue" FontFamily="{StaticResource Mono}"
+                                                   FontSize="12" Foreground="#f2f2f4"/>
+                                        <TextBlock Text="Sink trend window" FontSize="12" Foreground="#99ffffff"/>
+                                    </DockPanel>
+                                    <Slider x:Name="TrendWindowSlider" Minimum="5" Maximum="120" TickFrequency="5"
+                                            IsSnapToTickEnabled="True" ValueChanged="OnBudgetParamChanged"/>
+
+                                    <DockPanel ToolTip="How far back the warming rate (°C/s) is fitted. Longer is steadier but reacts later; the rate gives the measured half of the time-to-ceiling estimate.">
+                                        <TextBlock DockPanel.Dock="Right" x:Name="SlopeWindowValue" FontFamily="{StaticResource Mono}"
+                                                   FontSize="12" Foreground="#f2f2f4"/>
+                                        <TextBlock Text="Warming-rate window" FontSize="12" Foreground="#99ffffff"/>
+                                    </DockPanel>
+                                    <Slider x:Name="SlopeWindowSlider" Minimum="10" Maximum="120" TickFrequency="5"
+                                            IsSnapToTickEnabled="True" ValueChanged="OnBudgetParamChanged"/>
+
+                                    <DockPanel ToolTip="Window of the &quot;drawing now&quot; power figure, which decides how fast the buffer is being spent. Separate from the sustained average above, which decides what the fan must ultimately handle.">
+                                        <TextBlock DockPanel.Dock="Right" x:Name="PowerNowValue" FontFamily="{StaticResource Mono}"
+                                                   FontSize="12" Foreground="#f2f2f4"/>
+                                        <TextBlock Text="Live draw window" FontSize="12" Foreground="#99ffffff"/>
+                                    </DockPanel>
+                                    <Slider x:Name="PowerNowSlider" Minimum="2" Maximum="60" TickFrequency="1"
+                                            IsSnapToTickEnabled="True" ValueChanged="OnBudgetParamChanged"/>
+
+                                    <DockPanel ToolTip="How far the die must fall below the override temperature before the fuse is allowed to let go.">
+                                        <TextBlock DockPanel.Dock="Right" x:Name="ReleaseDropValue" FontFamily="{StaticResource Mono}"
+                                                   FontSize="12" Foreground="#f2f2f4"/>
+                                        <TextBlock Text="Override release drop" FontSize="12" Foreground="#99ffffff"/>
+                                    </DockPanel>
+                                    <Slider x:Name="ReleaseDropSlider" Minimum="0.5" Maximum="15" TickFrequency="0.5"
+                                            IsSnapToTickEnabled="True" ValueChanged="OnBudgetParamChanged"/>
+
+                                    <DockPanel ToolTip="…and how long it must stay down there. Until both hold, the temperature curve keeps driving the fan directly.">
+                                        <TextBlock DockPanel.Dock="Right" x:Name="ReleaseHoldValue" FontFamily="{StaticResource Mono}"
+                                                   FontSize="12" Foreground="#f2f2f4"/>
+                                        <TextBlock Text="Override release hold" FontSize="12" Foreground="#99ffffff"/>
+                                    </DockPanel>
+                                    <Slider x:Name="ReleaseHoldSlider" Minimum="2" Maximum="120" TickFrequency="1"
+                                            IsSnapToTickEnabled="True" ValueChanged="OnBudgetParamChanged"/>
+
+                                    <TextBlock x:Name="BudgetInfoText" FontFamily="{StaticResource Mono}" FontSize="10.5"
+                                               Foreground="#66ffffff" TextWrapping="Wrap" Margin="0,-4,0,0"/>
+
+                                    <!-- What the controller has worked out about this cooler. -->
+                                    <TextBlock local:Tracked.Text="LEARNED MODEL" Style="{StaticResource MicroLabel}"
+                                               Margin="0,14,0,6"/>
+
+                                    <CheckBox x:Name="LearnCheck"
+                                              FontSize="11.5" Foreground="#8cffffff"
+                                              Checked="OnLearnCheckChanged" Unchecked="OnLearnCheckChanged"
+                                              ToolTip="The controller refines the thermal mass, the cooling resistance at each fan speed and the idle baseline from what it observes. Uncheck to freeze the model at today's values.">
+                                        <TextBlock Text="Keep learning this cooler (mass, resistance, baseline)" TextWrapping="Wrap"/>
+                                    </CheckBox>
+
+                                    <TextBlock x:Name="ModelInfoText" FontFamily="{StaticResource Mono}" FontSize="10.5"
+                                               Foreground="#66ffffff" TextWrapping="Wrap" Margin="0,6,0,0"/>
+
+                                    <Button x:Name="ResetModelButton" Content="Reset learned model"
+                                            Click="OnResetThermalModel" Padding="10,5" FontSize="11.5"
+                                            HorizontalAlignment="Left" Margin="0,8,0,0"
+                                            ToolTip="Drop everything learned on every channel and start again from the seed values (NH-D15-class cooler)."/>
                                 </StackPanel>
 
                                 <Border Height="1" Background="#14ffffff" Margin="0,10,0,16"/>

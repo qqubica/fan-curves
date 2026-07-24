@@ -82,6 +82,7 @@ public partial class MainWindow : Window
         ZeroSnapCheck.IsChecked = profile.ZeroSnapEnabled;
         StopProbeCheck.IsChecked = profile.StopProbeEnabled;
         PowerCtlCheck.IsChecked = profile.PowerControlEnabled;
+        LearnCheck.IsChecked = profile.ThermalLearningEnabled;
         _loadingUi = true;
         KickIdleSlider.Value = profile.IdleKickStoppedSeconds;
         KickSpeedSlider.Value = profile.IdleKickPercent;
@@ -94,11 +95,19 @@ public partial class MainWindow : Window
         PowerAvgSlider.Value = profile.PowerAveragingSeconds;
         RampLeadSlider.Value = profile.RampLeadSeconds;
         OverrideSlider.Value = profile.OverrideTempC;
+        CeilingMarginSlider.Value = profile.BudgetCeilingMarginC;
+        SteadyMarginSlider.Value = profile.SteadyTargetMarginC;
+        TrendWindowSlider.Value = profile.PowerTrendSeconds;
+        SlopeWindowSlider.Value = profile.PowerSlopeSeconds;
+        PowerNowSlider.Value = profile.PowerNowSeconds;
+        ReleaseDropSlider.Value = profile.OverrideReleaseC;
+        ReleaseHoldSlider.Value = profile.OverrideReleaseSeconds;
         _loadingUi = false;
         UpdateKickLabels();
         UpdateZeroSnapLabel();
         UpdateStopProbeLabels();
         UpdatePowerLabels();
+        UpdateBudgetLabels();
         SimTag.Visibility = hw.IsSimulated ? Visibility.Visible : Visibility.Collapsed;
 
         foreach (var ch in _profile.Channels)
@@ -348,6 +357,11 @@ public partial class MainWindow : Window
         UpdateParamLabels(ch);
         UpdateHero();
         UpdateDetail();
+        // The three power readouts are per-channel — repaint them now instead of
+        // leaving the previous channel's numbers up until the next tick.
+        UpdatePowerInfo();
+        UpdateBudgetInfo();
+        UpdateModelInfo();
     }
 
     private void RebuildSourceChecks(ChannelConfig ch)
@@ -491,7 +505,13 @@ public partial class MainWindow : Window
             UpdateHero();
             UpdateDetail();
             UpdateChip();
-            if (_devMode) { RefreshSourceReadouts(); UpdatePowerInfo(); }
+            if (_devMode)
+            {
+                RefreshSourceReadouts();
+                UpdatePowerInfo();
+                UpdateBudgetInfo();
+                UpdateModelInfo();
+            }
 
             // The thermal model learns continuously; park it in profile.json every
             // ~5 min so a restart doesn't forget the day's learning.
@@ -720,8 +740,49 @@ public partial class MainWindow : Window
         OverrideValue.Text = Inv($"{_profile.OverrideTempC:0} °C");
     }
 
-    /// <summary>Live line under the power sliders: draw, buffer and learned mass of the
-    /// selected channel (or why power control is not active for it).</summary>
+    private void OnBudgetParamChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        // Fires mid-XAML-parse (setting Minimum) and from the constructor — both guarded.
+        if (!IsLoaded || _loadingUi) return;
+        _profile.BudgetCeilingMarginC = CeilingMarginSlider.Value;
+        _profile.SteadyTargetMarginC = SteadyMarginSlider.Value;
+        _profile.PowerTrendSeconds = TrendWindowSlider.Value;
+        _profile.PowerSlopeSeconds = SlopeWindowSlider.Value;
+        _profile.PowerNowSeconds = PowerNowSlider.Value;
+        _profile.OverrideReleaseC = ReleaseDropSlider.Value;
+        _profile.OverrideReleaseSeconds = ReleaseHoldSlider.Value;
+        UpdateBudgetLabels();
+        _profile.Save();
+    }
+
+    private void UpdateBudgetLabels()
+    {
+        CeilingMarginValue.Text = Inv($"{_profile.BudgetCeilingMarginC:0.#} °C");
+        SteadyMarginValue.Text = Inv($"{_profile.SteadyTargetMarginC:0.#} °C");
+        TrendWindowValue.Text = FormatAvg(_profile.PowerTrendSeconds);
+        SlopeWindowValue.Text = FormatAvg(_profile.PowerSlopeSeconds);
+        PowerNowValue.Text = FormatAvg(_profile.PowerNowSeconds);
+        ReleaseDropValue.Text = Inv($"{_profile.OverrideReleaseC:0.#} °C");
+        ReleaseHoldValue.Text = Inv($"{_profile.OverrideReleaseSeconds:0} s");
+    }
+
+    private void OnLearnCheckChanged(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded) return; // constructor sets IsChecked from the profile
+        _profile.ThermalLearningEnabled = LearnCheck.IsChecked == true;
+        _profile.Save();
+    }
+
+    /// <summary>Forget the learned physics on every channel — live and persisted.</summary>
+    private void OnResetThermalModel(object sender, RoutedEventArgs e)
+    {
+        _engine.ResetThermalModels();
+        _profile.Save();
+        UpdateModelInfo();
+    }
+
+    /// <summary>Live line under the power sliders: draw, buffer and predicted headroom of
+    /// the selected channel (or why power control is not active for it).</summary>
     private void UpdatePowerInfo()
     {
         var s = SelectedStatus;
@@ -729,7 +790,48 @@ public partial class MainWindow : Window
             s == null ? "" :
             !_profile.PowerControlEnabled ? "temperature control (power control off)" :
             s.Watts is not double w ? "temperature control — no power sensor assigned" :
-            Inv($"draw {w:0} W · avg {s.WattsAvg ?? 0:0} W · buffer {s.BudgetJoules / 1000:0.0} kJ · mass {s.MassJPerC:0} J/°C");
+            Inv($"draw {w:0} W · avg {s.WattsAvg ?? 0:0} W\nbuffer {s.BudgetJoules / 1000:0.0} kJ · needs {s.DemandLevel:0}%\nlead {FormatTau(s.TauSeconds)}");
+    }
+
+    /// <summary>Where the ceiling and the sustained aim actually sit, and how the sink
+    /// trend is moving toward them — the numbers the sliders above shift.</summary>
+    private void UpdateBudgetInfo()
+    {
+        var s = SelectedStatus;
+        if (s?.Watts is not double || !_profile.PowerControlEnabled)
+        {
+            BudgetInfoText.Text = "";
+            return;
+        }
+        double aim = _profile.OverrideTempC -
+            Math.Max(_profile.SteadyTargetMarginC, _profile.BudgetCeilingMarginC);
+        string trend = double.IsNaN(s.TrendTempC) ? "—" : Inv($"{s.TrendTempC:0.0}°");
+        BudgetInfoText.Text =
+            Inv($"ceiling {s.CeilingC:0}° · aim {aim:0}°\ntrend {trend} {(s.SlopeCPerSec < 0 ? "−" : "+")}{Math.Abs(s.SlopeCPerSec):0.00} °C/s");
+    }
+
+    /// <summary>What the controller has worked out about the selected channel's cooler:
+    /// thermal mass, idle baseline and the cooling-resistance anchors.</summary>
+    private void UpdateModelInfo()
+    {
+        var ch = SelectedChannel;
+        var s = SelectedStatus;
+        if (ch == null) { ModelInfoText.Text = ""; return; }
+        var r = ch.LearnedResistances;
+        if (ch.LearnedThermalMassJPerC <= 0 || r.Count != ThermalModel.AnchorPercents.Length)
+        {
+            ModelInfoText.Text = "nothing learned yet — seed values in use";
+            return;
+        }
+        // Short lines on purpose: the panel is 272 px wide and the mono font wraps
+        // mid-token, so anything longer than ~36 characters comes out broken.
+        string now = s?.Watts is double && s.ResistanceCPerW > 0
+            ? Inv($"\nnow {s.ResistanceCPerW:0.00} °C/W at {s.OutputPercent:0}% fan")
+            : "";
+        ModelInfoText.Text =
+            Inv($"mass {ch.LearnedThermalMassJPerC:0} J/°C · base {ch.LearnedBaseTempC:0.0}°{now}") +
+            "\nR at 0 20 40 60 80 100% fan:\n  " +
+            string.Join(" ", r.Select(v => v.ToString("0.00", CultureInfo.InvariantCulture)));
     }
 
     private void OnAutostartCheckChanged(object sender, RoutedEventArgs e)

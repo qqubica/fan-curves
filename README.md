@@ -95,8 +95,11 @@ the BIOS.
 - **Developer** (top-bar toggle or `--dev`): edit curve points by dragging
   (double-click to add, right-click to remove, Ctrl+Z/Y undo/redo), tune the
   averaging window / hysteresis / hold / slew per channel, configure
-  thermal-budget control (power averaging, ramp lead, override temperature —
-  with a live readout of draw, buffer and learned mass), assign temperature /
+  thermal-budget control down to its internals (power averaging, ramp lead,
+  override temperature, buffer ceiling, sustained aim, trend / warming-rate /
+  live-draw windows, fuse release — with live readouts of draw, buffer,
+  predicted headroom and the learned cooler model, which you can freeze or
+  reset), assign temperature /
   power sensors and headers manually, and watch a 10-minute history strip of
   average temp, raw temp, and commanded fan % — including markers for every
   fan stop/start.

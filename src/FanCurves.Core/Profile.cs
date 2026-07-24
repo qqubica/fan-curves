@@ -67,6 +67,23 @@ public class Profile
     public double RampLeadSeconds { get; set; } = 45;
     /// <summary>Fuse: at/above this raw die temp the channel's temp curve takes over instantly, no slew.</summary>
     public double OverrideTempC { get; set; } = 90;
+    /// <summary>Budget ceiling = OverrideTempC − this. The credit E = C·(ceiling − temp) is
+    /// measured against it, so it is the temperature the buffer is allowed to reach.</summary>
+    public double BudgetCeilingMarginC { get; set; } = 4;
+    /// <summary>Sustained target = OverrideTempC − this: where the power average aims to settle.</summary>
+    public double SteadyTargetMarginC { get; set; } = 10;
+    /// <summary>Sink-trend window: short average that hides the die's instant jump but tracks the metal.</summary>
+    public double PowerTrendSeconds { get; set; } = 30;
+    /// <summary>Window of the least-squares slope (°C/s) used for the measured time-to-ceiling.</summary>
+    public double PowerSlopeSeconds { get; set; } = 25;
+    /// <summary>"Draw now" window — the short power average the surplus/ramp decisions use.</summary>
+    public double PowerNowSeconds { get; set; } = 10;
+    /// <summary>The fuse releases only once the raw temp sits this far under OverrideTempC.</summary>
+    public double OverrideReleaseC { get; set; } = 3;
+    /// <summary>…and has stayed there this long.</summary>
+    public double OverrideReleaseSeconds { get; set; } = 10;
+    /// <summary>When false the thermal model is frozen at its current values (no online learning).</summary>
+    public bool ThermalLearningEnabled { get; set; } = true;
     /// <summary>When true, curve targets below ZeroSnapPercent run the fan at 0% instead.</summary>
     public bool ZeroSnapEnabled { get; set; } = true;
     /// <summary>Targets above 0% but below this stop the fan — meaningful speed or nothing.</summary>

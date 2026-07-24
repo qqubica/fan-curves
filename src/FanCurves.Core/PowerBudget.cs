@@ -35,6 +35,17 @@ public class ThermalModel
             for (int i = 0; i < _r.Length; i++) _r[i] = ch.LearnedResistances[i];
     }
 
+    /// <summary>Throw the learning away and start again from the NH-D15-class seeds.</summary>
+    public void Reset()
+    {
+        MassJPerC = SeedMassJPerC;
+        BaseTempC = SeedBaseTempC;
+        for (int i = 0; i < _r.Length; i++) _r[i] = SeedR[i];
+    }
+
+    /// <summary>The resistance anchors (°C/W at 0/20/…/100 %), for display.</summary>
+    public IReadOnlyList<double> Resistances => _r;
+
     public void StoreTo(ChannelConfig ch)
     {
         ch.LearnedThermalMassJPerC = MassJPerC;
@@ -112,18 +123,25 @@ public class PowerBudgetController
     public double SlewDownPercentPerSec { get; set; } = 8;
     /// <summary>Levels above 0 but strictly below this snap to 0 (0 = disabled).</summary>
     public double ZeroSnapPercent { get; set; } = 0;
+    /// <summary>The sink-trend temperature: a short rolling average that filters the die's
+    /// instant jump on load onset but still tracks the heatsink warming.</summary>
+    public double TrendAvgSeconds { get; set; } = 30;
+    /// <summary>Window of the least-squares trend slope (°C/s).</summary>
+    public double SlopeWindowSeconds { get; set; } = 25;
+    /// <summary>Window of the "draw now" power average.</summary>
+    public double ShortPowerSeconds { get; set; } = 10;
+    /// <summary>The budget ceiling sits this far under the fuse.</summary>
+    public double CeilingMarginC { get; set; } = 4;
+    /// <summary>Sustained power aims this far under the fuse (never above the ceiling).</summary>
+    public double SteadyTargetMarginC { get; set; } = 10;
+    /// <summary>The fuse releases once the raw temp is this far below OverrideTempC…</summary>
+    public double OverrideReleaseC { get; set; } = 3;
+    /// <summary>…and has held there this long.</summary>
+    public double OverrideReleaseSeconds { get; set; } = 10;
+    /// <summary>When false the model stops refining itself (frozen at today's values).</summary>
+    public bool LearningEnabled { get; set; } = true;
 
     public ThermalModel Model { get; } = new();
-
-    // The sink-trend temperature: a short rolling average that filters the die's
-    // instant jump on load onset but still tracks the heatsink warming.
-    private const double TrendAvgSeconds = 30;
-    private const double SlopeWindowSeconds = 25;
-    private const double ShortPowerSeconds = 10;
-    private const double CeilingMarginC = 4;       // budget ceiling sits under the fuse
-    private const double SteadyTargetMarginC = 10; // sustained power aims this far under it
-    private const double OverrideReleaseC = 3;
-    private const double OverrideReleaseSeconds = 10;
 
     private readonly List<(double time, double v)> _temps = new();
     private readonly List<(double time, double v)> _powers = new();
@@ -161,6 +179,12 @@ public class PowerBudgetController
     public double PendingDownLevel { get; private set; } = double.NaN;
     /// <summary>Seconds of StepDownHoldSeconds still to wait (NaN when none is pending).</summary>
     public double DownHoldRemaining { get; private set; } = double.NaN;
+    /// <summary>Sink-trend temperature — the temperature the budget is measured from.</summary>
+    public double TrendTempC { get; private set; } = double.NaN;
+    /// <summary>Measured trend slope in °C/s (positive = warming).</summary>
+    public double SlopeCPerSec { get; private set; }
+    /// <summary>The budget ceiling in force: OverrideTempC − CeilingMarginC.</summary>
+    public double CeilingC { get; private set; }
 
     /// <param name="now">Monotonic time in seconds (same clock every call).</param>
     /// <param name="rawTemp">Raw channel temperature (max of assigned sensors).</param>
@@ -202,15 +226,20 @@ public class PowerBudgetController
 
         double ceiling = OverrideTempC - CeilingMarginC;
         BudgetJoules = Model.MassJPerC * Math.Max(0, ceiling - trendTemp);
+        TrendTempC = trendTemp;
+        CeilingC = ceiling;
 
         double slope = TrendSlope();
+        SlopeCPerSec = slope;
         double surplus = PowerNow - Model.DissipationWatts(trendTemp, _output);
         double tauEnergy = surplus > 1 ? BudgetJoules / surplus : double.PositiveInfinity;
         double tauSlope = slope > 0.005 ? (ceiling - trendTemp) / slope : double.PositiveInfinity;
         TauSeconds = Math.Min(tauEnergy, tauSlope);
 
         var ladder = Ladder(curve);
-        double steadyTarget = OverrideTempC - SteadyTargetMarginC;
+        // The sustained aim can never sit above the transient ceiling, whatever the
+        // two margins are set to — otherwise "settled" would mean "already over budget".
+        double steadyTarget = OverrideTempC - Math.Max(SteadyTargetMarginC, CeilingMarginC);
         DemandLevel = ladder[^1];
         foreach (var l in ladder)
             if (Model.BaseTempC + Model.R(l) * PowerAvg <= steadyTarget) { DemandLevel = l; break; }
@@ -273,7 +302,7 @@ public class PowerBudgetController
 
         // ---- Online learning — only with the fan settled, so the plant response
         //      isn't a mix of fan changes and power changes.
-        if (!OverrideActive && Math.Abs(_output - snapped) < 0.5 && PowerStable(now))
+        if (LearningEnabled && !OverrideActive && Math.Abs(_output - snapped) < 0.5 && PowerStable(now))
         {
             if (Math.Abs(surplus) > 15 && Math.Abs(slope) > 0.015 &&
                 Math.Sign(surplus) == Math.Sign(slope))
@@ -355,6 +384,8 @@ public class PowerBudgetController
         _lastTime = double.NaN;
         OverrideActive = false;
         EffectiveTemp = double.NaN;
+        TrendTempC = double.NaN;
+        SlopeCPerSec = 0;
         TauSeconds = double.PositiveInfinity;
     }
 }
