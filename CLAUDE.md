@@ -24,6 +24,9 @@ No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
   -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish`
   → `Compress-Archive` the exe as `FanCurves-X.Y.Z-win-x64.zip` →
   `gh release create vX.Y.Z <zip>`. publish/ and *.zip are gitignored.
+  `gh release create` makes the tag remotely — run `git fetch --tags` right
+  after, so the tag exists locally (git-solo and other history tools only see
+  local refs; the v0.1.0 tag was missed this way once).
 
 ## Layout
 
