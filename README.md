@@ -37,6 +37,37 @@ FanCurves does the same for a desktop:
 - **Stopped-fan kick** (optional, off by default): periodically spins stopped
   fans for a few seconds to keep bearings moving.
 
+## Thermal-budget control (power, not temperature)
+
+On channels with a power sensor (CPU package power is auto-assigned), FanCurves
+goes one step further than averaging temperature — it controls from **power
+draw** and treats the heatsink's thermal mass as a spendable credit:
+
+- **Power averaged over a minute** is the true measure of how much heat the
+  cooler must ultimately move; temperature is just where that heat happens to
+  be right now.
+- The app **learns your cooler's thermal mass** C (J/°C), its cooling
+  resistance at each fan speed, and its idle baseline — continuously, from
+  normal use, persisted in the profile. Knowing C it knows the energy credit
+  left before the die gets hot: `E = C · (T_ceiling − T_now)`.
+- **A short burst (a 30 s compile) never moves the fan** — its joules soak into
+  heatsink metal, and the credit comfortably covers them.
+- The fan **ramps only when the prediction says the buffer is running low**
+  (default: under 45 s of headroom left), and it steps straight to the curve
+  level whose equilibrium temperature sits back under the ceiling.
+- After the load ends the power average collapses within a minute, so fans
+  **step back down minutes earlier** than any temperature average would allow.
+- **Fuse — silence never at the price of throttling**: a parallel hard override
+  watches the raw die temperature every tick. At the override threshold
+  (default 90 °C) the channel's own temperature curve takes over *instantly*,
+  with no slew limiting, and keeps the floor until the die cools off. A wrong
+  or still-learning model can cost you some silence, never your CPU.
+
+The temperature staircase you edit stays meaningful: it supplies the ladder of
+allowed fan speeds and the fallback curve for the override. Power control can
+be turned off per app (Developer mode), and channels without a power sensor
+simply keep the temperature behaviour above.
+
 ## Download & run
 
 Grab the latest zip from [Releases](../../releases), unzip anywhere, run
@@ -63,9 +94,12 @@ the BIOS.
   Nothing to configure.
 - **Developer** (top-bar toggle or `--dev`): edit curve points by dragging
   (double-click to add, right-click to remove, Ctrl+Z/Y undo/redo), tune the
-  averaging window / hysteresis / hold / slew per channel, assign sensors and
-  headers manually, and watch a 10-minute history strip of average temp, raw
-  temp, and commanded fan % — including markers for every fan stop/start.
+  averaging window / hysteresis / hold / slew per channel, configure
+  thermal-budget control (power averaging, ramp lead, override temperature —
+  with a live readout of draw, buffer and learned mass), assign temperature /
+  power sensors and headers manually, and watch a 10-minute history strip of
+  average temp, raw temp, and commanded fan % — including markers for every
+  fan stop/start.
 
 ![FanCurves — developer mode](docs/screenshot-dev.png)
 

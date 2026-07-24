@@ -58,6 +58,12 @@ public class LhmBackend : IHardwareBackend
                         _sensors.Add(new HwSensor(id, $"{hw.Name} — {sensor.Name}", "rpm"));
                         _byId[id] = sensor;
                         break;
+                    // Package-level draw feeds the thermal-budget controller; per-core
+                    // sensors ("Core #7") would only spam the assignment list.
+                    case SensorType.Power when !sensor.Name.Contains("Core #", StringComparison.OrdinalIgnoreCase):
+                        _sensors.Add(new HwSensor(id, $"{hw.Name} — {sensor.Name}", "power"));
+                        _byId[id] = sensor;
+                        break;
                     case SensorType.Control when sensor.Control != null && !isGpu:
                         _controls.Add(new HwControl(id, $"{hw.Name} — {sensor.Name}"));
                         _controlById[id] = sensor;

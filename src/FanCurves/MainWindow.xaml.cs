@@ -32,9 +32,12 @@ public partial class MainWindow : Window
     private readonly Dictionary<ChannelConfig, List<CurvePoint>> _pointsBaseline = new();
 
     // Live readouts in the dev panel's source lists: temp before each sensor name,
-    // rpm before each fan header name. Rebuilt with the lists, refreshed per tick.
+    // watts before each power sensor, rpm before each fan header name. Rebuilt with
+    // the lists, refreshed per tick.
     private readonly List<(TextBlock Value, string Id)> _sensorReadouts = new();
+    private readonly List<(TextBlock Value, string Id)> _powerReadouts = new();
     private readonly List<(TextBlock Value, string Id)> _controlReadouts = new();
+    private int _ticksSinceModelSave; // learned thermal model → profile.json every ~5 min
 
     private static string Inv(FormattableString f) => FormattableString.Invariant(f);
 
@@ -49,6 +52,9 @@ public partial class MainWindow : Window
         s < 60 ? Inv($"{s:0} s")
         : s % 60 == 0 ? Inv($"{s / 60:0} min")
         : Inv($"{Math.Floor(s / 60):0} min {s % 60:0} s");
+
+    private static string FormatTau(double s) =>
+        double.IsInfinity(s) || s > 1800 ? "∞" : FormatAvg(Math.Max(0, s));
 
     public MainWindow(IHardwareBackend hw, FanEngine engine, Profile profile,
         bool devMode = false)
@@ -75,6 +81,7 @@ public partial class MainWindow : Window
         IdleKickCheck.IsChecked = profile.IdleKickEnabled;
         ZeroSnapCheck.IsChecked = profile.ZeroSnapEnabled;
         StopProbeCheck.IsChecked = profile.StopProbeEnabled;
+        PowerCtlCheck.IsChecked = profile.PowerControlEnabled;
         _loadingUi = true;
         KickIdleSlider.Value = profile.IdleKickStoppedSeconds;
         KickSpeedSlider.Value = profile.IdleKickPercent;
@@ -84,10 +91,14 @@ public partial class MainWindow : Window
         ProbeLenSlider.Value = profile.StopProbeSeconds;
         ProbeBandSlider.Value = profile.StopProbeStableRangeC;
         ProbeRetrySlider.Value = profile.StopProbeRetrySeconds;
+        PowerAvgSlider.Value = profile.PowerAveragingSeconds;
+        RampLeadSlider.Value = profile.RampLeadSeconds;
+        OverrideSlider.Value = profile.OverrideTempC;
         _loadingUi = false;
         UpdateKickLabels();
         UpdateZeroSnapLabel();
         UpdateStopProbeLabels();
+        UpdatePowerLabels();
         SimTag.Visibility = hw.IsSimulated ? Visibility.Visible : Visibility.Collapsed;
 
         foreach (var ch in _profile.Channels)
@@ -351,6 +362,22 @@ public partial class MainWindow : Window
             cb.Unchecked += (_, _) => { ch.SensorIds.Remove(s.Id); _profile.Save(); };
             SensorChecks.Items.Add(cb);
         }
+        PowerChecks.Items.Clear();
+        _powerReadouts.Clear();
+        foreach (var s in _hw.Sensors.Where(s => s.Kind == "power"))
+        {
+            var cb = new CheckBox { Content = SourceLabel(s.Name, 44, out var val), IsChecked = ch.PowerSensorIds.Contains(s.Id), Tag = s.Id };
+            _powerReadouts.Add((val, s.Id));
+            cb.Checked += (_, _) => { if (!ch.PowerSensorIds.Contains(s.Id)) ch.PowerSensorIds.Add(s.Id); _profile.Save(); };
+            cb.Unchecked += (_, _) => { ch.PowerSensorIds.Remove(s.Id); _profile.Save(); };
+            PowerChecks.Items.Add(cb);
+        }
+        if (!_hw.Sensors.Any(s => s.Kind == "power"))
+            PowerChecks.Items.Add(new TextBlock
+            {
+                Text = "No power sensors on this backend.",
+                Foreground = new SolidColorBrush(Color.FromArgb(0x8c, 0xff, 0xff, 0xff)),
+            });
         ControlChecks.Items.Clear();
         _controlReadouts.Clear();
         foreach (var c in _hw.Controls)
@@ -407,6 +434,8 @@ public partial class MainWindow : Window
     {
         foreach (var (tb, id) in _sensorReadouts)
             tb.Text = _hw.ReadValue(id) is double v ? Inv($"{v:0.0}°") : "—";
+        foreach (var (tb, id) in _powerReadouts)
+            tb.Text = _hw.ReadValue(id) is double w ? Inv($"{w:0} W") : "—";
         foreach (var (tb, id) in _controlReadouts)
             tb.Text = _hw.ReadControlRpm(id) is double r ? Inv($"{r:0} rpm") : "—";
     }
@@ -462,7 +491,15 @@ public partial class MainWindow : Window
             UpdateHero();
             UpdateDetail();
             UpdateChip();
-            if (_devMode) RefreshSourceReadouts();
+            if (_devMode) { RefreshSourceReadouts(); UpdatePowerInfo(); }
+
+            // The thermal model learns continuously; park it in profile.json every
+            // ~5 min so a restart doesn't forget the day's learning.
+            if (_profile.PowerControlEnabled && ++_ticksSinceModelSave >= 300)
+            {
+                _ticksSinceModelSave = 0;
+                _profile.Save();
+            }
 
             _tray.SetStatus("Fan Curves — " + string.Join(" · ", statuses.Select(t =>
                 $"{(double.IsNaN(t.EffectiveTemp) ? "?" : Inv($"{t.EffectiveTemp:0}°"))}→{t.OutputPercent:0}%")));
@@ -496,6 +533,7 @@ public partial class MainWindow : Window
         var parts = new List<string>();
         if (s.RawTemp == null) parts.Add("no temp sensor");
         else if (_devMode) parts.Add(Inv($"now {s.RawTemp:0.0}°"));
+        if (_devMode && s.Watts is double w) parts.Add(Inv($"{w:0} W"));
         if (s.Rpm is double r) parts.Add(Inv($"{r:0} rpm"));
         if (!s.Applied) parts.Add("preview — no fan header");
         DetailText.Text = string.Join(" · ", parts);
@@ -525,6 +563,13 @@ public partial class MainWindow : Window
                 Inv($"safety floor {s.OutputPercent:0}% · curve asks {s.ReasonLevel:0}%"),
             OutputReason.IdleKick => "idle kick · spinning the stopped fan briefly",
             OutputReason.StopProbe => "trial stop · resumes the moment the temp rises",
+            OutputReason.BudgetHold =>
+                Inv($"thermal buffer {s.BudgetJoules / 1000:0.0} kJ · temp curve asks {s.ReasonLevel:0}% — not needed yet"),
+            OutputReason.BudgetRamp => s.OutputPercent + 0.5 < s.TargetPercent
+                ? Inv($"buffer low · {FormatTau(s.ReasonSeconds)} headroom — ramping to {s.TargetPercent:0}%")
+                : Inv($"sustained {s.WattsAvg ?? 0:0} W needs {s.TargetPercent:0}% · temp curve asks {s.ReasonLevel:0}%"),
+            OutputReason.HardOverride =>
+                Inv($"OVERRIDE · die {s.RawTemp ?? 0:0}° ≥ {_profile.OverrideTempC:0}° — temp curve direct, no slew"),
             _ => null,
         };
         WhyChip.Visibility = why == null ? Visibility.Collapsed : Visibility.Visible;
@@ -648,6 +693,43 @@ public partial class MainWindow : Window
         ProbeLenValue.Text = FormatAvg(_profile.StopProbeSeconds);
         ProbeBandValue.Text = Inv($"{_profile.StopProbeStableRangeC:0.0} °C");
         ProbeRetryValue.Text = FormatAvg(_profile.StopProbeRetrySeconds);
+    }
+
+    private void OnPowerCtlCheckChanged(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded) return; // constructor sets IsChecked from the profile
+        _profile.PowerControlEnabled = PowerCtlCheck.IsChecked == true;
+        _profile.Save();
+    }
+
+    private void OnPowerParamChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        // Fires mid-XAML-parse (setting Minimum) and from the constructor — both guarded.
+        if (!IsLoaded || _loadingUi) return;
+        _profile.PowerAveragingSeconds = PowerAvgSlider.Value;
+        _profile.RampLeadSeconds = RampLeadSlider.Value;
+        _profile.OverrideTempC = OverrideSlider.Value;
+        UpdatePowerLabels();
+        _profile.Save();
+    }
+
+    private void UpdatePowerLabels()
+    {
+        PowerAvgValue.Text = FormatAvg(_profile.PowerAveragingSeconds);
+        RampLeadValue.Text = FormatAvg(_profile.RampLeadSeconds);
+        OverrideValue.Text = Inv($"{_profile.OverrideTempC:0} °C");
+    }
+
+    /// <summary>Live line under the power sliders: draw, buffer and learned mass of the
+    /// selected channel (or why power control is not active for it).</summary>
+    private void UpdatePowerInfo()
+    {
+        var s = SelectedStatus;
+        PowerInfoText.Text =
+            s == null ? "" :
+            !_profile.PowerControlEnabled ? "temperature control (power control off)" :
+            s.Watts is not double w ? "temperature control — no power sensor assigned" :
+            Inv($"draw {w:0} W · avg {s.WattsAvg ?? 0:0} W · buffer {s.BudgetJoules / 1000:0.0} kJ · mass {s.MassJPerC:0} J/°C");
     }
 
     private void OnAutostartCheckChanged(object sender, RoutedEventArgs e)

@@ -1,6 +1,6 @@
 namespace FanCurves.Core;
 
-public record HwSensor(string Id, string Name, string Kind); // Kind: "temp" | "rpm"
+public record HwSensor(string Id, string Name, string Kind); // Kind: "temp" | "rpm" | "power"
 public record HwControl(string Id, string Name);
 
 /// <summary>Abstraction over the machine so the app runs identically in simulation.</summary>

@@ -23,6 +23,14 @@ public class ChannelConfig
     public double StepDownHoldSeconds { get; set; } = 10;
     public double SlewUpPercentPerSec { get; set; } = 8;
     public double SlewDownPercentPerSec { get; set; } = 8;
+    /// <summary>Power sensors (watts, summed) for thermal-budget control; empty = temperature control.</summary>
+    public List<string> PowerSensorIds { get; set; } = new();
+    /// <summary>Learned thermal mass in J/°C (0 = not learned yet; see ThermalModel).</summary>
+    public double LearnedThermalMassJPerC { get; set; }
+    /// <summary>Learned cool-idle baseline temperature (0 = not learned yet).</summary>
+    public double LearnedBaseTempC { get; set; }
+    /// <summary>Learned cooling resistances in °C/W at the ThermalModel anchor speeds.</summary>
+    public List<double> LearnedResistances { get; set; } = new();
 }
 
 public class Profile
@@ -50,6 +58,15 @@ public class Profile
     public double StopProbeStableRangeC { get; set; } = 3.5;
     /// <summary>Wait after a failed trial before probing again.</summary>
     public double StopProbeRetrySeconds { get; set; } = 60;
+    /// <summary>When true, channels with a power sensor are driven by the thermal-budget
+    /// controller (power in, heatsink mass as credit) instead of the temperature filter.</summary>
+    public bool PowerControlEnabled { get; set; } = true;
+    /// <summary>Window for the sustained power average — "how much heat must actually leave".</summary>
+    public double PowerAveragingSeconds { get; set; } = 60;
+    /// <summary>Fans step up once the predicted time to exhaust the thermal buffer drops under this.</summary>
+    public double RampLeadSeconds { get; set; } = 45;
+    /// <summary>Fuse: at/above this raw die temp the channel's temp curve takes over instantly, no slew.</summary>
+    public double OverrideTempC { get; set; } = 90;
     /// <summary>When true, curve targets below ZeroSnapPercent run the fan at 0% instead.</summary>
     public bool ZeroSnapEnabled { get; set; } = true;
     /// <summary>Targets above 0% but below this stop the fan — meaningful speed or nothing.</summary>

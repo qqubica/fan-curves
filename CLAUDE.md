@@ -40,6 +40,10 @@ No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
     continuously for StepDownHoldSeconds (default 10 s; timer resets if the average
     pops back up) — no flapping at band edges,
     slew-rate limit (%/s, default 8 up and 8 down) for gradual audible ramps.
+  - `PowerBudget.cs` — `ThermalModel` (learned C / R(fan%) / base, persisted per
+    channel) + `PowerBudgetController` (power-driven control with the heatsink as
+    energy credit + the hard-override fuse) — see the thermal-budget entry in the
+    behaviour contract.
   - `FanEngine` — ~1 s tick, jittered (2026-07-22: each tick re-arms a one-shot timer
     with a random 850–1150 ms delay so sampling never phase-locks onto periodic system
     activity; safe because all time logic — averaging window, step-down hold, slew dt,
@@ -208,6 +212,39 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   State-machine scenarios verified by a scratchpad console harness on 2026-07-22
   (probe timing, in-trial rise + backoff, late rise without backoff, unstable
   temps never probe).
+- **Thermal-budget control ("control with power, not temperature", added 2026-07-24)**:
+  channels with assigned power sensors (`ChannelConfig.PowerSensorIds`, watts summed;
+  AutoAssign wires CPU package power to the CPU channel, CPU+GPU to the case channel)
+  are driven by `PowerBudgetController` in `PowerBudget.cs` instead of `ResponseFilter`.
+  Philosophy: the 60 s power average is the real dissipation demand; the heatsink's
+  thermal mass is credit — `E = C·(ceiling − trendTemp)` (trend = 30 s avg, filters the
+  die's instant jump). Fan steps UP only when predicted time-to-exhaustion
+  `min(E/surplus, headroom/slope)` drops under `Profile.RampLeadSeconds` (default 45),
+  directly to the lowest curve-ladder level whose predicted equilibrium
+  (`base + R(level)·PowerNow`) is back under the ceiling; steps DOWN one ladder level
+  per StepDownHoldSeconds once the power average no longer needs the current one —
+  after a load ends this reacts minutes before the cooling temp average would.
+  `ThermalModel` (per channel, persisted in profile.json as `LearnedThermalMassJPerC` /
+  `LearnedBaseTempC` / `LearnedResistances`, UI saves every ~5 min) learns online:
+  C from surplus-watts vs temp slope, R anchors (0/20/…/100%) + base from quasi-steady
+  points; seeds are NH-D15-class (C 450 J/°C). **Fuse**: raw temp ≥ `Profile.OverrideTempC`
+  (default 90) → the channel's own staircase evaluated on the RAW temp is written
+  instantly, no slew, output never decays while latched (release: 3° below for 10 s);
+  stop probe + idle kick are bypassed during override. Under a load that pins Tctl at
+  the fuse this degrades into exactly the hand-tuned temp staircase. The curve stays
+  meaningful in power mode: ladder of allowed levels + fuse fallback + why-chip
+  comparison. App-level settings (don't mark "Custom"): `PowerControlEnabled`
+  (default true), `PowerAveragingSeconds` (60), `RampLeadSeconds`, `OverrideTempC` —
+  dev-panel checkbox + three sliders + live `draw · avg · buffer · mass` readout;
+  channels without power sensors keep the temp filter. Why-chip reasons: BudgetHold /
+  BudgetRamp / HardOverride. `SimulatedBackend` is now a real plant (sink 420 J/°C
+  behind fan-dependent resistance, die rides ~0.055 °C/W above sink, power sensors
+  `sim/cpu-pwr`/`sim/gpu-pwr`) so `--sim` exercises the controller honestly. All
+  scenarios (burst immunity, predictive ramp, fuse with corrupt model, power step-down,
+  C/R learning convergence) verified by a scratchpad console harness on 2026-07-24.
+  Gotcha: don't lower `OverrideTempC` much below 90 on the 9950X3D — the ceiling is
+  `Override − 4` and the steady target `Override − 10`, so 85 forces near-100% fan for
+  loads Kuba's Quiet curve holds at 81% (found in harness scenario 2).
 - Changing ChannelConfig field names breaks saved `%AppData%\FanCurves\profile.json`
   (old fields silently ignored, defaults kick in) — delete it after schema changes.
 - Sensor/control IDs are backend-specific; `AutoAssign` prunes IDs the current backend

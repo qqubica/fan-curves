@@ -739,10 +739,46 @@
                                             IsSnapToTickEnabled="True" ValueChanged="OnStopProbeParamChanged"/>
                                 </StackPanel>
 
+                                <CheckBox x:Name="PowerCtlCheck" Content="Thermal-budget control from power draw (channels with a power sensor)"
+                                          FontSize="11.5" Foreground="#8cffffff" Margin="0,10,0,0"
+                                          Checked="OnPowerCtlCheckChanged" Unchecked="OnPowerCtlCheckChanged"
+                                          ToolTip="Drive fans from measured power instead of temperature: the heatsink's thermal mass works as a credit — short bursts soak into the metal and the fans stay put; they ramp only when the predicted headroom runs low. The hard override below always steps in before throttling."/>
+
+                                <StackPanel Margin="0,4,0,0">
+                                    <DockPanel>
+                                        <TextBlock DockPanel.Dock="Right" x:Name="PowerAvgValue" FontFamily="{StaticResource Mono}"
+                                                   FontSize="12" Foreground="#f2f2f4"/>
+                                        <TextBlock Text="Power averaging" FontSize="12" Foreground="#99ffffff"/>
+                                    </DockPanel>
+                                    <Slider x:Name="PowerAvgSlider" Minimum="10" Maximum="180" TickFrequency="5"
+                                            IsSnapToTickEnabled="True" ValueChanged="OnPowerParamChanged"/>
+
+                                    <DockPanel>
+                                        <TextBlock DockPanel.Dock="Right" x:Name="RampLeadValue" FontFamily="{StaticResource Mono}"
+                                                   FontSize="12" Foreground="#f2f2f4"/>
+                                        <TextBlock Text="Ramp when headroom under" FontSize="12" Foreground="#99ffffff"/>
+                                    </DockPanel>
+                                    <Slider x:Name="RampLeadSlider" Minimum="15" Maximum="300" TickFrequency="5"
+                                            IsSnapToTickEnabled="True" ValueChanged="OnPowerParamChanged"/>
+
+                                    <DockPanel>
+                                        <TextBlock DockPanel.Dock="Right" x:Name="OverrideValue" FontFamily="{StaticResource Mono}"
+                                                   FontSize="12" Foreground="#f2f2f4"/>
+                                        <TextBlock Text="Hard override above" FontSize="12" Foreground="#99ffffff"/>
+                                    </DockPanel>
+                                    <Slider x:Name="OverrideSlider" Minimum="70" Maximum="100" TickFrequency="1"
+                                            IsSnapToTickEnabled="True" ValueChanged="OnPowerParamChanged"/>
+
+                                    <TextBlock x:Name="PowerInfoText" FontFamily="{StaticResource Mono}" FontSize="10.5"
+                                               Foreground="#66ffffff" TextWrapping="Wrap" Margin="0,-4,0,0"/>
+                                </StackPanel>
+
                                 <Border Height="1" Background="#14ffffff" Margin="0,10,0,16"/>
                                 <TextBlock local:Tracked.Text="SOURCES" Style="{StaticResource MicroLabel}" Margin="0,0,0,8"/>
                                 <TextBlock Text="Temperature sensors — max wins" FontSize="11.5" Foreground="#8cffffff"/>
                                 <ItemsControl x:Name="SensorChecks" Margin="0,6,0,12"/>
+                                <TextBlock Text="Power sensors — watts summed" FontSize="11.5" Foreground="#8cffffff"/>
+                                <ItemsControl x:Name="PowerChecks" Margin="0,6,0,12"/>
                                 <TextBlock Text="Fan headers driven" FontSize="11.5" Foreground="#8cffffff"/>
                                 <ItemsControl x:Name="ControlChecks" Margin="0,6,0,12"/>
 
