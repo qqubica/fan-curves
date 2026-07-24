@@ -345,7 +345,7 @@ public partial class MainWindow : Window
         _sensorReadouts.Clear();
         foreach (var s in _hw.Sensors.Where(s => s.Kind == "temp"))
         {
-            var cb = new CheckBox { Content = SourceLabel(s.Name, 46, out var val), IsChecked = ch.SensorIds.Contains(s.Id), Tag = s.Id };
+            var cb = new CheckBox { Content = SourceLabel(s.Name, 44, out var val), IsChecked = ch.SensorIds.Contains(s.Id), Tag = s.Id };
             _sensorReadouts.Add((val, s.Id));
             cb.Checked += (_, _) => { if (!ch.SensorIds.Contains(s.Id)) ch.SensorIds.Add(s.Id); _profile.Save(); };
             cb.Unchecked += (_, _) => { ch.SensorIds.Remove(s.Id); _profile.Save(); };
@@ -355,7 +355,7 @@ public partial class MainWindow : Window
         _controlReadouts.Clear();
         foreach (var c in _hw.Controls)
         {
-            var cb = new CheckBox { Content = SourceLabel(c.Name, 62, out var val), IsChecked = ch.ControlIds.Contains(c.Id), Tag = c.Id };
+            var cb = new CheckBox { Content = SourceLabel(c.Name, 58, out var val), IsChecked = ch.ControlIds.Contains(c.Id), Tag = c.Id };
             _controlReadouts.Add((val, c.Id));
             cb.Checked += (_, _) => { if (!ch.ControlIds.Contains(c.Id)) ch.ControlIds.Add(c.Id); _profile.Save(); };
             cb.Unchecked += (_, _) => { ch.ControlIds.Remove(c.Id); _hw.ReleaseControl(c.Id); _profile.Save(); };
@@ -382,7 +382,7 @@ public partial class MainWindow : Window
             FontFamily = mono,
             FontSize = 11.5,
             Foreground = new SolidColorBrush(Color.FromArgb(0x8c, 0xff, 0xff, 0xff)),
-            TextAlignment = TextAlignment.Right,
+            TextAlignment = TextAlignment.Left,
             Margin = new Thickness(0, 0, 8, 0),
             VerticalAlignment = VerticalAlignment.Top,
         };

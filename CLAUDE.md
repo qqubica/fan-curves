@@ -89,7 +89,9 @@ No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
     non-linear slider — its Value is a notch index: 5 s steps up to 2 min, 30 s steps
     beyond; mapping in `MainWindow.AvgNotchToSeconds`), sensor/header assignment (since
     2026-07-24 each sensor row leads with its live temp and each fan-header row with its
-    live rpm — right-aligned value column, refreshed per engine tick via
+    live rpm — value column left-aligned so the reading hugs the checkbox
+    (was right-aligned through 2026-07-24; Kuba wanted the checkbox-to-value gap
+    smaller), refreshed per engine tick via
     `RefreshSourceReadouts`, "—" when unreadable; the whole row — value and name —
     renders in Cascadia Mono 11.5 after Kuba's "use uniform font" the same day; since
     later that day long names **wrap** onto extra lines so the full name is always
