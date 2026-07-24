@@ -91,7 +91,11 @@ No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
     2026-07-24 each sensor row leads with its live temp and each fan-header row with its
     live rpm — right-aligned value column, refreshed per engine tick via
     `RefreshSourceReadouts`, "—" when unreadable; the whole row — value and name —
-    renders in Cascadia Mono 11.5 after Kuba's "use uniform font" the same day), backend + config-path info. Any manual tweak marks the profile "Custom" (preset highlight
+    renders in Cascadia Mono 11.5 after Kuba's "use uniform font" the same day; since
+    later that day long names **wrap** onto extra lines so the full name is always
+    visible — the lists' horizontal scrollers are gone, and the shared CheckBox
+    template's root is a Grid with a star content column because its old horizontal
+    StackPanel measured content at infinite width and silently disabled wrapping), backend + config-path info. Any manual tweak marks the profile "Custom" (preset highlight
     clears). Presets overwrite tuning but keep sensor/header assignments
     (`Profile.AdoptTuning`).
   Dark theme, code-behind (no MVVM framework).

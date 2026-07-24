@@ -371,8 +371,9 @@ public partial class MainWindow : Window
     }
 
     /// <summary>Checkbox label "value column · name" — the value TextBlock is filled per tick.
-    /// The whole row runs in the mono font so value and name read as one line.</summary>
-    private StackPanel SourceLabel(string name, double valueWidth, out TextBlock value)
+    /// The whole row runs in the mono font so value and name read as one line; long names
+    /// wrap under themselves (value column stays fixed) so the full name is always visible.</summary>
+    private Grid SourceLabel(string name, double valueWidth, out TextBlock value)
     {
         var mono = (FontFamily)FindResource("Mono");
         value = new TextBlock
@@ -381,21 +382,25 @@ public partial class MainWindow : Window
             FontFamily = mono,
             FontSize = 11.5,
             Foreground = new SolidColorBrush(Color.FromArgb(0x8c, 0xff, 0xff, 0xff)),
-            MinWidth = valueWidth,
             TextAlignment = TextAlignment.Right,
             Margin = new Thickness(0, 0, 8, 0),
-            VerticalAlignment = VerticalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Top,
         };
-        var panel = new StackPanel { Orientation = Orientation.Horizontal };
-        panel.Children.Add(value);
-        panel.Children.Add(new TextBlock
+        var nameBlock = new TextBlock
         {
             Text = name,
             FontFamily = mono,
             FontSize = 11.5,
-            VerticalAlignment = VerticalAlignment.Center,
-        });
-        return panel;
+            TextWrapping = TextWrapping.Wrap,
+            VerticalAlignment = VerticalAlignment.Top,
+        };
+        var grid = new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(valueWidth + 8) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        Grid.SetColumn(nameBlock, 1);
+        grid.Children.Add(value);
+        grid.Children.Add(nameBlock);
+        return grid;
     }
 
     private void RefreshSourceReadouts()
@@ -404,19 +409,6 @@ public partial class MainWindow : Window
             tb.Text = _hw.ReadValue(id) is double v ? Inv($"{v:0.0}°") : "—";
         foreach (var (tb, id) in _controlReadouts)
             tb.Text = _hw.ReadControlRpm(id) is double r ? Inv($"{r:0} rpm") : "—";
-    }
-
-    // The horizontal-only scrollers around the sensor/header lists would swallow the
-    // wheel and dead-zone the dev panel's vertical scroll; hand the event to their parent.
-    private void OnHorizontalListWheel(object sender, MouseWheelEventArgs e)
-    {
-        e.Handled = true;
-        var args = new MouseWheelEventArgs(e.MouseDevice, e.Timestamp, e.Delta)
-        {
-            RoutedEvent = UIElement.MouseWheelEvent,
-            Source = sender,
-        };
-        (((FrameworkElement)sender).Parent as UIElement)?.RaiseEvent(args);
     }
 
     private void OnParamChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
