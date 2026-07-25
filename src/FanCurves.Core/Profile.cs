@@ -210,8 +210,18 @@ public class Profile
 
     public static string ConfigPath => Path.Combine(ConfigDir, "profile.json");
 
+    /// <summary>
+    /// Dev flows (--sim / --screenshot) read the real profile but must never write it:
+    /// AutoAssign prunes identifiers the simulated backend doesn't know, so a save would
+    /// wipe the machine's real sensor/header assignments — including manual ones like a
+    /// pump header, which is never auto-assigned and so never comes back. It would also
+    /// park sim-learned thermal models on real hardware.
+    /// </summary>
+    public static bool ReadOnly { get; set; }
+
     public void Save()
     {
+        if (ReadOnly) return;
         Directory.CreateDirectory(ConfigDir);
         File.WriteAllText(ConfigPath, JsonSerializer.Serialize(this, JsonOpts));
     }

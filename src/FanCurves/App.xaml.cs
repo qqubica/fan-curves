@@ -78,6 +78,11 @@ public partial class App : Application
                 System.Globalization.CultureInfo.InvariantCulture, out var after))
             screenshotAfter = Math.Clamp(after, 1, 1800);
 
+        // Keyed off the flags, not off hw.IsSimulated: an elevated launch whose kernel
+        // driver failed also lands on the simulated backend, and that profile — the
+        // user's real one — must still save its edits.
+        Profile.ReadOnly = forceSim || screenshotPath != null;
+
         var profile = Profile.LoadOrDefault();
 
         // Register start-with-Windows, except in dev flows (--sim / --screenshot)
@@ -271,7 +276,10 @@ public partial class App : Application
         try
         {
             Directory.CreateDirectory(Profile.ConfigDir);
-            string path = Path.Combine(Profile.ConfigDir, "sensors.txt");
+            // Dev flows dump beside the real one: overwriting sensors.txt with the sim's
+            // fake IDs throws away the only record of what the machine actually exposes.
+            string path = Path.Combine(Profile.ConfigDir,
+                Profile.ReadOnly ? "sensors.sim.txt" : "sensors.txt");
             var lines = new[] { $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  {hw.Description}" }
                 .Concat(hw.Sensors.Select(s =>
                     $"{s.Kind,-5} {s.Id,-45} {s.Name,-55} = {hw.ReadValue(s.Id)?.ToString("0.##") ?? "null"}"))

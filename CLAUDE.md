@@ -307,6 +307,15 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
 - Sensor/control IDs are backend-specific; `AutoAssign` prunes IDs the current backend
   doesn't know and re-assigns empty channels on every launch (a profile saved in `--sim`
   works on real hardware and vice versa).
+- **Dev flows never write the config** (`Profile.ReadOnly`, set from `--sim` /
+  `--screenshot` in `App.OnStartup`): `Save()` is a no-op and the sensor dump goes to
+  `sensors.sim.txt` instead of overwriting `sensors.txt`. Before this (bug found
+  2026-07-25) every `--sim` run rewrote the real `profile.json`: AutoAssign pruned the
+  hardware IDs the sim backend doesn't know and saved `sim/*` in their place. Auto-
+  assignable headers heal on the next real launch, but **manual assignments do not** —
+  Kuba's Pump Fan header (never auto-assigned by design) was silently lost that way.
+  Keyed off the flags, not `hw.IsSimulated`, so an elevated launch that falls back to
+  simulation because the kernel driver failed still saves the user's edits.
 - Temperature display: simple mode shows only the rolling average (the thing that
   actually drives the steps) — hero numeral + segment readouts; Developer mode adds
   the raw "now" temp (white dashed line on the chart, "now …°" in the card header).
