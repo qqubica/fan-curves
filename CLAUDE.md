@@ -75,7 +75,35 @@ No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
   after Kuba's report later that day; an ongoing stop draws a live span counting
   up to "now"; no span when the stop predates the 10-min window) — added
   2026-07-22 to make the idle-kick / zero-snap cycling cadence readable.
+  Since 2026-07-25 it also draws the **budget ceiling** as a dotted reference on the
+  temp scale (power-controlled channels only).
   Left/right padding matches `CurveEditor` so the two plots align.
+  **Budget strip** (`BudgetChart.cs`, 2026-07-25, dev mode only, sits under the history
+  strip): the same 10-min window seen from the thermal-budget controller's side —
+  instantaneous power draw (faint dashed) and its sustained average (bright trace +
+  under-fill) on a **watts** scale that auto-ranges to the window's own peak
+  (`NiceWatts` ladder), against the predicted headroom `TauSeconds` (quiet line, right
+  scale in **seconds**) and a dotted `ramp lead` line = the threshold that triggers a
+  step up. Hard-override spans are shaded with a "fuse" label; hover chip reads
+  `time · draw · avg · buffer kJ · headroom · needs %` (same vocabulary as the dev
+  panel readout). No under-fill under the headroom trace — a healthy buffer pins it to
+  the top of the scale and a fill would flood the strip (tried it, looked like a solid
+  block). Channels without power sensors get a centred "no power sensor on this
+  channel" note instead of empty axes. Both strips share `StripChart.cs` (padding,
+  title, legend, time axis, hover crosshair/chip, trace + under-fill helpers) and both
+  read the same per-channel `ChannelHistory` ring, whose `HistorySample` carries the
+  budget telemetry (watts, avg, credit, tau, demand, ceiling, override flag).
+  Dev mode's fixed window grew to **1320×830** (from 1010×660) to fit the second strip
+  without squeezing the curve editor; `EnterFixed` clamps the height to the work area
+  on short screens. Hover chips take several wordings and draw the widest that fits the
+  plot (`DrawChip(dc, x, wide, narrow)`), so quarter-screen windows get a two-line chip
+  instead of one running off the edge — `FormattedText` honours `\n`. Reference labels
+  (ceiling, ramp lead) are drawn last and seated on the card colour, otherwise the
+  spiky draw trace runs straight through them.
+  Verified by a scratchpad WPF harness that renders the strips to PNG from scripted
+  histories (fuse span, hover chip, empty state, 420 px-wide window) — it pokes
+  `StripChart._hoverX` by reflection, because `SetCursorPos` cannot hover a window that
+  another window covers, and a 4 s `--sim` capture never reaches those states.
   **Why-chip (2026-07-22)**: notification-style chip in the curve chart's top-left
   corner (`WhyChip` in MainWindow.xaml, both modes) explaining why the commanded %
   differs from the curve's configured level; hidden when they match. The engine
@@ -113,8 +141,8 @@ No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
   speed-pill lookbook after "looks like 2012" feedback): borderless window with custom
   chrome (`WindowChrome`, DWM rounded corners + dark frame via `Chrome.Apply` in
   `Ui.cs`, custom caption buttons, title-bar fan glyph that spins while applying).
-  **Exactly three window sizes** (Kuba's choice 2026-07-20): the fixed 1010×660 floating
-  window, quarter-of-screen (half work-area width × height, snapped to the nearest
+  **Exactly three window sizes** (Kuba's choice 2026-07-20): the fixed floating window
+  (1010×660, 1320×830 in dev mode), quarter-of-screen (half work-area width × height, snapped to the nearest
   screen corner), and maximized — cycled in that order by the maximize caption button
   (its glyph previews the next size); drag-resize disabled
   (`ResizeMode=CanMinimize`, `ResizeBorderThickness=0`), and a `WM_GETMINMAXINFO` hook
@@ -137,7 +165,8 @@ No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
 dotnet build                                # .NET 8 SDK (installed via winget 2026-07-20)
 dotnet run --project src/FanCurves          # real hardware if elevated, else simulation
 dotnet run --project src/FanCurves -- --sim # force simulation
-dotnet run --project src/FanCurves -- --sim --screenshot out.png  # UI verify aid (4 s, then exits)
+dotnet run --project src/FanCurves -- --sim --screenshot out.png      # UI verify aid (4 s, then exits)
+dotnet run --project src/FanCurves -- --sim --screenshot out.png 330  # …after 330 s, so the strips have history
 ```
 
 `dotnet` may not be on PATH in Git Bash — use `/c/Program Files/dotnet/dotnet`.

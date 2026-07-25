@@ -68,8 +68,15 @@ public partial class App : Application
         bool devMode = e.Args.Contains("--dev");
         bool trayStart = e.Args.Contains("--tray"); // autostart entry point: hidden, applying
         string? screenshotPath = null;
+        double screenshotAfter = 4;   // seconds of ticking before the capture
         int idx = Array.IndexOf(e.Args, "--screenshot");
         if (idx >= 0 && idx + 1 < e.Args.Length) screenshotPath = e.Args[idx + 1];
+        // Optional third token: how long to let the sim run first — the history strips
+        // need minutes of samples to show anything worth capturing.
+        if (screenshotPath != null && idx + 2 < e.Args.Length &&
+            double.TryParse(e.Args[idx + 2], System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var after))
+            screenshotAfter = Math.Clamp(after, 1, 1800);
 
         var profile = Profile.LoadOrDefault();
 
@@ -122,7 +129,8 @@ public partial class App : Application
         if (screenshotPath != null)
         {
             // Dev/verify aid: let the sim engine tick a few times, capture, exit.
-            var t = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(4) };
+            var t = new System.Windows.Threading.DispatcherTimer
+                { Interval = TimeSpan.FromSeconds(screenshotAfter) };
             t.Tick += (_, _) =>
             {
                 t.Stop();

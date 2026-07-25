@@ -209,8 +209,11 @@ public partial class MainWindow : Window
     private void EnterFixed()
     {
         _sizeMode = SizeMode.Fixed;
+        var wa0 = Chrome.WorkAreaDip(this);
         Width = _devMode ? 1320 : 1010;
-        Height = 660;
+        // Developer mode stacks two strips under the curve — taller unless the screen
+        // is too short for it, in which case the strips share what there is.
+        Height = _devMode ? Math.Min(830, wa0.Height) : 660;
         var wa = Chrome.WorkAreaDip(this);
         Left = Math.Max(wa.Left, Math.Min(Left, wa.Right - Width));
         Top = Math.Max(wa.Top, Math.Min(Top, wa.Bottom - Height));
@@ -330,8 +333,12 @@ public partial class MainWindow : Window
         Editor.IsReadOnly = !_devMode;
         Editor.ShowRaw = _devMode;
         HistoryView.Visibility = _devMode ? Visibility.Visible : Visibility.Collapsed;
+        BudgetView.Visibility = _devMode ? Visibility.Visible : Visibility.Collapsed;
         DevButton.Tag = _devMode ? "on" : null;
-        if (_sizeMode == SizeMode.Fixed) Width = _devMode ? 1320 : 1010;
+        // Developer mode needs room for the panel and the two strips; the floating
+        // window grows in both directions rather than squeezing the curve editor
+        // (EnterFixed keeps the grown window inside the work area).
+        if (_sizeMode == SizeMode.Fixed) EnterFixed();
         if (_devMode) OnChannelSelected(this, null!); // sync sliders to selection
         UpdateDetail();
     }
@@ -343,6 +350,9 @@ public partial class MainWindow : Window
         int idx = ChannelList.SelectedIndex;
         HistoryView.History = idx >= 0 && idx < _histories.Count ? _histories[idx] : null;
         HistoryView.Refresh();
+        BudgetView.History = HistoryView.History;
+        BudgetView.LeadSeconds = _profile.RampLeadSeconds;
+        BudgetView.Refresh();
         if (ch == null) return;
 
         _loadingUi = true;
@@ -494,13 +504,20 @@ public partial class MainWindow : Window
             {
                 _channelVms[i].UpdateFrom(statuses[i]);
                 if (i < _histories.Count)
+                {
+                    var t = statuses[i];
                     _histories[i].Add(new HistorySample(
-                        statuses[i].RawTemp, statuses[i].EffectiveTemp, statuses[i].OutputPercent));
+                        t.RawTemp, t.EffectiveTemp, t.OutputPercent,
+                        t.Watts, t.WattsAvg, t.BudgetJoules, t.TauSeconds, t.DemandLevel,
+                        t.CeilingC, t.Reason == OutputReason.HardOverride));
+                }
             }
 
             var s = SelectedStatus;
             if (s != null) Editor.UpdateLive(s.RawTemp, s.EffectiveTemp, s.OutputPercent);
             HistoryView.Refresh();
+            BudgetView.LeadSeconds = _profile.RampLeadSeconds;
+            BudgetView.Refresh();
 
             UpdateHero();
             UpdateDetail();
@@ -730,6 +747,9 @@ public partial class MainWindow : Window
         _profile.RampLeadSeconds = RampLeadSlider.Value;
         _profile.OverrideTempC = OverrideSlider.Value;
         UpdatePowerLabels();
+        // The budget strip draws the lead as its trigger line — move it with the slider.
+        BudgetView.LeadSeconds = _profile.RampLeadSeconds;
+        BudgetView.Refresh();
         _profile.Save();
     }
 

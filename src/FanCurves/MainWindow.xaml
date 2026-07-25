@@ -533,6 +533,7 @@
                                 <RowDefinition Height="*"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
 
                             <Grid Grid.Row="0" Margin="16,14,16,4">
@@ -592,9 +593,15 @@
                                                 ClipToBounds="True" Margin="6,0,10,6"
                                                 Visibility="Collapsed"/>
 
-                            <TextBlock x:Name="EditorHint" Grid.Row="3" FontSize="10.5" Foreground="#59ffffff"
+                            <!-- Second strip: what the thermal-budget controller sees
+                                 (power draw / average vs the predicted headroom). -->
+                            <local:BudgetChart x:Name="BudgetView" Grid.Row="3" Height="142"
+                                               ClipToBounds="True" Margin="6,0,10,6"
+                                               Visibility="Collapsed"/>
+
+                            <TextBlock x:Name="EditorHint" Grid.Row="4" FontSize="10.5" Foreground="#59ffffff"
                                        Margin="18,0,18,12" TextWrapping="Wrap" Visibility="Collapsed"
-                                       Text="Drag points · double-click adds · right-click removes · Ctrl+Z undo, Ctrl+Y redo. Each point starts a flat band. Dashed line = raw temp; the dot is the 20 s average meeting the commanded fan %."/>
+                                       Text="Drag points · double-click adds · right-click removes · Ctrl+Z undo, Ctrl+Y redo. Each point starts a flat band. Dashed line = raw temp; the dot is the rolling average meeting the commanded fan %."/>
                         </Grid>
                     </Border>
 

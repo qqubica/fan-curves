@@ -1,12 +1,24 @@
-using System.Globalization;
 using System.Windows;
-using System.Windows.Input;
 using System.Windows.Media;
 
 namespace FanCurves;
 
-/// <summary>One engine tick's worth of a channel's thermal state.</summary>
-public readonly record struct HistorySample(double? RawTemp, double EffectiveTemp, double OutputPercent);
+/// <summary>
+/// One engine tick's worth of a channel's state. The temperature/output fields feed the
+/// history strip; the rest is thermal-budget telemetry for the budget strip (defaults
+/// apply on channels the budget controller does not drive).
+/// </summary>
+public readonly record struct HistorySample(
+    double? RawTemp,
+    double EffectiveTemp,
+    double OutputPercent,
+    double? Watts = null,           // instantaneous channel draw
+    double? WattsAvg = null,        // sustained average — the demand signal
+    double BudgetJoules = 0,        // energy credit left before the ceiling
+    double TauSeconds = double.PositiveInfinity, // predicted headroom
+    double DemandLevel = 0,         // ladder level the power average asks for
+    double CeilingC = 0,            // budget ceiling in force
+    bool Override = false);         // fuse latched (raw die at/over the override temp)
 
 /// <summary>Fixed ring of the last <see cref="Capacity"/> samples (~10 min at the engine's jittered ~1 s tick).</summary>
 public class ChannelHistory
@@ -35,30 +47,10 @@ public class ChannelHistory
 /// time · avg · now · % readout chip; only the newest sample carries amber (live-data-only,
 /// like the curve's operating dot).
 /// </summary>
-public class HistoryChart : FrameworkElement
+public class HistoryChart : StripChart
 {
     private const double TempMin = 15, TempMax = 100;   // same span as CurveEditor
-    private const double SecondsPerSample = 1;          // engine tick
-    // Left/right match CurveEditor's padding so the two plots align vertically.
-    private static readonly Thickness Pad = new(42, 22, 18, 20);
 
-    private static readonly Color Amber = Color.FromRgb(0xFF, 0x9E, 0x5E);
-    private static readonly Color CardBg = Color.FromRgb(0x11, 0x11, 0x16);
-
-    public ChannelHistory? History { get; set; }
-
-    private double? _hoverX;
-
-    public void Refresh() => InvalidateVisual();
-
-    private Rect Plot => new(
-        Pad.Left, Pad.Top,
-        Math.Max(10, ActualWidth - Pad.Left - Pad.Right),
-        Math.Max(10, ActualHeight - Pad.Top - Pad.Bottom));
-
-    private double PixelsPerSample => Plot.Width / (ChannelHistory.Capacity - 1);
-
-    private double XForIndex(int i, int count) => Plot.Right - (count - 1 - i) * PixelsPerSample;
     private double YForPct(double p) => Plot.Bottom - Math.Clamp(p, 0, 100) / 100.0 * Plot.Height;
     private double YForTemp(double t) =>
         Plot.Bottom - (Math.Clamp(t, TempMin, TempMax) - TempMin) / (TempMax - TempMin) * Plot.Height;
@@ -71,42 +63,14 @@ public class HistoryChart : FrameworkElement
 
         var gridPen = new Pen(new SolidColorBrush(Color.FromArgb(0x0d, 0xff, 0xff, 0xff)), 1);
         var axisPen = new Pen(new SolidColorBrush(Color.FromArgb(0x1a, 0xff, 0xff, 0xff)), 1);
-        var labelBrush = new SolidColorBrush(Color.FromArgb(0x59, 0xff, 0xff, 0xff));
-        var tf = new Typeface(new FontFamily("Cascadia Mono, Consolas"),
-            FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
 
-        FormattedText Label(string s, Brush? brush = null, double size = 10.5) => new(
-            s, CultureInfo.InvariantCulture, FlowDirection.LeftToRight, tf, size,
-            brush ?? labelBrush, 1.25);
-
-        // Hairline seam against the curve chart above + a letter-spaced strip title.
-        dc.DrawLine(new Pen(new SolidColorBrush(Color.FromArgb(0x12, 0xff, 0xff, 0xff)), 1),
-            new Point(r.Left, 0.5), new Point(r.Right, 0.5));
-        var title = new FormattedText(Tracked.Space("HISTORY"), CultureInfo.InvariantCulture,
-            FlowDirection.LeftToRight,
-            new Typeface(new FontFamily("Segoe UI Variable Text, Segoe UI"),
-                FontStyles.Normal, FontWeights.SemiBold, FontStretches.Normal),
-            9, labelBrush, 1.25);
-        dc.DrawText(title, new Point(r.Left, 7));
-
-        // Legend, top-right: swatches for the three traces (kept monochrome, pens
-        // mirror the actual trace styles so the mapping is readable at a glance).
-        double lx = r.Right;
-        void LegendItem(string text, Pen pen)
-        {
-            var t = Label(text, new SolidColorBrush(Color.FromArgb(0xa6, 0xff, 0xff, 0xff)), 10);
-            lx -= t.Width;
-            double cy = 6 + t.Height / 2;
-            dc.DrawText(t, new Point(lx, 6));
-            lx -= 22;
-            dc.DrawLine(pen, new Point(lx, cy), new Point(lx + 17, cy));
-            lx -= 18;
-        }
-        LegendItem("fan %", new Pen(new SolidColorBrush(Color.FromArgb(0x8c, 0xff, 0xff, 0xff)), 1.5));
-        LegendItem("now temp", new Pen(new SolidColorBrush(Color.FromArgb(0x66, 0xff, 0xff, 0xff)), 1)
-            { DashStyle = new DashStyle(new double[] { 3, 3 }, 0) });
-        LegendItem("avg temp", new Pen(new SolidColorBrush(Color.FromArgb(0xf0, 0xff, 0xff, 0xff)), 2)
-            { StartLineCap = PenLineCap.Round, EndLineCap = PenLineCap.Round });
+        DrawFrame(dc, "HISTORY");
+        DrawLegend(dc,
+            ("fan %", new Pen(new SolidColorBrush(Color.FromArgb(0x8c, 0xff, 0xff, 0xff)), 1.5)),
+            ("now temp", new Pen(new SolidColorBrush(Color.FromArgb(0x66, 0xff, 0xff, 0xff)), 1)
+                { DashStyle = new DashStyle(new double[] { 3, 3 }, 0) }),
+            ("avg temp", new Pen(new SolidColorBrush(Color.FromArgb(0xf0, 0xff, 0xff, 0xff)), 2)
+                { StartLineCap = PenLineCap.Round, EndLineCap = PenLineCap.Round }));
 
         // Sparse horizontal grid on the % scale, labels on the left axis like the curve chart.
         for (double pct = 0; pct <= 100; pct += 50)
@@ -125,32 +89,23 @@ public class HistoryChart : FrameworkElement
             dc.DrawText(t, new Point(r.Right - t.Width - 4, YForTemp(temp) - t.Height / 2));
         }
 
-        // Time axis: right edge is now, ticks every 5 minutes into the past.
-        for (int s = 0; s <= 600; s += 300)
-        {
-            double x = r.Right - s / SecondsPerSample * PixelsPerSample;
-            var t = Label(s == 0 ? "now" : Inv($"−{s / 60}:00"));
-            dc.DrawText(t, new Point(
-                Math.Clamp(x - t.Width / 2, r.Left, r.Right - t.Width), r.Bottom + 5));
-        }
-
         var h = History;
         if (h == null || h.Count == 0) return;
         int count = h.Count;
 
+        // Budget ceiling (power control only): the temperature the thermal credit is
+        // measured against — the trace approaching it is what makes the fans step up.
+        // (its label goes on last, over the traces)
+        double ceiling = h[count - 1].CeilingC;
+        if (ceiling > 0)
+            dc.DrawLine(new Pen(new SolidColorBrush(Color.FromArgb(0x2e, 0xff, 0xff, 0xff)), 1)
+                { DashStyle = new DashStyle(new double[] { 1, 4 }, 0) },
+                new Point(r.Left, YForTemp(ceiling)), new Point(r.Right, YForTemp(ceiling)));
+
         // Fan % trace: soft under-fill + a quiet line (same treatment as the curve's band fill).
-        var pctGeo = new StreamGeometry();
-        using (var ctx = pctGeo.Open())
-        {
-            ctx.BeginFigure(new Point(XForIndex(0, count), r.Bottom), true, true);
-            for (int i = 0; i < count; i++)
-                ctx.LineTo(new Point(XForIndex(i, count), YForPct(h[i].OutputPercent)), true, false);
-            ctx.LineTo(new Point(r.Right, r.Bottom), false, false);
-        }
-        pctGeo.Freeze();
-        dc.DrawGeometry(new LinearGradientBrush(
+        DrawUnderFill(dc, count, i => YForPct(h[i].OutputPercent), new LinearGradientBrush(
             Color.FromArgb(0x12, 0xff, 0xff, 0xff), Color.FromArgb(0x02, 0xff, 0xff, 0xff),
-            new Point(0, 0), new Point(0, 1)), null, pctGeo);
+            new Point(0, 0), new Point(0, 1)));
         DrawTrace(dc, count, i => YForPct(h[i].OutputPercent),
             new Pen(new SolidColorBrush(Color.FromArgb(0x66, 0xff, 0xff, 0xff)), 1.5));
 
@@ -228,6 +183,12 @@ public class HistoryChart : FrameworkElement
             }
         }
 
+        if (ceiling > 0)
+        {
+            var t = Label(Inv($"ceiling {ceiling:0}°"), tempRefBrush, 9.5);
+            DrawSeatedText(dc, t, new Point(r.Left + 4, YForTemp(ceiling) - t.Height - 1));
+        }
+
         // The newest sample is live thermal state — the one place amber is allowed here.
         var newest = h[count - 1];
         double nx = XForIndex(count - 1, count);
@@ -237,67 +198,19 @@ public class HistoryChart : FrameworkElement
         dc.DrawEllipse(amberBrush, null, new Point(nx, YForPct(newest.OutputPercent)), 2.2, 2.2);
 
         // Hover "ticket": crosshair at the nearest sample with a time · temp · % chip.
-        if (_hoverX is double hx && hx >= XForIndex(0, count) - 4 && hx <= r.Right + 4)
+        if (HoverIndex(count) is int idx)
         {
-            int idx = count - 1 - (int)Math.Round((r.Right - Math.Clamp(hx, r.Left, r.Right)) / PixelsPerSample);
-            idx = Math.Clamp(idx, 0, count - 1);
             var s = h[idx];
             double x = XForIndex(idx, count);
+            DrawCrosshair(dc, x);
+            DrawMarker(dc, new Point(x, YForPct(s.OutputPercent)));
+            if (!double.IsNaN(s.EffectiveTemp)) DrawMarker(dc, new Point(x, YForTemp(s.EffectiveTemp)));
 
-            dc.DrawLine(new Pen(new SolidColorBrush(Color.FromArgb(0x30, 0xff, 0xff, 0xff)), 1),
-                new Point(x, r.Top), new Point(x, r.Bottom));
-
-            var seat = new SolidColorBrush(CardBg);
-            void Marker(double y)
-            {
-                dc.DrawEllipse(seat, null, new Point(x, y), 4.4, 4.4);
-                dc.DrawEllipse(Brushes.White, null, new Point(x, y), 3, 3);
-            }
-            Marker(YForPct(s.OutputPercent));
-            if (!double.IsNaN(s.EffectiveTemp)) Marker(YForTemp(s.EffectiveTemp));
-
-            int ago = (int)Math.Round((count - 1 - idx) * SecondsPerSample);
-            string when = ago == 0 ? "now" : Inv($"−{ago / 60}:{ago % 60:00}");
             string avgStr = double.IsNaN(s.EffectiveTemp) ? "—" : Inv($"{s.EffectiveTemp:0.0}°");
             string rawStr = s.RawTemp is double rw ? Inv($"{rw:0.0}°") : "—";
-            var chip = Label(Inv($"{when} · avg {avgStr} · now {rawStr} · {s.OutputPercent:0}%"),
-                new SolidColorBrush(Color.FromArgb(0xf2, 0xff, 0xff, 0xff)));
-            var pos = new Point(Math.Clamp(x - chip.Width / 2, r.Left, r.Right - chip.Width), r.Top + 3);
-            dc.DrawRoundedRectangle(new SolidColorBrush(CardBg),
-                new Pen(new SolidColorBrush(Color.FromArgb(0x26, 0xff, 0xff, 0xff)), 1),
-                new Rect(pos.X - 6, pos.Y - 3, chip.Width + 12, chip.Height + 6), 6, 6);
-            dc.DrawText(chip, pos);
+            DrawChip(dc, x,
+                Inv($"{Ago(idx, count)} · avg {avgStr} · now {rawStr} · {s.OutputPercent:0}%"),
+                Inv($"{Ago(idx, count)} · avg {avgStr}\nnow {rawStr} · {s.OutputPercent:0}%"));
         }
-    }
-
-    /// <summary>Polyline over the samples; NaN breaks the trace (e.g. missing sensor).</summary>
-    private void DrawTrace(DrawingContext dc, int count, Func<int, double> yFor, Pen pen)
-    {
-        Point? prev = null;
-        for (int i = 0; i < count; i++)
-        {
-            double y = yFor(i);
-            if (double.IsNaN(y)) { prev = null; continue; }
-            var p = new Point(XForIndex(i, count), y);
-            if (prev is Point q) dc.DrawLine(pen, q, p);
-            prev = p;
-        }
-        // A single retained sample still shows as a dot instead of nothing.
-        if (count == 1 && !double.IsNaN(yFor(0)))
-            dc.DrawEllipse(pen.Brush, null, new Point(XForIndex(0, count), yFor(0)), 1.6, 1.6);
-    }
-
-    private static string Inv(FormattableString f) => FormattableString.Invariant(f);
-
-    protected override void OnMouseMove(MouseEventArgs e)
-    {
-        _hoverX = e.GetPosition(this).X;
-        InvalidateVisual();
-    }
-
-    protected override void OnMouseLeave(MouseEventArgs e)
-    {
-        _hoverX = null;
-        InvalidateVisual();
     }
 }

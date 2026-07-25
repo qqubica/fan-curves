@@ -100,9 +100,11 @@ the BIOS.
   live-draw windows, fuse release — with live readouts of draw, buffer,
   predicted headroom and the learned cooler model, which you can freeze or
   reset), assign temperature /
-  power sensors and headers manually, and watch a 10-minute history strip of
-  average temp, raw temp, and commanded fan % — including markers for every
-  fan stop/start.
+  power sensors and headers manually, and watch two 10-minute strips: thermal
+  history (average temp, raw temp, commanded fan %, the budget ceiling, and a
+  marker for every fan stop/start) and the thermal budget itself — power draw
+  and its sustained average against the predicted headroom and the ramp-lead
+  threshold that triggers a step up, with any fuse periods shaded.
 
 ![FanCurves — developer mode](docs/screenshot-dev.png)
 
