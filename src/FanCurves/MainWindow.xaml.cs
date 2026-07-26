@@ -509,7 +509,7 @@ public partial class MainWindow : Window
                     _histories[i].Add(new HistorySample(
                         t.RawTemp, t.EffectiveTemp, t.OutputPercent,
                         t.Watts, t.WattsAvg, t.BudgetJoules, t.TauSeconds, t.DemandLevel,
-                        t.CeilingC, t.Reason == OutputReason.HardOverride));
+                        t.CeilingC, t.AimC, t.Reason == OutputReason.HardOverride));
                 }
             }
 
@@ -812,7 +812,7 @@ public partial class MainWindow : Window
             s == null ? "" :
             !_profile.PowerControlEnabled ? "temperature control (power control off)" :
             s.Watts is not double w ? "temperature control — no power sensor assigned" :
-            Inv($"draw {w:0} W · avg {s.WattsAvg ?? 0:0} W\nbuffer {s.BudgetJoules / 1000:0.0} kJ · needs {s.DemandLevel:0}%\nlead {FormatTau(s.TauSeconds)}");
+            Inv($"draw {w:0} W · avg {s.WattsAvg ?? 0:0} W\nbuffer {s.BudgetJoules / 1000:0.0} kJ · needs {s.DemandLevel:0}%\nheadroom {FormatTau(s.TauSeconds)}");
     }
 
     /// <summary>Where the ceiling and the sustained aim actually sit, and how the sink

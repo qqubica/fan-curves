@@ -18,6 +18,7 @@ public readonly record struct HistorySample(
     double TauSeconds = double.PositiveInfinity, // predicted headroom
     double DemandLevel = 0,         // ladder level the power average asks for
     double CeilingC = 0,            // budget ceiling in force
+    double AimC = 0,                // sustained aim in force — headroom is measured to it
     bool Override = false);         // fuse latched (raw die at/over the override temp)
 
 /// <summary>Fixed ring of the last <see cref="Capacity"/> samples (~10 min at the engine's jittered ~1 s tick).</summary>
@@ -101,6 +102,15 @@ public class HistoryChart : StripChart
             dc.DrawLine(new Pen(new SolidColorBrush(Color.FromArgb(0x2e, 0xff, 0xff, 0xff)), 1)
                 { DashStyle = new DashStyle(new double[] { 1, 4 }, 0) },
                 new Point(r.Left, YForTemp(ceiling)), new Point(r.Right, YForTemp(ceiling)));
+
+        // Sustained aim (power control only): the line the controller actually defends —
+        // headroom counts down to it and the fans engage before the trend settles past it.
+        // Dimmer than the ceiling; skipped when the margins make the two coincide.
+        double aim = h[count - 1].AimC;
+        if (aim > 0 && aim < ceiling - 0.5)
+            dc.DrawLine(new Pen(new SolidColorBrush(Color.FromArgb(0x20, 0xff, 0xff, 0xff)), 1)
+                { DashStyle = new DashStyle(new double[] { 1, 4 }, 0) },
+                new Point(r.Left, YForTemp(aim)), new Point(r.Right, YForTemp(aim)));
 
         // Fan % trace: soft under-fill + a quiet line (same treatment as the curve's band fill).
         DrawUnderFill(dc, count, i => YForPct(h[i].OutputPercent), new LinearGradientBrush(
@@ -187,6 +197,13 @@ public class HistoryChart : StripChart
         {
             var t = Label(Inv($"ceiling {ceiling:0}°"), tempRefBrush, 9.5);
             DrawSeatedText(dc, t, new Point(r.Left + 4, YForTemp(ceiling) - t.Height - 1));
+        }
+        if (aim > 0 && aim < ceiling - 0.5)
+        {
+            // Below its line (the ceiling label sits above its own), so the two never
+            // collide even when the margins put the lines a few pixels apart.
+            var t = Label(Inv($"aim {aim:0}°"), tempRefBrush, 9.5);
+            DrawSeatedText(dc, t, new Point(r.Left + 4, YForTemp(aim) + 2));
         }
 
         // The newest sample is live thermal state — the one place amber is allowed here.

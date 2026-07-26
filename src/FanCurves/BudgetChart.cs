@@ -6,8 +6,9 @@ namespace FanCurves;
 /// <summary>
 /// Second rolling strip (developer mode, under the history strip): the last 10 minutes of
 /// the thermal-budget controller's own signals — the channel's power draw and its sustained
-/// average (left scale, watts) against the predicted headroom before the budget ceiling
-/// (right scale, seconds) and the ramp-lead threshold that triggers a step up. Spans where
+/// average (left scale, watts) against the predicted headroom before the guarded line (the
+/// sustained aim, or the ceiling once the trend is past the aim; right scale, seconds) and
+/// the ramp-lead threshold that triggers a step up. Spans where
 /// the hard-override fuse was latched are shaded. Same geometry as the history strip, so
 /// the two read as one timeline; hovering shows draw · avg · buffer · headroom · needs.
 /// </summary>

@@ -120,9 +120,15 @@ public class ThermalModel
 ///    ladder of allowed speeds (and the fallback curve for the fuse).
 /// 2. The heatsink's thermal mass is spent as credit: E = C · (ceiling − temp). A short
 ///    burst pours its joules into metal — the fan does not move.
-/// 3. The fan steps UP only when the predicted time to exhaust that credit — the more
-///    pessimistic of energy/surplus (model) and headroom/slope (measured) — drops under
-///    RampLeadSeconds, and it goes directly to the ladder level that restores the lead.
+/// 3. The fan steps UP only when the predicted headroom — seconds until the sink trend
+///    crosses the sustained aim (or the ceiling, once already past the aim), the more
+///    pessimistic of the model's equilibrium prediction and the measured slope — drops
+///    under RampLeadSeconds, and it goes directly to the ladder level whose equilibrium
+///    holds the aim. Headroom is referenced to the AIM, not the ceiling: nearly every
+///    real state on a big cooler equilibrates under the ceiling, so a ceiling ETA read
+///    ∞ regardless of temperature or fan speed and recovered mid-warm-up with the fans
+///    still parked (2026-07-26); aim-referenced, it only recovers when the fans step up
+///    or the load ends.
 ///    ONE step per slope window: the measured slope is backward-looking, so right after
 ///    a step it still reports the pre-step warming and would otherwise climb the whole
 ///    ladder to 100% in as many ticks (Kuba's report, 2026-07-26). Within the settle
@@ -130,8 +136,11 @@ public class ThermalModel
 ///    insufficient — the draw rose enough that its predicted equilibrium no longer
 ///    clears the ceiling. The fuse is not rate-limited by any of this.
 /// 4. It steps DOWN one ladder level per StepDownHoldSeconds once the sustained power
-///    average no longer needs the current one — after a load ends this reacts to the
-///    power collapse, minutes before a cooling temperature average would.
+///    average no longer needs the current one — and only onto a level predicted to hold
+///    the aim with the channel's HysteresisC to spare (the budget twin of the temp
+///    filter's step-down hysteresis; without it a level that equilibrates right AT the
+///    aim is stepped onto and back off in a slow hunt). After a load ends this reacts
+///    to the power collapse, minutes before a cooling temperature average would.
 /// 5. The sustained aim is also enforced UPWARD: once the sink trend is past the steady
 ///    target and either the sustained average needs a higher ladder level or the temp
 ///    has settled there, it steps up one level per StepDownHoldSeconds. The tau trigger
@@ -153,6 +162,9 @@ public class PowerBudgetController
     public double RampLeadSeconds { get; set; } = 45;
     public double OverrideTempC { get; set; } = 90;
     public double StepDownHoldSeconds { get; set; } = 25;
+    /// <summary>Step-down clearance: the level below must hold the aim this much to spare
+    /// (the channel's HysteresisC — same anti-flap knob as the temperature filter).</summary>
+    public double HysteresisC { get; set; } = 1.5;
     public double SlewUpPercentPerSec { get; set; } = 9;
     public double SlewDownPercentPerSec { get; set; } = 8;
     /// <summary>Levels above 0 but strictly below this snap to 0 (0 = disabled).</summary>
@@ -213,7 +225,9 @@ public class PowerBudgetController
     public double PowerAvg { get; private set; }
     /// <summary>Energy credit left before the budget ceiling: C · (ceiling − trend temp).</summary>
     public double BudgetJoules { get; private set; }
-    /// <summary>Predicted seconds until the credit runs out (∞ when temps hold or fall).</summary>
+    /// <summary>Predicted headroom: seconds until the trend crosses the guarded line —
+    /// the sustained aim while below it, the ceiling once past it. ∞ only while the
+    /// sustained draw is holdable at the current fan level.</summary>
     public double TauSeconds { get; private set; } = double.PositiveInfinity;
     /// <summary>Ladder level the sustained power average asks for (the step-down goal).</summary>
     public double DemandLevel { get; private set; }
@@ -231,6 +245,8 @@ public class PowerBudgetController
     public double SlopeCPerSec { get; private set; }
     /// <summary>The budget ceiling in force: OverrideTempC − CeilingMarginC.</summary>
     public double CeilingC { get; private set; }
+    /// <summary>The sustained aim in force: OverrideTempC − max(SteadyTargetMarginC, CeilingMarginC).</summary>
+    public double SteadyTargetC { get; private set; }
 
     /// <param name="now">Monotonic time in seconds (same clock every call).</param>
     /// <param name="rawTemp">Raw channel temperature (max of assigned sensors).</param>
@@ -241,7 +257,10 @@ public class PowerBudgetController
         _temps.Add((now, rawTemp));
         _powers.Add((now, watts));
         _temps.RemoveAll(s => s.time < now - Math.Max(DisplayAveragingSeconds, TrendAvgSeconds));
-        _powers.RemoveAll(s => s.time < now - Math.Max(PowerAveragingSeconds, ShortPowerSeconds));
+        // Retention covers the spike-quietness gate below, which looks as far back as
+        // the slope fit is contaminated: SlopeWindowSeconds + TrendAvgSeconds.
+        _powers.RemoveAll(s => s.time < now - Math.Max(PowerAveragingSeconds,
+            Math.Max(ShortPowerSeconds, SlopeWindowSeconds + TrendAvgSeconds)));
 
         EffectiveTemp = Mean(_temps, now - DisplayAveragingSeconds);
         double trendTemp = Mean(_temps, now - TrendAvgSeconds);
@@ -275,21 +294,65 @@ public class PowerBudgetController
         TrendTempC = trendTemp;
         CeilingC = ceiling;
 
-        double slope = TrendSlope();
-        SlopeCPerSec = slope;
-        double surplus = PowerNow - Model.DissipationWatts(trendTemp, _output);
-        double tauEnergy = surplus > 1 ? BudgetJoules / surplus : double.PositiveInfinity;
-        double tauSlope = slope > 0.005 ? (ceiling - trendTemp) / slope : double.PositiveInfinity;
-        TauSeconds = Math.Min(tauEnergy, tauSlope);
-        // A spent budget with the trend not clearly falling is ZERO headroom, not
-        // infinite: parked at the ceiling, surplus and slope both vanish and the two
-        // predictions above go blind exactly when the credit is gone.
-        if (BudgetJoules <= 0 && slope > -0.002) TauSeconds = 0;
-
         var ladder = Ladder(curve);
         // The sustained aim can never sit above the transient ceiling, whatever the
         // two margins are set to — otherwise "settled" would mean "already over budget".
         double steadyTarget = OverrideTempC - Math.Max(SteadyTargetMarginC, CeilingMarginC);
+        SteadyTargetC = steadyTarget;
+
+        double slope = TrendSlope();
+        SlopeCPerSec = slope;
+        double surplus = PowerNow - Model.DissipationWatts(trendTemp, _output); // for learning
+
+        // ---- Headroom: predicted seconds until the trend crosses the guarded line — the
+        // sustained aim while below it, the hard ceiling once past the aim. Referenced to
+        // the AIM, not the ceiling: on a big cooler nearly every real state equilibrates
+        // under the ceiling, so a ceiling ETA read ∞ "no matter what" and even recovered
+        // to ∞ mid-warm-up as the climb decelerated toward a hotter-than-wanted
+        // equilibrium with the fans still parked (Kuba's report, 2026-07-26). Headroom
+        // may only recover because the fans stepped up or the load went away — never
+        // because the system is settling somewhere it should not be.
+        //   Model prong: exact first-order time for the trend to reach the line given the
+        //   equilibrium the sustained draw implies at the CURRENT fan level — finite and
+        //   still shrinking however gently the temp moves, as long as that equilibrium
+        //   sits past the line (the case the old surplus/slope pair went blind on).
+        //   Measured prong: distance over the observed warming slope — model-free, keeps
+        //   the headroom honest while the model is unlearned, frozen or wrong.
+        double guarded = trendTemp < steadyTarget ? steadyTarget : ceiling;
+        double eq = Model.BaseTempC + Model.R(_output) * PowerAvg;
+        // Neither prong may accuse while the draw has NOT been quiet for as long as the
+        // temperature signals are contaminated (SlopeWindowSeconds of trend values, each
+        // itself averaging TrendAvgSeconds of die temps): a burst younger than that span
+        // is exactly the thing the buffer exists to absorb silently — its die jump reads
+        // as a rush toward the aim on the slope fit (harness S3), and while it sits in
+        // the power window it also drags PowerAvg (and, under a repeating spike train,
+        // the learned model itself) into predicting a crossing that the settled draw
+        // never delivers (harness S3b). Same tolerance shape as PowerStable, the
+        // learning gate. A genuinely sustained load turns the gate on within about
+        // PowerAveragingSeconds — and the monster-load corner a gated minute cannot
+        // catch is precisely what the raw-temp fuse is for.
+        double recentPeak = 0;
+        foreach (var (t, v) in _powers)
+            if (t >= now - (SlopeWindowSeconds + TrendAvgSeconds) && v > recentPeak) recentPeak = v;
+        bool drawSettled = recentPeak - PowerAvg <= Math.Max(10, PowerAvg * 0.25);
+        // Below the aim the equilibrium must additionally clear the line by the
+        // hysteresis margin — the twin of the step-down clearance, so the two form a
+        // dead band around the aim inside which only settled evidence (the StepUpHold
+        // path) moves the fan. At the ceiling the margin stays minimal: conservative
+        // there means firing earlier, not later.
+        double clearBy = guarded == steadyTarget ? HysteresisC : 0.05;
+        double tauModel = drawSettled && trendTemp < guarded && eq > guarded + clearBy
+            ? Model.R(_output) * Model.MassJPerC * Math.Log((eq - trendTemp) / (eq - guarded))
+            : double.PositiveInfinity;
+        double tauSlope = drawSettled && slope > 0.005
+            ? Math.Max(0, guarded - trendTemp) / slope
+            : double.PositiveInfinity;
+        TauSeconds = Math.Min(tauModel, tauSlope);
+        // A spent budget with the trend not clearly falling is ZERO headroom, not
+        // infinite: parked at the ceiling, equilibrium gap and slope both vanish and
+        // the two predictions above go blind exactly when the credit is gone.
+        if (BudgetJoules <= 0 && slope > -0.002) TauSeconds = 0;
+
         DemandLevel = ladder[^1];
         foreach (var l in ladder)
             if (Model.BaseTempC + Model.R(l) * PowerAvg <= steadyTarget) { DemandLevel = l; break; }
@@ -319,20 +382,33 @@ public class PowerBudgetController
         }
         else if (TauSeconds < RampLeadSeconds && _target < ladder[^1] - 0.01 &&
                  (double.IsNaN(_lastRampStep) || now - _lastRampStep >= SlopeWindowSeconds ||
-                  Model.BaseTempC + Model.R(_target) * PowerNow > ceiling - 1))
+                  Model.BaseTempC + Model.R(_target) * PowerNow > steadyTarget))
         {
-            // Credit is running out: jump the target to the lowest ladder level whose
-            // equilibrium temperature at today's draw sits back under the ceiling —
-            // at that level the surplus decays to zero before the credit does. Then
+            // Headroom is running out: jump the target to the lowest ladder level whose
+            // equilibrium temperature at today's draw holds the sustained aim — at that
+            // level the warming dies out before the line is crossed (same line the
+            // demand estimate and the upward enforcement defend, so the predictive
+            // step no longer undershoots what the settle logic would ask for). Then
             // hold: the slope that keeps TauSeconds low is measured over the past
             // window and cannot yet know about this step, so another one is allowed
             // only after the window turns over — or immediately if the draw has risen
-            // enough that the level just chosen no longer clears the ceiling.
+            // enough that the level just chosen no longer holds the aim.
             double up = ladder[^1];
             foreach (var l in ladder)
             {
                 if (l <= _target + 0.01) continue;
-                if (Model.BaseTempC + Model.R(l) * PowerNow <= ceiling - 1) { up = l; break; }
+                if (Model.BaseTempC + Model.R(l) * PowerNow <= steadyTarget) { up = l; break; }
+            }
+            // With the draw settled this step is measured evidence, same as a StepUpHold
+            // step: brand the level being left as insufficient at this sustained draw.
+            // Without the brand an optimistically-wrong model argues the fan straight
+            // back down after every predictive step and the pair hunts in a slow
+            // on/off cycle (harness S5). Model-prong fires during an unsettled draw
+            // (burst still in flight) stay unbranded — no measured corroboration yet.
+            if (drawSettled)
+            {
+                _failedLevel = _target;
+                _failedPowerAvg = PowerAvg;
             }
             _target = up;
             _lastRampStep = now;
@@ -373,17 +449,29 @@ public class PowerBudgetController
             // Sustained power no longer needs this level: one ladder step down per hold.
             double below = ladder[0];
             foreach (var l in ladder) if (l < _target - 0.01) below = l;
-            if (double.IsNaN(_downSince)) _downSince = now;
-            _upSince = double.NaN;
-            if (now - _downSince >= StepDownHoldSeconds)
+            // The level below must hold the aim with hysteresis to spare — the budget
+            // twin of the temperature filter's step-down HysteresisC. Without it a
+            // level whose equilibrium sits right AT the aim keeps getting stepped
+            // down onto and back off: a slow 20↔40% hunt (first harness run, 2026-07-26).
+            if (Model.BaseTempC + Model.R(below) * PowerAvg > steadyTarget - HysteresisC)
             {
-                _target = below;
                 _downSince = double.NaN;
+                _upSince = double.NaN;
             }
             else
             {
-                PendingDownLevel = Snap(below);
-                DownHoldRemaining = StepDownHoldSeconds - (now - _downSince);
+                if (double.IsNaN(_downSince)) _downSince = now;
+                _upSince = double.NaN;
+                if (now - _downSince >= StepDownHoldSeconds)
+                {
+                    _target = below;
+                    _downSince = double.NaN;
+                }
+                else
+                {
+                    PendingDownLevel = Snap(below);
+                    DownHoldRemaining = StepDownHoldSeconds - (now - _downSince);
+                }
             }
         }
         else { _downSince = double.NaN; _upSince = double.NaN; }

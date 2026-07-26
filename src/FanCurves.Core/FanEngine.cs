@@ -36,10 +36,11 @@ public record ChannelStatus(
     double BudgetJoules = 0,   // energy credit left before the budget ceiling
     double MassJPerC = 0,      // learned thermal mass
     // ---- the rest is thermal-budget telemetry for the developer panel ----
-    double TauSeconds = double.PositiveInfinity, // predicted headroom before the ceiling
+    double TauSeconds = double.PositiveInfinity, // predicted headroom before the guarded line (aim, then ceiling)
     double DemandLevel = 0,    // ladder level the sustained power average asks for
     double TrendTempC = double.NaN, // sink-trend temp the budget is measured from
     double CeilingC = 0,       // budget ceiling in force (override − margin)
+    double AimC = 0,           // sustained aim in force — the line headroom is measured to
     double SlopeCPerSec = 0,   // measured warming/cooling slope of the trend
     double BaseTempC = 0,      // learned cool-idle baseline
     double ResistanceCPerW = 0); // learned cooling resistance at the commanded %
@@ -171,7 +172,7 @@ public class FanEngine : IDisposable
                 double? wattsAvg = null;
                 double budgetJoules = 0, massJPerC = 0;
                 double tauSeconds = double.PositiveInfinity, demandLevel = 0;
-                double trendTempC = double.NaN, ceilingC = 0, slopeCPerSec = 0;
+                double trendTempC = double.NaN, ceilingC = 0, aimC = 0, slopeCPerSec = 0;
                 double baseTempC = 0, resistanceCPerW = 0;
                 if (temp.HasValue)
                 {
@@ -187,6 +188,7 @@ public class FanEngine : IDisposable
                         }
                         budget.DisplayAveragingSeconds = ch.AveragingSeconds;
                         budget.StepDownHoldSeconds = ch.StepDownHoldSeconds;
+                        budget.HysteresisC = ch.HysteresisC;
                         budget.SlewUpPercentPerSec = ch.SlewUpPercentPerSec;
                         budget.SlewDownPercentPerSec = ch.SlewDownPercentPerSec;
                         budget.ZeroSnapPercent = Profile.ZeroSnapEnabled ? Profile.ZeroSnapPercent : 0;
@@ -212,6 +214,7 @@ public class FanEngine : IDisposable
                         demandLevel = budget.DemandLevel;
                         trendTempC = budget.TrendTempC;
                         ceilingC = budget.CeilingC;
+                        aimC = budget.SteadyTargetC;
                         slopeCPerSec = budget.SlopeCPerSec;
                         baseTempC = budget.Model.BaseTempC;
                         resistanceCPerW = budget.Model.R(filtered);
@@ -370,7 +373,7 @@ public class FanEngine : IDisposable
                 statuses.Add(new ChannelStatus(ch.Name, temp, effectiveTemp, output, rpm, applied,
                     targetPct, reason, reasonLevel, reasonSeconds,
                     watts, wattsAvg, budgetJoules, massJPerC,
-                    tauSeconds, demandLevel, trendTempC, ceilingC, slopeCPerSec,
+                    tauSeconds, demandLevel, trendTempC, ceilingC, aimC, slopeCPerSec,
                     baseTempC, resistanceCPerW));
             }
 
