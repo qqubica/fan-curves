@@ -51,6 +51,7 @@ public class BudgetChart : StripChart
 
     protected override void OnRender(DrawingContext dc)
     {
+        if (TooSmallToRender) return;
         // Transparent fill keeps hit-testing (hover) alive across the whole strip.
         dc.DrawRectangle(Brushes.Transparent, null, new Rect(0, 0, ActualWidth, ActualHeight));
         var r = Plot;

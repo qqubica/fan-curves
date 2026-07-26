@@ -71,6 +71,11 @@ public class CurveEditor : FrameworkElement
 
     protected override void OnRender(DrawingContext dc)
     {
+        // Mid-resize arrange passes can hand this control a near-zero size; drawing
+        // into it is meaningless and the label clamps below would see inverted ranges
+        // (min > max threw and took the whole app down — crash 2026-07-27).
+        if (ActualWidth - Pad.Left - Pad.Right < 60 || ActualHeight - Pad.Top - Pad.Bottom < 40)
+            return;
         // The card behind provides the surface; a transparent fill keeps hit-testing alive.
         dc.DrawRectangle(Brushes.Transparent, null, new Rect(0, 0, ActualWidth, ActualHeight));
         var r = Plot;
@@ -180,7 +185,7 @@ public class CurveEditor : FrameworkElement
             // Temp readout on the x-axis…
             var tx = Label($"{eff.ToString("0.0", CultureInfo.InvariantCulture)}°", amberBrush);
             var txPos = new Point(
-                Math.Clamp(p.X - tx.Width / 2, r.Left, r.Right - tx.Width), r.Bottom + 8);
+                Math.Clamp(p.X - tx.Width / 2, r.Left, Math.Max(r.Left, r.Right - tx.Width)), r.Bottom + 8);
             dc.DrawRectangle(chipBg, null,
                 new Rect(txPos.X - 4, txPos.Y - 1, tx.Width + 8, tx.Height + 2));
             dc.DrawText(tx, txPos);
@@ -188,7 +193,7 @@ public class CurveEditor : FrameworkElement
             // …and the fan % on the y-axis.
             var ty = Label($"{outPct.ToString("0", CultureInfo.InvariantCulture)}%", amberBrush);
             var tyPos = new Point(r.Left - ty.Width - 10,
-                Math.Clamp(p.Y - ty.Height / 2, r.Top, r.Bottom - ty.Height));
+                Math.Clamp(p.Y - ty.Height / 2, r.Top, Math.Max(r.Top, r.Bottom - ty.Height)));
             dc.DrawRectangle(chipBg, null,
                 new Rect(tyPos.X - 4, tyPos.Y - 1, ty.Width + 8, ty.Height + 2));
             dc.DrawText(ty, tyPos);
@@ -225,14 +230,14 @@ public class CurveEditor : FrameworkElement
 
         var tx = label($"{temp.ToString("0.#", CultureInfo.InvariantCulture)}°", whiteBrush, 10.5);
         var txPos = new Point(
-            Math.Clamp(p.X - tx.Width / 2, r.Left, r.Right - tx.Width), r.Bottom + 8);
+            Math.Clamp(p.X - tx.Width / 2, r.Left, Math.Max(r.Left, r.Right - tx.Width)), r.Bottom + 8);
         dc.DrawRectangle(chipBg, null,
             new Rect(txPos.X - 4, txPos.Y - 1, tx.Width + 8, tx.Height + 2));
         dc.DrawText(tx, txPos);
 
         var ty = label($"{pct.ToString("0", CultureInfo.InvariantCulture)}%", whiteBrush, 10.5);
         var tyPos = new Point(r.Left - ty.Width - 10,
-            Math.Clamp(p.Y - ty.Height / 2, r.Top, r.Bottom - ty.Height));
+            Math.Clamp(p.Y - ty.Height / 2, r.Top, Math.Max(r.Top, r.Bottom - ty.Height)));
         dc.DrawRectangle(chipBg, null,
             new Rect(tyPos.X - 4, tyPos.Y - 1, ty.Width + 8, ty.Height + 2));
         dc.DrawText(ty, tyPos);

@@ -30,6 +30,7 @@ public partial class App : Application
     }
 
     private static System.Threading.Mutex? _instanceMutex;
+    private static DateTime _lastUiCrashLog = DateTime.MinValue;
 
     /// <summary>Lifecycle/crash log → %AppData%\FanCurves\events.txt (best-effort).</summary>
     public static void Log(string message)
@@ -61,7 +62,19 @@ public partial class App : Application
         AppDomain.CurrentDomain.UnhandledException += (_, ex) =>
             Log($"CRASH (AppDomain): {ex.ExceptionObject}");
         DispatcherUnhandledException += (_, ex) =>
-            Log($"CRASH (Dispatcher): {ex.Exception}");
+        {
+            // A UI fault must not take fan control down with it: a dead process leaves
+            // the Super I/O frozen at the last written PWM with nothing watching the
+            // die (2026-07-27: a resize-layout crash parked the fans at 0% while a
+            // load pushed the CPU through 80°). Log it, swallow it, keep the engine
+            // ticking. Repeated faults log at most once every few seconds.
+            if ((DateTime.UtcNow - _lastUiCrashLog).TotalSeconds >= 5)
+            {
+                _lastUiCrashLog = DateTime.UtcNow;
+                Log($"CRASH (Dispatcher, suppressed — app kept alive): {ex.Exception}");
+            }
+            ex.Handled = true;
+        };
         AppDomain.CurrentDomain.ProcessExit += (_, _) => Log("process exit");
 
         bool forceSim = e.Args.Contains("--sim");

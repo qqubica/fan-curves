@@ -58,6 +58,7 @@ public class HistoryChart : StripChart
 
     protected override void OnRender(DrawingContext dc)
     {
+        if (TooSmallToRender) return;
         // Transparent fill keeps hit-testing (hover) alive across the whole strip.
         dc.DrawRectangle(Brushes.Transparent, null, new Rect(0, 0, ActualWidth, ActualHeight));
         var r = Plot;
@@ -184,7 +185,7 @@ public class HistoryChart : StripChart
                 int sec = (int)Math.Round((end - off) * SecondsPerSample);
                 var t = Label(Inv($"{sec / 60}:{sec % 60:00}"),
                     new SolidColorBrush(Color.FromArgb(0xa6, 0xff, 0xff, 0xff)), 10);
-                double tx = Math.Clamp((x1 + x2) / 2 - t.Width / 2, r.Left, r.Right - t.Width);
+                double tx = Math.Clamp((x1 + x2) / 2 - t.Width / 2, r.Left, Math.Max(r.Left, r.Right - t.Width));
                 if (tx - 3 <= lastLabelRight + 4) continue;   // would collide with the previous label
                 var tp = new Point(tx, spanY - t.Height / 2);
                 dc.DrawRectangle(seatBrush, null, new Rect(tp.X - 3, tp.Y, t.Width + 6, t.Height));

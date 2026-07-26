@@ -205,6 +205,7 @@ public class PowerBudgetController
     // Forgiven once the sustained draw falls clearly below the draw that failed it.
     private double _failedLevel = double.NaN;
     private double _failedPowerAvg;
+    private double _forgiveSince = double.NaN;
 
     // Diagnostics for the engine/UI — refreshed on every Step, valid until the next one.
     /// <summary>Fuse engaged: the temperature curve is being written directly, no slew.</summary>
@@ -257,10 +258,10 @@ public class PowerBudgetController
         _temps.Add((now, rawTemp));
         _powers.Add((now, watts));
         _temps.RemoveAll(s => s.time < now - Math.Max(DisplayAveragingSeconds, TrendAvgSeconds));
-        // Retention covers the spike-quietness gate below, which looks as far back as
-        // the slope fit is contaminated: SlopeWindowSeconds + TrendAvgSeconds.
-        _powers.RemoveAll(s => s.time < now - Math.Max(PowerAveragingSeconds,
-            Math.Max(ShortPowerSeconds, SlopeWindowSeconds + TrendAvgSeconds)));
+        // Retention covers the learning-quietness horizon below (slope window + trend
+        // window + power averaging), which dominates every other power-window need.
+        _powers.RemoveAll(s => s.time < now -
+            (SlopeWindowSeconds + TrendAvgSeconds + PowerAveragingSeconds));
 
         EffectiveTemp = Mean(_temps, now - DisplayAveragingSeconds);
         double trendTemp = Mean(_temps, now - TrendAvgSeconds);
@@ -320,28 +321,38 @@ public class PowerBudgetController
         //   the headroom honest while the model is unlearned, frozen or wrong.
         double guarded = trendTemp < steadyTarget ? steadyTarget : ceiling;
         double eq = Model.BaseTempC + Model.R(_output) * PowerAvg;
-        // Neither prong may accuse while the draw has NOT been quiet for as long as the
-        // temperature signals are contaminated (SlopeWindowSeconds of trend values, each
-        // itself averaging TrendAvgSeconds of die temps): a burst younger than that span
-        // is exactly the thing the buffer exists to absorb silently — its die jump reads
-        // as a rush toward the aim on the slope fit (harness S3), and while it sits in
-        // the power window it also drags PowerAvg (and, under a repeating spike train,
-        // the learned model itself) into predicting a crossing that the settled draw
-        // never delivers (harness S3b). Same tolerance shape as PowerStable, the
-        // learning gate. A genuinely sustained load turns the gate on within about
-        // PowerAveragingSeconds — and the monster-load corner a gated minute cannot
-        // catch is precisely what the raw-temp fuse is for.
-        double recentPeak = 0;
+        // Quietness horizons. The slope fit is contaminated by any burst younger than
+        // the span it can see (SlopeWindowSeconds of trend values, each itself an
+        // average over TrendAvgSeconds of die temps) — the measured prong must stay
+        // silent that long after a burst, or an 8 s spike's die jump reads as a rush
+        // toward the aim (harness S3). LEARNING needs quiet over the sink's much longer
+        // thermal memory: quasi-steady sampling inside a spike train pairs the
+        // still-elevated trend with trough power and inflates R (harness S3b taught
+        // itself R(0)=0.78 through windows that were 30 s "stable"), and a poisoned R
+        // is what turns the model prong into a false accuser.
+        double recentPeak = 0, learnPeak = 0;
+        double slopeQuiet = SlopeWindowSeconds + TrendAvgSeconds;
+        double learnQuiet = slopeQuiet + PowerAveragingSeconds;
         foreach (var (t, v) in _powers)
-            if (t >= now - (SlopeWindowSeconds + TrendAvgSeconds) && v > recentPeak) recentPeak = v;
+        {
+            if (t >= now - slopeQuiet && v > recentPeak) recentPeak = v;
+            if (t >= now - learnQuiet && v > learnPeak) learnPeak = v;
+        }
         bool drawSettled = recentPeak - PowerAvg <= Math.Max(10, PowerAvg * 0.25);
-        // Below the aim the equilibrium must additionally clear the line by the
-        // hysteresis margin — the twin of the step-down clearance, so the two form a
-        // dead band around the aim inside which only settled evidence (the StepUpHold
-        // path) moves the fan. At the ceiling the margin stays minimal: conservative
-        // there means firing earlier, not later.
+        bool drawLearnable = learnPeak - PowerAvg <= Math.Max(10, PowerAvg * 0.25);
+        // Below the aim the equilibrium must clear the line by the hysteresis margin —
+        // the twin of the step-down clearance, so the two form a dead band around the
+        // aim inside which only settled evidence (the StepUpHold path) moves the fan.
+        // At the ceiling the margin stays minimal: conservative there means firing
+        // earlier, not later.
         double clearBy = guarded == steadyTarget ? HysteresisC : 0.05;
-        double tauModel = drawSettled && trendTemp < guarded && eq > guarded + clearBy
+        // The model prong runs UNGATED: it reads only sustained quantities (PowerAvg,
+        // the trend) and the clearance margin absorbs power-window aliasing. Gating it
+        // on burst-quietness silenced the whole predictive layer under a real game —
+        // a live draw never stops fluctuating, so the gate never opened, headroom sat
+        // pinned at ∞ and the die climbed through 80° with the fans parked until the
+        // reactive path finally caught it above the aim (Kuba's report, 2026-07-27).
+        double tauModel = trendTemp < guarded && eq > guarded + clearBy
             ? Model.R(_output) * Model.MassJPerC * Math.Log((eq - trendTemp) / (eq - guarded))
             : double.PositiveInfinity;
         double tauSlope = drawSettled && slope > 0.005
@@ -357,10 +368,24 @@ public class PowerBudgetController
         foreach (var l in ladder)
             if (Model.BaseTempC + Model.R(l) * PowerAvg <= steadyTarget) { DemandLevel = l; break; }
         // Measured insufficiency outranks the model's estimate: while a level stands
-        // proven too weak for today's draw, demand cannot fall to it or below.
-        if (!double.IsNaN(_failedLevel) &&
-            PowerAvg < _failedPowerAvg - Math.Max(5, _failedPowerAvg * 0.1))
-            _failedLevel = double.NaN;
+        // proven too weak for today's draw, demand cannot fall to it or below. The
+        // brand lifts only once the sustained draw has stayed clearly below the draw
+        // that failed for a full hold — a fluctuating load's lulls dip under any
+        // instantaneous threshold, and instant forgiveness re-ran the same
+        // forgive → step down → re-warm → re-brand loop on every swell (harness S7).
+        if (!double.IsNaN(_failedLevel))
+        {
+            if (PowerAvg < _failedPowerAvg - Math.Max(5, _failedPowerAvg * 0.1))
+            {
+                if (double.IsNaN(_forgiveSince)) _forgiveSince = now;
+                else if (now - _forgiveSince >= StepDownHoldSeconds)
+                {
+                    _failedLevel = double.NaN;
+                    _forgiveSince = double.NaN;
+                }
+            }
+            else _forgiveSince = double.NaN;
+        }
         if (!double.IsNaN(_failedLevel))
             foreach (var l in ladder)
                 if (l > _failedLevel + 0.01) { DemandLevel = Math.Max(DemandLevel, l); break; }
@@ -449,11 +474,15 @@ public class PowerBudgetController
             // Sustained power no longer needs this level: one ladder step down per hold.
             double below = ladder[0];
             foreach (var l in ladder) if (l < _target - 0.01) below = l;
-            // The level below must hold the aim with hysteresis to spare — the budget
-            // twin of the temperature filter's step-down HysteresisC. Without it a
-            // level whose equilibrium sits right AT the aim keeps getting stepped
-            // down onto and back off: a slow 20↔40% hunt (first harness run, 2026-07-26).
-            if (Model.BaseTempC + Model.R(below) * PowerAvg > steadyTarget - HysteresisC)
+            // The level below must hold the aim even at 5/4 of today's sustained draw —
+            // hysteresis in the draw dimension, where the swings actually live. The
+            // ±HysteresisC temperature band alone is worth only ~4 W at a 20% fan
+            // level, so a game's minute-scale power swells crossed it constantly and
+            // the fan chased them up and down (harness S7). Deliberately NOT stacked
+            // with the temperature band: the double margin blocked the final step to
+            // silence at warm idle, with 0%'s predicted equilibrium under the aim but
+            // inside the stacked band (harness S5b).
+            if (Model.BaseTempC + Model.R(below) * (PowerAvg * 1.25) > steadyTarget)
             {
                 _downSince = double.NaN;
                 _upSince = double.NaN;
@@ -488,7 +517,8 @@ public class PowerBudgetController
 
         // ---- Online learning — only with the fan settled, so the plant response
         //      isn't a mix of fan changes and power changes.
-        if (LearningEnabled && !OverrideActive && Math.Abs(_output - snapped) < 0.5 && PowerStable(now))
+        if (LearningEnabled && !OverrideActive && drawLearnable &&
+            Math.Abs(_output - snapped) < 0.5 && PowerStable(now))
         {
             if (Math.Abs(surplus) > 15 && Math.Abs(slope) > 0.015 &&
                 Math.Sign(surplus) == Math.Sign(slope))
@@ -571,6 +601,7 @@ public class PowerBudgetController
         _lastTime = double.NaN;
         _lastRampStep = double.NaN;
         _failedLevel = double.NaN;
+        _forgiveSince = double.NaN;
         OverrideActive = false;
         EffectiveTemp = double.NaN;
         TrendTempC = double.NaN;

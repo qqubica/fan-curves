@@ -35,6 +35,12 @@ public abstract class StripChart : FrameworkElement
         Math.Max(10, ActualWidth - Pad.Left - Pad.Right),
         Math.Max(10, ActualHeight - Pad.Top - Pad.Bottom));
 
+    /// <summary>Mid-resize arrange passes can hand the strip a near-zero size; label
+    /// layout in a degenerate plot produces inverted clamp ranges (a min > max
+    /// Math.Clamp took the app down, 2026-07-27) — subclasses skip rendering instead.</summary>
+    protected bool TooSmallToRender =>
+        ActualWidth - Pad.Left - Pad.Right < 60 || ActualHeight - Pad.Top - Pad.Bottom < 24;
+
     protected double PixelsPerSample => Plot.Width / (ChannelHistory.Capacity - 1);
 
     protected double XForIndex(int i, int count) => Plot.Right - (count - 1 - i) * PixelsPerSample;
@@ -66,7 +72,7 @@ public abstract class StripChart : FrameworkElement
             double x = r.Right - s / SecondsPerSample * PixelsPerSample;
             var lab = Label(s == 0 ? "now" : Inv($"−{s / 60}:00"));
             dc.DrawText(lab, new Point(
-                Math.Clamp(x - lab.Width / 2, r.Left, r.Right - lab.Width), r.Bottom + 5));
+                Math.Clamp(x - lab.Width / 2, r.Left, Math.Max(r.Left, r.Right - lab.Width)), r.Bottom + 5));
         }
     }
 

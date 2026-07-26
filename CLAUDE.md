@@ -114,6 +114,15 @@ No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
   histories (fuse span, hover chip, empty state, 420 px-wide window) — it pokes
   `StripChart._hoverX` by reflection, because `SetCursorPos` cannot hover a window that
   another window covers, and a 4 s `--sim` capture never reaches those states.
+  **Render robustness (2026-07-27, from Kuba's resize crash)**: a mid-resize arrange
+  pass handed `CurveEditor` a near-zero size and its axis-chip `Math.Clamp` threw on
+  an inverted range (min 16 > max 13.8 — ArgumentException), killing the process —
+  which left the Super I/O frozen at the last written PWM with nothing watching the
+  die while a load pushed it through 80°. Now every chart render bails out below a
+  minimum plot size (`StripChart.TooSmallToRender` / CurveEditor's inline check),
+  every computed-range label clamp uses the `Math.Max(lo, hi)` guard, and
+  `App.DispatcherUnhandledException` logs (throttled to one entry / 5 s) and
+  **swallows** UI faults instead of dying — fan control must outlive the UI.
   **Why-chip (2026-07-22)**: notification-style chip in the curve chart's top-left
   corner (`WhyChip` in MainWindow.xaml, both modes) explaining why the commanded %
   differs from the curve's configured level; hidden when they match. The engine
@@ -275,18 +284,26 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   ceiling — on this cooler, nearly every real state — and even recovered to ∞
   mid-warm-up as the climb decelerated toward a hotter-than-wanted equilibrium with
   the fans still parked; now headroom recovers only when the fans step up or the load
-  ends. **Both prongs are gated on a quiet draw** (peak power over the last
-  SlopeWindow+TrendAvg seconds within `max(10 W, 25%)` of PowerAvg): a burst younger
-  than the temperature's contaminated span is exactly what the buffer exists to
-  absorb — 8 s spike trains (150 W and 250 W verified) move neither the fans nor the
-  trigger. The 250 W train used to fire through a subtler chain: spikes ratchet the
-  trend, LearnSteady pairs that elevated trend with trough power (inflates R(0) to
-  ~0.78), and the 60 s power window aliasing the 90 s spike period reads 44↔71 W —
-  the gate cuts the accusation off at the root. A sustained load opens the gate
-  within ~PowerAveragingSeconds; the accepted cost is that a wall-jump load (188 W
-  step) is spike-indistinguishable for that minute and overshoots the aim into the
-  aim→ceiling gap (fires via the ceiling-referenced prong at ~74° trend, peaks 80°
-  die — the fuse stays the hard stop). **One ramp step per slope
+  ends. **Prong gating (redesigned later on 2026-07-27 after Kuba's "temperature
+  rising and rising through 80° and the fans not kicking in")**: the MODEL prong
+  runs UNGATED — it reads only sustained quantities (PowerAvg, trend) and its
+  aim-clearance margin (equilibrium must clear the line by ≥ HysteresisC) absorbs
+  power-window aliasing. The first cut gated BOTH prongs on burst-quietness, which
+  silenced the whole predictive layer under a real game: a live draw never stops
+  fluctuating (peak−avg ≈ 55 W for the entire session), the gate never opened,
+  headroom sat pinned at ∞ and only reactive StepUpHold caught the climb — late,
+  above the aim (harness S7 reproduces this with a realistic swinging load). The
+  SLOPE prong keeps the strict peak gate (no burst above `max(10 W, 25%)` over
+  PowerAvg within the last SlopeWindow+TrendAvg seconds) — its contamination is
+  physical: an 8 s spike's die jump reads as a rush toward the aim for as long as
+  the fit can see it (harness S3). LEARNING gets the longest quiet horizon
+  (slope+trend+power windows ≈ 115 s at defaults): the 250 W spike train poisoned
+  R(0) to ~0.78 through 30 s-"stable" windows by pairing the still-elevated trend
+  with trough power, and a poisoned R is what turns the ungated model prong into a
+  false accuser — with honest learning, the margin alone keeps spike trains silent
+  (150 W and 250 W verified: fans never move, min tau 632 s). The wall-jump cost
+  stays: a 188 W step is spike-indistinguishable early on, fires at ~68° trend and
+  peaks 80° die — the fuse stays the hard stop. **One ramp step per slope
   window (2026-07-26, from Kuba's "fans ramped instantly to 100%")**: the measured
   slope keeping tau low is backward-looking and knows nothing of the step just taken,
   so re-firing every tick used to climb the whole ladder in seconds; within the
@@ -299,11 +316,14 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   Steps DOWN one ladder level
   per StepDownHoldSeconds once the power average no longer needs the current one —
   after a load ends this reacts minutes before the cooling temp average would — and
-  (2026-07-27) only onto a level predicted to hold the aim with `HysteresisC` to
-  spare (`ChannelConfig.HysteresisC` now feeds the budget controller — the budget
-  twin of the temp filter's step-down hysteresis; with the model prong's clearance
-  it forms a **dead band around the aim** where only settled evidence moves the fan.
-  Without it, a level equilibrating exactly AT the aim hunted 20↔40% every ~90 s).
+  (2026-07-27) only onto a level predicted to hold the aim even at **5/4 of today's
+  sustained draw**: hysteresis in the DRAW dimension, where the swings actually
+  live. A ±HysteresisC temperature band alone is worth ~4 W at a 20% fan level —
+  a constant load equilibrating exactly AT the aim hunted 20↔40% across it, and a
+  game's minute-scale swells re-crossed it constantly (harness S7). Deliberately
+  NOT stacked with the temperature band: the double margin blocked the final step
+  to silence at warm idle (harness S5b). `ChannelConfig.HysteresisC` still feeds
+  the controller — as the model prong's aim-clearance margin.
   **The sustained aim is also enforced UPWARD (2026-07-26, from Kuba's report
   "headroom dips briefly, recovers to max, fans never kick in")**: even the
   aim-referenced tau goes blind at a settled equilibrium that a frozen or unlearned
@@ -316,7 +336,9 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   `StepUpHold`). Each step up brands the level it left as measured-insufficient at
   that PowerAvg — DemandLevel is clamped above the branded level so the model can't
   argue the fan straight back down into a slow on/off limit cycle; the brand lifts
-  once the sustained draw falls max(5 W, 10%) below the draw that failed. A spent
+  once the sustained draw has stayed max(5 W, 10%) below the draw that failed for a
+  full StepDownHold (sustained forgiveness since 2026-07-27 — instant forgiveness
+  re-armed the descent on every lull of a fluctuating load, harness S7). A spent
   budget (trend ≥ ceiling) with the trend not falling reads `TauSeconds = 0`, not ∞,
   which also routes it into the ramp branch.
   `ThermalModel` (per channel, persisted in profile.json as `LearnedThermalMassJPerC` /
@@ -381,16 +403,21 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   holding ~79.7° (the aim); 8 s/150 W spikes still never move the fans; learning-off
   behaves the same as learning-on thanks to the model-free prong + the brand; after
   the load ends the brand is forgiven and the fan winds back to 0.
-  **Fourth harness 2026-07-27 (the aim-referenced headroom)**, deterministic
-  sim-plant replica, Kuba's margins (aim 70 / ceiling 86 / lead 90) plus a
-  preset-defaults scenario: settled idle 44 W reads ∞ with fans off; a 90 W step
-  gets fans at +37 s (trend 61°, the confirmation gate opening) and settles 65° at
-  40% with tau recovering ONLY on the fan steps; a 44→90 W creep over 8 min shows a
+  **Fourth harness 2026-07-27 (the aim-referenced headroom; 10 scenarios by the end
+  of the day)**, deterministic sim-plant replica, Kuba's margins (aim 70 / ceiling
+  86 / lead 90) plus a preset-defaults scenario: settled idle 44 W reads ∞ with fans
+  off; a constant 90 W step gets fans at +70 s (trend 64°) and settles 65° at 40%
+  with tau recovering ONLY on the fan steps; a 44→90 W creep over 8 min shows a
   242 s visible countdown before firing at 66°; 150 W and 250 W spike trains never
   move the fans (min tau 632 s, never near the trigger); 188 W reaches 100% in
   ~1 min peaking 80.1° die, no fuse; a frozen optimistic-corner model still gets
   fans via the measured prong and holds a stable 40% thanks to the ramp brand;
-  preset defaults fire at 78.9° and settle 70.7°.
+  preset defaults fire at 78.9° and settle 70.7°; **S7, the report repro** — a
+  realistic game (95 W mean swinging 111↔167 W, bursts to ~155, Kuba's learned
+  values, model reset mid-rise) — fires predictively at +58 s / trend 67° and then
+  holds one steady 50% for ten minutes straight through the swings; S5b (90 W onto
+  a warm 63° idle) fires at +56 s / 68.2° and the warm idle itself unwinds to
+  fully-stopped fans.
   Gotcha: don't lower `OverrideTempC` much below 90 on the 9950X3D — the ceiling is
   `Override − 4` and the steady target `Override − 10`, so 85 forces near-100% fan for
   loads Kuba's Quiet curve holds at 81% (found in harness scenario 2). Second harness
