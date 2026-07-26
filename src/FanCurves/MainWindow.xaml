@@ -851,6 +851,12 @@
                                     <TextBlock x:Name="BudgetInfoText" FontFamily="{StaticResource Mono}" FontSize="10.5"
                                                Foreground="#66ffffff" TextWrapping="Wrap" Margin="0,-4,0,0"/>
 
+                                    <!-- Every knob the aim-referenced headroom reads, gathered on one
+                                         line (they live in three different slider sections). -->
+                                    <TextBlock x:Name="HeadroomInfoText" FontFamily="{StaticResource Mono}" FontSize="10.5"
+                                               Foreground="#66ffffff" TextWrapping="Wrap" Margin="0,4,0,0"
+                                               ToolTip="The sliders the headroom prediction reads: 'Ramp when headroom under' = the lead (fans step up when the predicted time to the sustained aim drops under it); the channel's 'Step-down hysteresis' = the ± dead band around the aim (accusations need the equilibrium past aim+band, step-downs need the lower level to hold aim−band); 'Power averaging' = the sustained draw behind the predicted equilibrium; sink trend + trend slope windows sum to the quiet gate — headroom only counts down once the draw has been steady for that long, so short spikes never move it."/>
+
                                     <!-- What the controller has worked out about this cooler. -->
                                     <TextBlock local:Tracked.Text="LEARNED MODEL" Style="{StaticResource MicroLabel}"
                                                Margin="0,14,0,6"/>

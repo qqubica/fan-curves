@@ -356,7 +356,12 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   override − this), `SteadyTargetMarginC` (10, sustained aim; clamped in `Step` so it
   can never sit above the ceiling), `PowerTrendSeconds` (30), `PowerSlopeSeconds`
   (25), `PowerNowSeconds` (10), `OverrideReleaseC` (3) and `OverrideReleaseSeconds`
-  (10), plus a live `ceiling · aim` / `trend · °C/s` readout. A `LEARNED MODEL`
+  (10), plus a live `ceiling · aim` / `trend · °C/s` readout — and under it (Kuba's
+  ask 2026-07-27, "add separate line with slider options that are used in new
+  algorithm") a `headroom: lead · ±band` / `avg · quiet gate` line gathering every
+  knob the aim-referenced headroom reads (lead, the channel's HysteresisC dead band,
+  power averaging, trend+slope = the quiet-gate span), since those sliders live in
+  three different panel sections; tooltip maps each value back to its slider. A `LEARNED MODEL`
   sub-header follows: `ThermalLearningEnabled` (default true — unchecking freezes the
   model where it stands), a readout of mass / base / R-at-the-current-speed / the six
   R anchors (read straight off `ChannelConfig`, which the engine rewrites every tick),

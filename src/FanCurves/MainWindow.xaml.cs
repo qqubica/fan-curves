@@ -823,6 +823,7 @@ public partial class MainWindow : Window
         if (s?.Watts is not double || !_profile.PowerControlEnabled)
         {
             BudgetInfoText.Text = "";
+            HeadroomInfoText.Text = "";
             return;
         }
         double aim = _profile.OverrideTempC -
@@ -830,7 +831,19 @@ public partial class MainWindow : Window
         string trend = double.IsNaN(s.TrendTempC) ? "—" : Inv($"{s.TrendTempC:0.0}°");
         BudgetInfoText.Text =
             Inv($"ceiling {s.CeilingC:0}° · aim {aim:0}°\ntrend {trend} {(s.SlopeCPerSec < 0 ? "−" : "+")}{Math.Abs(s.SlopeCPerSec):0.00} °C/s");
+        // The aim-referenced headroom's inputs on one line — the sliders it reads live
+        // in three sections (lead here above, hysteresis per channel under BEHAVIOUR,
+        // the windows in this one). Quiet gate = trend + slope windows: how long the
+        // draw must be steady before headroom may count down at all.
+        double band = SelectedChannel?.HysteresisC ?? 1.5;
+        HeadroomInfoText.Text = Inv(
+            $"headroom: lead {FormatMss(_profile.RampLeadSeconds)} · ±{band:0.#}°\n" +
+            $"avg {_profile.PowerAveragingSeconds:0} s · quiet gate {_profile.PowerTrendSeconds + _profile.PowerSlopeSeconds:0} s");
     }
+
+    /// <summary>Compact m:ss for the readout lines (the strips' chip vocabulary).</summary>
+    private static string FormatMss(double s) =>
+        s < 60 ? Inv($"{s:0} s") : Inv($"{(int)s / 60}:{(int)s % 60:00}");
 
     /// <summary>What the controller has worked out about the selected channel's cooler:
     /// thermal mass, idle baseline and the cooling-resistance anchors.</summary>
