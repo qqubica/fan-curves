@@ -123,6 +123,12 @@ public class ThermalModel
 /// 3. The fan steps UP only when the predicted time to exhaust that credit — the more
 ///    pessimistic of energy/surplus (model) and headroom/slope (measured) — drops under
 ///    RampLeadSeconds, and it goes directly to the ladder level that restores the lead.
+///    ONE step per slope window: the measured slope is backward-looking, so right after
+///    a step it still reports the pre-step warming and would otherwise climb the whole
+///    ladder to 100% in as many ticks (Kuba's report, 2026-07-26). Within the settle
+///    window a further step happens only if the chosen level has become objectively
+///    insufficient — the draw rose enough that its predicted equilibrium no longer
+///    clears the ceiling. The fuse is not rate-limited by any of this.
 /// 4. It steps DOWN one ladder level per StepDownHoldSeconds once the sustained power
 ///    average no longer needs the current one — after a load ends this reacts to the
 ///    power collapse, minutes before a cooling temperature average would.
@@ -180,6 +186,7 @@ public class PowerBudgetController
     private double _upSince = double.NaN;
     private double _overrideOkSince = double.NaN;
     private double _lastTime = double.NaN;
+    private double _lastRampStep = double.NaN;
     // A demand step-up is measured proof the level it left cannot hold the aim at that
     // sustained draw. Remembered so the model (possibly unlearned or frozen) cannot
     // immediately argue the fan back down — that would be a slow on/off limit cycle.
@@ -310,11 +317,17 @@ public class PowerBudgetController
             _downSince = double.NaN;
             _upSince = double.NaN;
         }
-        else if (TauSeconds < RampLeadSeconds && _target < ladder[^1] - 0.01)
+        else if (TauSeconds < RampLeadSeconds && _target < ladder[^1] - 0.01 &&
+                 (double.IsNaN(_lastRampStep) || now - _lastRampStep >= SlopeWindowSeconds ||
+                  Model.BaseTempC + Model.R(_target) * PowerNow > ceiling - 1))
         {
             // Credit is running out: jump the target to the lowest ladder level whose
             // equilibrium temperature at today's draw sits back under the ceiling —
-            // at that level the surplus decays to zero before the credit does.
+            // at that level the surplus decays to zero before the credit does. Then
+            // hold: the slope that keeps TauSeconds low is measured over the past
+            // window and cannot yet know about this step, so another one is allowed
+            // only after the window turns over — or immediately if the draw has risen
+            // enough that the level just chosen no longer clears the ceiling.
             double up = ladder[^1];
             foreach (var l in ladder)
             {
@@ -322,6 +335,7 @@ public class PowerBudgetController
                 if (Model.BaseTempC + Model.R(l) * PowerNow <= ceiling - 1) { up = l; break; }
             }
             _target = up;
+            _lastRampStep = now;
             _downSince = double.NaN;
             _upSince = double.NaN;
         }
@@ -467,6 +481,7 @@ public class PowerBudgetController
         _upSince = double.NaN;
         _overrideOkSince = double.NaN;
         _lastTime = double.NaN;
+        _lastRampStep = double.NaN;
         _failedLevel = double.NaN;
         OverrideActive = false;
         EffectiveTemp = double.NaN;

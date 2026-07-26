@@ -259,7 +259,13 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   die's instant jump). Fan steps UP only when predicted time-to-exhaustion
   `min(E/surplus, headroom/slope)` drops under `Profile.RampLeadSeconds` (default 45),
   directly to the lowest curve-ladder level whose predicted equilibrium
-  (`base + R(level)·PowerNow`) is back under the ceiling; steps DOWN one ladder level
+  (`base + R(level)·PowerNow`) is back under the ceiling — **one such step per slope
+  window (2026-07-26, from Kuba's "fans ramped instantly to 100%")**: the measured
+  slope keeping tau low is backward-looking and knows nothing of the step just taken,
+  so re-firing every tick used to climb the whole ladder in seconds; within the
+  settle window a further step needs the chosen level to have become objectively
+  insufficient (draw rose; its predicted equilibrium no longer clears the ceiling).
+  Steps DOWN one ladder level
   per StepDownHoldSeconds once the power average no longer needs the current one —
   after a load ends this reacts minutes before the cooling temp average would.
   **The sustained aim is also enforced UPWARD (2026-07-26, from Kuba's report
@@ -293,9 +299,9 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   blind; partly legacy of the pre-2026-07-25 bug where `--sim` runs saved sim-learned
   models into the real profile). His profile was healed in place (learned values
   zeroed; backup `profile.json.bak-2026-07-26`) and — his preference, stated twice:
-  ~70° die should mean fans — **his machine runs `SteadyTargetMarginC` 20, i.e.
-  sustained aim 70°** (the preset default stays 10/aim 80; revert via the dev-panel
-  "sustained aim" slider). **Fuse**: raw temp ≥ `Profile.OverrideTempC`
+  ~70° die should mean fans — **his machine runs `SteadyTargetMarginC` 20 (sustained
+  aim 70°) and `RampLeadSeconds` 90 ("fans should kick in much earlier")**; preset
+  defaults stay 10/45 — revert via the dev-panel sliders. **Fuse**: raw temp ≥ `Profile.OverrideTempC`
   (default 90) → the channel's own staircase evaluated on the RAW temp is written
   instantly, no slew, output never decays while latched (release: 3° below for 10 s);
   stop probe + idle kick are bypassed during override. Under a load that pins Tctl at
