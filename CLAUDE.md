@@ -257,6 +257,21 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   (`base + R(level)·PowerNow`) is back under the ceiling; steps DOWN one ladder level
   per StepDownHoldSeconds once the power average no longer needs the current one —
   after a load ends this reacts minutes before the cooling temp average would.
+  **The sustained aim is also enforced UPWARD (2026-07-26, from Kuba's report
+  "headroom dips briefly, recovers to max, fans never kick in")**: the tau trigger
+  goes blind at any equilibrium — surplus and slope both vanish there, so both
+  predictions read ∞ (the better the model has learned, the more exactly) — which
+  used to park a 90 W game at ~84° die with fans stopped forever, and a 188 W load
+  at 86.1°, above its own ceiling, showing "buffer 0.0 kJ · headroom ∞". Now: trend
+  past the steady aim AND (power average demands a higher ladder level OR the temp
+  has settled there, slope > −0.002 — the model-free prong catches frozen/unlearned
+  models) → one ladder step up per StepDownHoldSeconds (why-chip reason
+  `StepUpHold`). Each step up brands the level it left as measured-insufficient at
+  that PowerAvg — DemandLevel is clamped above the branded level so the model can't
+  argue the fan straight back down into a slow on/off limit cycle; the brand lifts
+  once the sustained draw falls max(5 W, 10%) below the draw that failed. A spent
+  budget (trend ≥ ceiling) with the trend not falling reads `TauSeconds = 0`, not ∞,
+  which also routes it into the ramp branch.
   `ThermalModel` (per channel, persisted in profile.json as `LearnedThermalMassJPerC` /
   `LearnedBaseTempC` / `LearnedResistances`, UI saves every ~5 min) learns online:
   C from surplus-watts vs temp slope, R anchors (0/20/…/100%) + base from quasi-steady
@@ -293,6 +308,12 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   `sim/cpu-pwr`/`sim/gpu-pwr`) so `--sim` exercises the controller honestly. All
   scenarios (burst immunity, predictive ramp, fuse with corrupt model, power step-down,
   C/R learning convergence) verified by a scratchpad console harness on 2026-07-24.
+  The upward enforcement was verified by a third harness on 2026-07-26 (sim plant
+  replica, deterministic): 90 W sustained now steps 0→20% ~8 min in and settles at
+  ~71° die (was: parked at 84.2° with fans off forever); 188 W converges to 100%
+  holding ~79.7° (the aim); 8 s/150 W spikes still never move the fans; learning-off
+  behaves the same as learning-on thanks to the model-free prong + the brand; after
+  the load ends the brand is forgiven and the fan winds back to 0.
   Gotcha: don't lower `OverrideTempC` much below 90 on the 9950X3D — the ceiling is
   `Override − 4` and the steady target `Override − 10`, so 85 forces near-100% fan for
   loads Kuba's Quiet curve holds at 81% (found in harness scenario 2). Second harness

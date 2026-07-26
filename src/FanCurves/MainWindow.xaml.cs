@@ -592,6 +592,8 @@ public partial class MainWindow : Window
                 Inv($"ramping down to {s.TargetPercent:0}% · {ch.SlewDownPercentPerSec:0.#} %/s"),
             OutputReason.StepDownHold =>
                 Inv($"holding {s.OutputPercent:0}% · steps down to {s.ReasonLevel:0}% in {Math.Ceiling(s.ReasonSeconds):0} s"),
+            OutputReason.StepUpHold =>
+                Inv($"sustained {s.WattsAvg ?? 0:0} W needs more · steps up to {s.ReasonLevel:0}% in {Math.Ceiling(s.ReasonSeconds):0} s"),
             OutputReason.Hysteresis =>
                 Inv($"holding {s.OutputPercent:0}% · avg not yet {ch.HysteresisC:0.#}° below the step"),
             OutputReason.ZeroSnap =>

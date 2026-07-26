@@ -9,6 +9,7 @@ public enum OutputReason
     RampUp,       // slew limit still gliding up toward the target level
     RampDown,     // slew limit still gliding down toward the target level
     StepDownHold, // lower band reached, waiting out StepDownHoldSeconds
+    StepUpHold,   // power control: sustained demand needs a higher level, hold running
     Hysteresis,   // avg maps lower but is not yet HysteresisC clear of the band edge
     ZeroSnap,     // curve level is under ZeroSnapPercent → running at 0 instead
     MinFloor,     // channel MinPercent overrides a lower curve level
@@ -231,6 +232,12 @@ public class FanEngine : IDisposable
                                 reason = OutputReason.StepDownHold;
                                 reasonLevel = Math.Max(ch.MinPercent, budget.PendingDownLevel);
                                 reasonSeconds = budget.DownHoldRemaining;
+                            }
+                            else if (!double.IsNaN(budget.UpHoldRemaining))
+                            {
+                                reason = OutputReason.StepUpHold;
+                                reasonLevel = Math.Max(ch.MinPercent, budget.PendingUpLevel);
+                                reasonSeconds = budget.UpHoldRemaining;
                             }
                             else if (budget.SnappedToZero && output <= 0.01)
                             {

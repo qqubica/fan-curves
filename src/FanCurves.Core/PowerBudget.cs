@@ -107,7 +107,16 @@ public class ThermalModel
 /// 4. It steps DOWN one ladder level per StepDownHoldSeconds once the sustained power
 ///    average no longer needs the current one — after a load ends this reacts to the
 ///    power collapse, minutes before a cooling temperature average would.
-/// 5. Fuse: raw die temp at/over OverrideTempC snaps the output to the channel's own
+/// 5. The sustained aim is also enforced UPWARD: once the sink trend is past the steady
+///    target and either the sustained average needs a higher ladder level or the temp
+///    has settled there, it steps up one level per StepDownHoldSeconds. The tau trigger
+///    alone goes blind at any equilibrium (surplus and slope both vanish, so both
+///    predictions read ∞ — the better the model has learned, the more exactly), which
+///    used to park the die anywhere below the ceiling with the fans never asked for more.
+///    Each step up brands the level it left as measured-insufficient at that draw, so an
+///    unlearned model cannot argue the fan straight back down into an on/off limit cycle;
+///    the brand lifts once the sustained draw falls clearly below the draw that failed.
+/// 6. Fuse: raw die temp at/over OverrideTempC snaps the output to the channel's own
 ///    temperature curve instantly, without slew, until the temp clears the threshold.
 ///    Silence is never bought at the price of throttling.
 /// </summary>
@@ -149,8 +158,15 @@ public class PowerBudgetController
     private double _target = double.NaN;
     private double _output = double.NaN;
     private double _downSince = double.NaN;
+    private double _upSince = double.NaN;
     private double _overrideOkSince = double.NaN;
     private double _lastTime = double.NaN;
+    // A demand step-up is measured proof the level it left cannot hold the aim at that
+    // sustained draw. Remembered so the model (possibly unlearned or frozen) cannot
+    // immediately argue the fan back down — that would be a slow on/off limit cycle.
+    // Forgiven once the sustained draw falls clearly below the draw that failed it.
+    private double _failedLevel = double.NaN;
+    private double _failedPowerAvg;
 
     // Diagnostics for the engine/UI — refreshed on every Step, valid until the next one.
     /// <summary>Fuse engaged: the temperature curve is being written directly, no slew.</summary>
@@ -179,6 +195,10 @@ public class PowerBudgetController
     public double PendingDownLevel { get; private set; } = double.NaN;
     /// <summary>Seconds of StepDownHoldSeconds still to wait (NaN when none is pending).</summary>
     public double DownHoldRemaining { get; private set; } = double.NaN;
+    /// <summary>Level a pending demand step-up will rise to (NaN when none is pending).</summary>
+    public double PendingUpLevel { get; private set; } = double.NaN;
+    /// <summary>Seconds until the pending step-up lands (NaN when none is pending).</summary>
+    public double UpHoldRemaining { get; private set; } = double.NaN;
     /// <summary>Sink-trend temperature — the temperature the budget is measured from.</summary>
     public double TrendTempC { get; private set; } = double.NaN;
     /// <summary>Measured trend slope in °C/s (positive = warming).</summary>
@@ -235,6 +255,10 @@ public class PowerBudgetController
         double tauEnergy = surplus > 1 ? BudgetJoules / surplus : double.PositiveInfinity;
         double tauSlope = slope > 0.005 ? (ceiling - trendTemp) / slope : double.PositiveInfinity;
         TauSeconds = Math.Min(tauEnergy, tauSlope);
+        // A spent budget with the trend not clearly falling is ZERO headroom, not
+        // infinite: parked at the ceiling, surplus and slope both vanish and the two
+        // predictions above go blind exactly when the credit is gone.
+        if (BudgetJoules <= 0 && slope > -0.002) TauSeconds = 0;
 
         var ladder = Ladder(curve);
         // The sustained aim can never sit above the transient ceiling, whatever the
@@ -243,9 +267,19 @@ public class PowerBudgetController
         DemandLevel = ladder[^1];
         foreach (var l in ladder)
             if (Model.BaseTempC + Model.R(l) * PowerAvg <= steadyTarget) { DemandLevel = l; break; }
+        // Measured insufficiency outranks the model's estimate: while a level stands
+        // proven too weak for today's draw, demand cannot fall to it or below.
+        if (!double.IsNaN(_failedLevel) &&
+            PowerAvg < _failedPowerAvg - Math.Max(5, _failedPowerAvg * 0.1))
+            _failedLevel = double.NaN;
+        if (!double.IsNaN(_failedLevel))
+            foreach (var l in ladder)
+                if (l > _failedLevel + 0.01) { DemandLevel = Math.Max(DemandLevel, l); break; }
 
         PendingDownLevel = double.NaN;
         DownHoldRemaining = double.NaN;
+        PendingUpLevel = double.NaN;
+        UpHoldRemaining = double.NaN;
 
         if (OverrideActive)
         {
@@ -255,6 +289,7 @@ public class PowerBudgetController
             _target = Math.Max(_target, must);
             _output = Math.Max(_output, must);
             _downSince = double.NaN;
+            _upSince = double.NaN;
         }
         else if (TauSeconds < RampLeadSeconds && _target < ladder[^1] - 0.01)
         {
@@ -269,6 +304,35 @@ public class PowerBudgetController
             }
             _target = up;
             _downSince = double.NaN;
+            _upSince = double.NaN;
+        }
+        else if (trendTemp > steadyTarget && _target < ladder[^1] - 0.01 &&
+                 (DemandLevel > _target + 0.01 || slope > -0.002))
+        {
+            // The sink is already past the sustained aim and either the power average
+            // needs a level this one cannot hold, or the temp has settled there (not
+            // cooling — a frozen or unlearned model can claim the level is sufficient
+            // while the measured trend proves otherwise): one ladder step up per hold.
+            // The tau trigger never fires at a settled equilibrium (surplus and slope
+            // both vanish), so without this the die would park anywhere below the
+            // ceiling with the fans never asked for more. Gating on the trend keeps
+            // burst immunity: short spikes never drag the trend past the aim.
+            double above = ladder[^1];
+            foreach (var l in ladder) if (l > _target + 0.01) { above = l; break; }
+            if (double.IsNaN(_upSince)) _upSince = now;
+            _downSince = double.NaN;
+            if (now - _upSince >= StepDownHoldSeconds)
+            {
+                _failedLevel = _target;      // measured: this level cannot hold the aim
+                _failedPowerAvg = PowerAvg;  // at this sustained draw
+                _target = above;
+                _upSince = double.NaN;
+            }
+            else
+            {
+                PendingUpLevel = Snap(above);
+                UpHoldRemaining = StepDownHoldSeconds - (now - _upSince);
+            }
         }
         else if (TauSeconds >= RampLeadSeconds && DemandLevel < _target - 0.01 &&
                  trendTemp < ceiling - 1)
@@ -277,6 +341,7 @@ public class PowerBudgetController
             double below = ladder[0];
             foreach (var l in ladder) if (l < _target - 0.01) below = l;
             if (double.IsNaN(_downSince)) _downSince = now;
+            _upSince = double.NaN;
             if (now - _downSince >= StepDownHoldSeconds)
             {
                 _target = below;
@@ -288,7 +353,7 @@ public class PowerBudgetController
                 DownHoldRemaining = StepDownHoldSeconds - (now - _downSince);
             }
         }
-        else _downSince = double.NaN;
+        else { _downSince = double.NaN; _upSince = double.NaN; }
 
         double snapped = Snap(_target);
         SnappedToZero = !OverrideActive && _target > 0 && snapped <= 0;
@@ -380,8 +445,10 @@ public class PowerBudgetController
         _target = double.NaN;
         _output = double.NaN;
         _downSince = double.NaN;
+        _upSince = double.NaN;
         _overrideOkSince = double.NaN;
         _lastTime = double.NaN;
+        _failedLevel = double.NaN;
         OverrideActive = false;
         EffectiveTemp = double.NaN;
         TrendTempC = double.NaN;
