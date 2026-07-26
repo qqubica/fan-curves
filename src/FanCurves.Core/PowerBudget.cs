@@ -25,13 +25,26 @@ public class ThermalModel
     public double BaseTempC { get; private set; } = SeedBaseTempC;
     private readonly double[] _r = (double[])SeedR.Clone();
 
+    /// <summary>
+    /// Learned-value plausibility bounds. Base is the ZERO-watt baseline (ambient +
+    /// case air) — anything near real steady die temps (48°+) means the model has
+    /// collapsed onto the (base, R) identifiability ridge: with samples from a single
+    /// operating point base drifts up to eat the temperature level while R shrinks
+    /// toward zero, until "dissipation" dwarfs the actual draw and every energy-side
+    /// prediction goes blind (found on Kuba's machine 2026-07-26: base 52°, R flat
+    /// ~0.08–0.10 °C/W at every fan speed). The R floor slides with fan speed: no sane
+    /// air cooler beats 0.2 °C/W passively, while a big loop may reach 0.05 at full tilt.
+    /// </summary>
+    public const double MaxBaseTempC = 45;
+    public static double MinR(double percent) => 0.20 - 0.0015 * Math.Clamp(percent, 0, 100);
+
     /// <summary>Adopt previously learned values when they pass sanity bounds (0 = unlearned).</summary>
     public void LoadFrom(ChannelConfig ch)
     {
         if (ch.LearnedThermalMassJPerC is > 20 and < 5000) MassJPerC = ch.LearnedThermalMassJPerC;
-        if (ch.LearnedBaseTempC is > 5 and < 60) BaseTempC = ch.LearnedBaseTempC;
+        if (ch.LearnedBaseTempC > 5 && ch.LearnedBaseTempC < MaxBaseTempC + 1) BaseTempC = ch.LearnedBaseTempC;
         if (ch.LearnedResistances.Count == _r.Length &&
-            ch.LearnedResistances.All(r => r is > 0.03 and < 4))
+            ch.LearnedResistances.Select((r, i) => r >= MinR(AnchorPercents[i]) && r < 4).All(ok => ok))
             for (int i = 0; i < _r.Length; i++) _r[i] = ch.LearnedResistances[i];
     }
 
@@ -80,16 +93,22 @@ public class ThermalModel
     {
         // The base drifts toward what this operating point implies, then the observed
         // °C-over-base per watt is split across the two anchors bracketing the speed.
-        BaseTempC = Math.Clamp(BaseTempC * 0.99 + (tempC - R(percent) * watts) * 0.01, 10, 60);
+        // Both are clamped to the physical-plausibility bounds (see MaxBaseTempC):
+        // single-operating-point data cannot separate base from R, so without the
+        // bounds the pair drifts until the model is confidently absurd.
+        BaseTempC = Math.Clamp(BaseTempC * 0.99 + (tempC - R(percent) * watts) * 0.01, 10, MaxBaseTempC);
         if (watts < 1) return;
-        double sample = Math.Clamp((tempC - BaseTempC) / watts, 0.03, 4);
         double p = Math.Clamp(percent, 0, 100);
+        double sample = Math.Clamp((tempC - BaseTempC) / watts, MinR(p), 4);
         int i = Math.Min(AnchorPercents.Length - 2, (int)(p / 20));
         double f = (p - AnchorPercents[i]) / 20;
         _r[i] += (sample - _r[i]) * 0.08 * (1 - f);
         _r[i + 1] += (sample - _r[i + 1]) * 0.08 * f;
-        // More fan can never cool worse: keep the anchor list non-increasing.
-        for (int k = 1; k < _r.Length; k++) _r[k] = Math.Min(_r[k], _r[k - 1]);
+        // More fan can never cool worse: keep the anchor list non-increasing —
+        // but never below each anchor's own floor, so one visited operating point
+        // cannot flatten the unvisited rest of the ladder into nonsense.
+        for (int k = 1; k < _r.Length; k++)
+            _r[k] = Math.Max(MinR(AnchorPercents[k]), Math.Min(_r[k], _r[k - 1]));
     }
 }
 

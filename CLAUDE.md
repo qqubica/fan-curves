@@ -280,7 +280,22 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   `ThermalModel` (per channel, persisted in profile.json as `LearnedThermalMassJPerC` /
   `LearnedBaseTempC` / `LearnedResistances`, UI saves every ~5 min) learns online:
   C from surplus-watts vs temp slope, R anchors (0/20/…/100%) + base from quasi-steady
-  points; seeds are NH-D15-class (C 450 J/°C). **Fuse**: raw temp ≥ `Profile.OverrideTempC`
+  points; seeds are NH-D15-class (C 450 J/°C). **Learning guardrails (2026-07-26)**:
+  base (the ZERO-watt baseline, ambient + case air) is clamped to ≤45° and R samples
+  to a fan-speed-sliding floor (0.20 °C/W at 0% → 0.05 at 100%; `MinR()`), and
+  `LoadFrom` rejects out-of-bounds saved values as unlearned. Without them the
+  (base, R) pair is unidentifiable from single-operating-point data (fans parked at
+  0% all day = one point) and drifts along a ridge — base eats the steady temp level,
+  R collapses, and the more-fan-never-cools-worse clamp used to flatten the whole
+  anchor ladder to the collapsed value (now it also respects the per-anchor floors).
+  Found on Kuba's machine 2026-07-26 as base 52°/R flat ~0.08–0.10 on BOTH channels
+  (model claimed ~200 W dissipation at 44 W draw → every energy-side prediction
+  blind; partly legacy of the pre-2026-07-25 bug where `--sim` runs saved sim-learned
+  models into the real profile). His profile was healed in place (learned values
+  zeroed; backup `profile.json.bak-2026-07-26`) and — his preference, stated twice:
+  ~70° die should mean fans — **his machine runs `SteadyTargetMarginC` 20, i.e.
+  sustained aim 70°** (the preset default stays 10/aim 80; revert via the dev-panel
+  "sustained aim" slider). **Fuse**: raw temp ≥ `Profile.OverrideTempC`
   (default 90) → the channel's own staircase evaluated on the RAW temp is written
   instantly, no slew, output never decays while latched (release: 3° below for 10 s);
   stop probe + idle kick are bypassed during override. Under a load that pins Tctl at
