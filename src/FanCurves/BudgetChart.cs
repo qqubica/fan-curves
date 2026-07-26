@@ -16,11 +16,23 @@ public class BudgetChart : StripChart
     /// <summary>Ramp lead in force (Profile.RampLeadSeconds) — the trigger line.</summary>
     public double LeadSeconds { get; set; } = 45;
 
-    private double _wattsMax = 100, _secondsMax = 180;
+    private double _wattsMax = 100;
+
+    // Headroom is drawn on a LOG scale from 10 s to 30 min: time-to-trouble matters by
+    // its order of magnitude, and a linear axis capped near the trigger collapsed
+    // "3 hours", "20 minutes and falling" and "∞" into the same flat line at the top —
+    // a slow warm-up read as "headroom not moving" (Kuba's report, 2026-07-26). The top
+    // still means "≥30 min / ∞" (the chip prints ∞ there); the trigger line sits in the
+    // lower third, so a genuine dive toward it is a long visible descent.
+    private const double SecondsLo = 10, SecondsHi = 1800;
 
     private double YForWatts(double w) => Plot.Bottom - Math.Clamp(w, 0, _wattsMax) / _wattsMax * Plot.Height;
-    private double YForSeconds(double s) =>
-        Plot.Bottom - Math.Clamp(double.IsNaN(s) ? 0 : s, 0, _secondsMax) / _secondsMax * Plot.Height;
+    private double YForSeconds(double s)
+    {
+        double v = Math.Clamp(double.IsNaN(s) ? 0 : s, SecondsLo, SecondsHi);
+        double f = Math.Log(v / SecondsLo) / Math.Log(SecondsHi / SecondsLo);
+        return Plot.Bottom - f * Plot.Height;
+    }
 
     /// <summary>Round a peak up to a readable axis top (the ladder keeps the label short).</summary>
     private static double NiceWatts(double peak)
@@ -67,8 +79,6 @@ public class BudgetChart : StripChart
             if (h[i].WattsAvg is double a) peak = Math.Max(peak, a);
         }
         _wattsMax = NiceWatts(Math.Max(25, peak));
-        // Room above the trigger so a healthy buffer has somewhere to sit.
-        _secondsMax = Math.Max(120, Math.Ceiling(LeadSeconds * 3 / 30) * 30);
 
         // Nothing to scale against: say why, and skip axes that would only invite
         // reading numbers into an empty strip.
@@ -93,8 +103,9 @@ public class BudgetChart : StripChart
         }
 
         // Headroom scale references inside the right edge (second scale, no gridlines).
-        // Nothing near the top of the scale — that row belongs to the legend.
-        foreach (double s in new[] { 60.0, 120.0 }.Where(s => s <= _secondsMax - 45))
+        // Log axis: decade-ish marks. Nothing near the top — that row belongs to the
+        // legend (30 min IS the top, so it gets no mark; the chip prints ∞ up there).
+        foreach (double s in new[] { 60.0, 600.0 })
         {
             var t = Label(Headroom(s), refBrush, 9.5);
             dc.DrawText(t, new Point(r.Right - t.Width - 4, YForSeconds(s) - t.Height / 2));

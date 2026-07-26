@@ -84,7 +84,12 @@ No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
   under-fill) on a **watts** scale that auto-ranges to the window's own peak
   (`NiceWatts` ladder), against the predicted headroom `TauSeconds` (quiet line, right
   scale in **seconds**) and a dotted `ramp lead` line = the threshold that triggers a
-  step up. Hard-override spans are shaded with a "fuse" label; hover chip reads
+  step up. The headroom axis is **logarithmic, 10 s → 30 min** (2026-07-26, after
+  Kuba's "headroom is not decreasing while the avg temp rises": the old linear axis
+  capped at 3× the lead drew "3 hours", "20 min and falling" and "∞" as the same flat
+  line at the top — a slow warm-up's drain from hours to minutes was invisible).
+  Top of scale = ≥30 min/∞ (the chip prints ∞ there), refs at 1:00 and 10:00, the
+  trigger line sits in the lower third so a genuine dive is a long visible descent. Hard-override spans are shaded with a "fuse" label; hover chip reads
   `time · draw · avg · buffer kJ · headroom · needs %` (same vocabulary as the dev
   panel readout). No under-fill under the headroom trace — a healthy buffer pins it to
   the top of the scale and a fill would flood the strip (tried it, looked like a solid
