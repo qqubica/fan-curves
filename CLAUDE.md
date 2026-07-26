@@ -365,9 +365,10 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   stop probe + idle kick are bypassed during override. Under a load that pins Tctl at
   the fuse this degrades into exactly the hand-tuned temp staircase. The curve stays
   meaningful in power mode: ladder of allowed levels + fuse fallback + why-chip
-  comparison. App-level settings (don't mark "Custom"): `PowerControlEnabled`
-  (default true), `PowerAveragingSeconds` (60), `RampLeadSeconds`, `OverrideTempC` —
-  dev-panel checkbox + three sliders + live `draw · avg` / `buffer · needs` /
+  comparison. App-level settings (don't mark "Custom"): `ControlMode`
+  (Temp/Power/Auto — see the control-mode entry below; default Power),
+  `PowerAveragingSeconds` (60), `RampLeadSeconds`, `OverrideTempC` —
+  dev-panel CONTROL MODE switch + three sliders + live `draw · avg` / `buffer · needs` /
   `headroom` readout (that line renamed from `lead` 2026-07-27);
   channels without power sensors keep the temp filter. Why-chip reasons: BudgetHold /
   BudgetRamp / HardOverride.
@@ -391,6 +392,10 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   live models and the persisted values without touching control state, so the fans
   don't jump). Dev-panel readout lines are hand-broken with `\n`: the panel fits
   ~31 mono characters, and past that WPF wraps mid-token (`°C/W` → `°` + `C/W`).
+  Each readout must be ONE interpolated string: `Inv($"…" + $"…")` does not compile —
+  concatenated interpolated strings lose the FormattableString conversion. The
+  headroom line was committed that way on 2026-07-27 and the tip didn't build until
+  the control-mode commit folded it back into a single `$"…\n…"`.
   The four long setting checkboxes now hold a wrapping `TextBlock` instead of a
   string `Content` — a plain string clips at the panel edge. `SimulatedBackend` is now a real plant (sink 420 J/°C
   behind fan-dependent resistance, die rides ~0.055 °C/W above sink, power sensors
@@ -427,6 +432,33 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   stay finite — but **long trend/slope windows are the risky end**: at 120 s/120 s the
   ramp waits until 205 s and the die reaches 89.9 °, i.e. it only just stays under the
   fuse.
+- **Control-mode switch (2026-07-27, Kuba: "switch between temperature-based and
+  power-based mode" + "automatic option that considers both outputs")**: dev-panel
+  `CONTROL MODE` segmented switch (Temp · Power · Auto) → `Profile.ControlMode`
+  (string-serialized enum; app-level like the rest — no "Custom", presets don't touch
+  it). The old bool `PowerControlEnabled` stays as a JSON bridge property declared
+  BEFORE the enum, so pre-change profiles map false→Temperature on load while a
+  new-format file's `ControlMode`, deserialized after it, always wins. Default Power =
+  the previous behaviour. Temperature forces every channel onto `ResponseFilter`
+  (power sensors unread; budget strip note + power readout say "temperature mode —
+  power side off"). **Auto runs both sides every tick and the higher demand wins**,
+  implemented INSIDE the controller as `PowerBudgetController.FloorPercent`: the
+  engine steps the ResponseFilter first and feeds its snapped `TargetLevel` in as a
+  floor which the budget's published target and slewed output never drop below. The
+  floor lives inside the controller — not as a max() in the engine — so the budget's
+  physical output is what its physics read: surplus, the model prong's equilibrium
+  and `LearnSteady` all see the fan that actually spins. The outside-max design
+  poisons the model (LearnSteady pairs 50 %-cooled temps with the budget's parked 0 %
+  and teaches R(0) 0.55→0.35 — harness A2's floor-blind control shows it). No new
+  why-chip reasons needed: floor binding ⇒ output = the curve's level ⇒ chip hidden.
+  Verified by a fifth scratchpad harness, 2026-07-27 (A1 constant 90 W in Auto: budget
+  target never below the floor, predictive fire still at +69 s; A2 learning honesty +
+  the poisoned control; A3a sparse 150 W spikes: nothing moves; A3b dense spike train
+  whose 90 s average legitimately crosses the 57° step: the staircase's own 20 % runs,
+  power side silent at ∞ headroom — pure Temperature mode would do the same; A4
+  `FloorPercent = 0` is tick-identical to the pre-change controller, so Power mode is
+  untouched) plus a WPF reflection harness that clicks the switch (profile follows,
+  segments render; the --screenshot flow can't scroll the dev panel that far down).
 - Changing ChannelConfig field names breaks saved `%AppData%\FanCurves\profile.json`
   (old fields silently ignored, defaults kick in) — delete it after schema changes.
 - Sensor/control IDs are backend-specific; `AutoAssign` prunes IDs the current backend

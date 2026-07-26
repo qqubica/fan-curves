@@ -169,6 +169,12 @@ public class PowerBudgetController
     public double SlewDownPercentPerSec { get; set; } = 8;
     /// <summary>Levels above 0 but strictly below this snap to 0 (0 = disabled).</summary>
     public double ZeroSnapPercent { get; set; } = 0;
+    /// <summary>External demand floor (Auto mode): the temperature filter's target level.
+    /// The published target and the slewed output never fall below it, so the output the
+    /// physics read — surplus, equilibrium, learning — is the level the fan actually runs;
+    /// feeding the model the controller's own lower choice while an outside hand drives
+    /// the fan harder would teach it that little fan cools this well. 0 outside Auto.</summary>
+    public double FloorPercent { get; set; }
     /// <summary>The sink-trend temperature: a short rolling average that filters the die's
     /// instant jump on load onset but still tracks the heatsink warming.</summary>
     public double TrendAvgSeconds { get; set; } = 30;
@@ -214,10 +220,10 @@ public class PowerBudgetController
     public double EffectiveTemp { get; private set; } = double.NaN;
     /// <summary>What the plain temperature staircase would ask at the display average.</summary>
     public double CurveLevelAtAvg { get; private set; }
-    /// <summary>The level the slew is gliding toward (zero-snap applied).</summary>
-    public double TargetLevel => double.IsNaN(_target) ? 0 : Snap(_target);
-    /// <summary>The chosen ladder level before the zero snap.</summary>
-    public double PreSnapTarget => double.IsNaN(_target) ? 0 : _target;
+    /// <summary>The level the slew is gliding toward (floor and zero-snap applied).</summary>
+    public double TargetLevel => double.IsNaN(_target) ? 0 : Snap(Math.Max(_target, FloorPercent));
+    /// <summary>The chosen ladder level (floor applied) before the zero snap.</summary>
+    public double PreSnapTarget => double.IsNaN(_target) ? 0 : Math.Max(_target, FloorPercent);
     /// <summary>The chosen level was above 0 but collapsed to 0 by the zero snap.</summary>
     public bool SnappedToZero { get; private set; }
     /// <summary>Package power, short average (last ~10 s).</summary>
@@ -505,8 +511,12 @@ public class PowerBudgetController
         }
         else { _downSince = double.NaN; _upSince = double.NaN; }
 
-        double snapped = Snap(_target);
-        SnappedToZero = !OverrideActive && _target > 0 && snapped <= 0;
+        // The external floor binds the OUTPUT, not _target: the budget's own choice keeps
+        // evolving underneath (step-downs included), and when the floor drops the output
+        // simply slews back to it. The floor arrives already zero-snapped by its filter.
+        double floored = Math.Max(_target, FloorPercent);
+        double snapped = Snap(floored);
+        SnappedToZero = !OverrideActive && floored > 0 && snapped <= 0;
         if (!OverrideActive)
         {
             if (snapped > _output)
@@ -514,6 +524,7 @@ public class PowerBudgetController
             else
                 _output = Math.Max(snapped, _output - SlewDownPercentPerSec * dt);
         }
+        else _output = Math.Max(_output, FloorPercent); // the fuse never yields below the temp side
 
         // ---- Online learning — only with the fan settled, so the plant response
         //      isn't a mix of fan changes and power changes.

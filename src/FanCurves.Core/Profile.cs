@@ -33,6 +33,20 @@ public class ChannelConfig
     public List<double> LearnedResistances { get; set; } = new();
 }
 
+/// <summary>How fans are driven — see Profile.ControlMode.</summary>
+public enum ControlMode
+{
+    /// <summary>Every channel follows its staircase curve through the temperature filter.</summary>
+    Temperature,
+    /// <summary>Channels with a power sensor use the thermal-budget controller instead.</summary>
+    Power,
+    /// <summary>Both run at once and the higher demand wins: the temperature filter's
+    /// target rides into the budget controller as a floor, so the staircase is a
+    /// guaranteed baseline while the power side may still ramp earlier (or push higher)
+    /// when its predicted headroom runs out.</summary>
+    Auto,
+}
+
 public class Profile
 {
     public string Name { get; set; } = "Profile";
@@ -58,9 +72,25 @@ public class Profile
     public double StopProbeStableRangeC { get; set; } = 3.5;
     /// <summary>Wait after a failed trial before probing again.</summary>
     public double StopProbeRetrySeconds { get; set; } = 60;
-    /// <summary>When true, channels with a power sensor are driven by the thermal-budget
-    /// controller (power in, heatsink mass as credit) instead of the temperature filter.</summary>
-    public bool PowerControlEnabled { get; set; } = true;
+    /// <summary>Legacy pre-2026-07-27 switch, kept so older profiles load (false →
+    /// Temperature, true → leave the mode alone — Power is the default anyway).
+    /// Declared BEFORE ControlMode: serialization follows declaration order and
+    /// deserialization document order, so in a new-format file ControlMode is applied
+    /// after this bridge and always wins.</summary>
+    public bool PowerControlEnabled
+    {
+        get => ControlMode != ControlMode.Temperature;
+        set
+        {
+            if (!value) ControlMode = ControlMode.Temperature;
+            else if (ControlMode == ControlMode.Temperature) ControlMode = ControlMode.Power;
+        }
+    }
+    /// <summary>How channels with a power sensor are driven: the temperature filter, the
+    /// thermal-budget controller (power in, heatsink mass as credit), or Auto — both at
+    /// once with the higher demand winning. Channels without a power sensor always stay
+    /// on the temperature filter.</summary>
+    public ControlMode ControlMode { get; set; } = ControlMode.Power;
     /// <summary>Window for the sustained power average — "how much heat must actually leave".</summary>
     public double PowerAveragingSeconds { get; set; } = 60;
     /// <summary>Fans step up once the predicted time to exhaust the thermal buffer drops under this.</summary>

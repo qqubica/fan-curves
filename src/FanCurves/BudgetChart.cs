@@ -17,6 +17,10 @@ public class BudgetChart : StripChart
     /// <summary>Ramp lead in force (Profile.RampLeadSeconds) — the trigger line.</summary>
     public double LeadSeconds { get; set; } = 45;
 
+    /// <summary>Why the window holds no power samples — "no power sensor on this
+    /// channel" or "temperature mode"; the owner sets it to match the control mode.</summary>
+    public string NoPowerNote { get; set; } = "no power sensor on this channel — temperature control";
+
     private double _wattsMax = 100;
 
     // Headroom is drawn on a LOG scale from 10 s to 30 min: time-to-trouble matters by
@@ -86,8 +90,7 @@ public class BudgetChart : StripChart
         // reading numbers into an empty strip.
         if (count == 0 || !anyPower)
         {
-            var note = Label(count == 0 ? "waiting for the first tick…"
-                : "no power sensor on this channel — temperature control",
+            var note = Label(count == 0 ? "waiting for the first tick…" : NoPowerNote,
                 new SolidColorBrush(Color.FromArgb(0x59, 0xff, 0xff, 0xff)));
             dc.DrawText(note, new Point(r.Left + (r.Width - note.Width) / 2,
                 r.Top + (r.Height - note.Height) / 2));

@@ -154,7 +154,7 @@ public class FanEngine : IDisposable
                 // Sum of the channel's power sensors — non-null switches the channel
                 // from the temperature filter to the thermal-budget controller.
                 double? watts = null;
-                if (Profile.PowerControlEnabled && ch.PowerSensorIds.Count > 0)
+                if (Profile.ControlMode != ControlMode.Temperature && ch.PowerSensorIds.Count > 0)
                 {
                     double sum = 0;
                     bool any = false;
@@ -178,6 +178,30 @@ public class FanEngine : IDisposable
                 {
                     var curve = new FanCurve(ch.Points);
                     double filtered;
+
+                    // The temperature filter runs whenever it has a say: alone when the
+                    // channel has no live power side, and in Auto mode, where its target
+                    // rides into the budget controller as a floor — whichever side asks
+                    // for more fan wins, and the budget's physics stay honest because its
+                    // slewed output IS the physical output.
+                    ResponseFilter? filter = null;
+                    double tempFiltered = 0;
+                    if (!watts.HasValue || Profile.ControlMode == ControlMode.Auto)
+                    {
+                        if (!_filters.TryGetValue(ch, out filter))
+                        {
+                            filter = new ResponseFilter();
+                            _filters[ch] = filter;
+                        }
+                        filter.AveragingSeconds = ch.AveragingSeconds;
+                        filter.HysteresisC = ch.HysteresisC;
+                        filter.StepDownHoldSeconds = ch.StepDownHoldSeconds;
+                        filter.SlewUpPercentPerSec = ch.SlewUpPercentPerSec;
+                        filter.SlewDownPercentPerSec = ch.SlewDownPercentPerSec;
+                        filter.ZeroSnapPercent = Profile.ZeroSnapEnabled ? Profile.ZeroSnapPercent : 0;
+                        tempFiltered = filter.Step(now, temp.Value, curve);
+                    }
+
                     if (watts.HasValue)
                     {
                         if (!_budgets.TryGetValue(ch, out var budget))
@@ -203,6 +227,8 @@ public class FanEngine : IDisposable
                         budget.OverrideReleaseC = Profile.OverrideReleaseC;
                         budget.OverrideReleaseSeconds = Profile.OverrideReleaseSeconds;
                         budget.LearningEnabled = Profile.ThermalLearningEnabled;
+                        // Auto mode: the temperature side's demand is a hard floor.
+                        budget.FloorPercent = filter?.TargetLevel ?? 0;
 
                         filtered = budget.Step(now, temp.Value, watts.Value, curve);
                         budget.Model.StoreTo(ch); // learned values ride along in the profile
@@ -271,20 +297,8 @@ public class FanEngine : IDisposable
                     }
                     else
                     {
-                        if (!_filters.TryGetValue(ch, out var filter))
-                        {
-                            filter = new ResponseFilter();
-                            _filters[ch] = filter;
-                        }
-                        filter.AveragingSeconds = ch.AveragingSeconds;
-                        filter.HysteresisC = ch.HysteresisC;
-                        filter.StepDownHoldSeconds = ch.StepDownHoldSeconds;
-                        filter.SlewUpPercentPerSec = ch.SlewUpPercentPerSec;
-                        filter.SlewDownPercentPerSec = ch.SlewDownPercentPerSec;
-                        filter.ZeroSnapPercent = Profile.ZeroSnapEnabled ? Profile.ZeroSnapPercent : 0;
-
-                        filtered = filter.Step(now, temp.Value, curve);
-                        effectiveTemp = filter.EffectiveTemp;
+                        filtered = tempFiltered;
+                        effectiveTemp = filter!.EffectiveTemp;
                         output = Math.Max(ch.MinPercent, filtered);
                         targetPct = Math.Max(ch.MinPercent, filter.TargetLevel);
 

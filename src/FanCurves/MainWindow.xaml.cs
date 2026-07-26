@@ -81,7 +81,7 @@ public partial class MainWindow : Window
         IdleKickCheck.IsChecked = profile.IdleKickEnabled;
         ZeroSnapCheck.IsChecked = profile.ZeroSnapEnabled;
         StopProbeCheck.IsChecked = profile.StopProbeEnabled;
-        PowerCtlCheck.IsChecked = profile.PowerControlEnabled;
+        ModeSwitch.SelectedIndex = (int)profile.ControlMode;
         LearnCheck.IsChecked = profile.ThermalLearningEnabled;
         _loadingUi = true;
         KickIdleSlider.Value = profile.IdleKickStoppedSeconds;
@@ -352,6 +352,7 @@ public partial class MainWindow : Window
         HistoryView.Refresh();
         BudgetView.History = HistoryView.History;
         BudgetView.LeadSeconds = _profile.RampLeadSeconds;
+        BudgetView.NoPowerNote = BudgetNote();
         BudgetView.Refresh();
         if (ch == null) return;
 
@@ -517,6 +518,7 @@ public partial class MainWindow : Window
             if (s != null) Editor.UpdateLive(s.RawTemp, s.EffectiveTemp, s.OutputPercent);
             HistoryView.Refresh();
             BudgetView.LeadSeconds = _profile.RampLeadSeconds;
+            BudgetView.NoPowerNote = BudgetNote();
             BudgetView.Refresh();
 
             UpdateHero();
@@ -532,7 +534,7 @@ public partial class MainWindow : Window
 
             // The thermal model learns continuously; park it in profile.json every
             // ~5 min so a restart doesn't forget the day's learning.
-            if (_profile.PowerControlEnabled && ++_ticksSinceModelSave >= 300)
+            if (_profile.ControlMode != ControlMode.Temperature && ++_ticksSinceModelSave >= 300)
             {
                 _ticksSinceModelSave = 0;
                 _profile.Save();
@@ -734,12 +736,18 @@ public partial class MainWindow : Window
         ProbeRetryValue.Text = FormatAvg(_profile.StopProbeRetrySeconds);
     }
 
-    private void OnPowerCtlCheckChanged(object sender, RoutedEventArgs e)
+    private void OnModeChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (!IsLoaded) return; // constructor sets IsChecked from the profile
-        _profile.PowerControlEnabled = PowerCtlCheck.IsChecked == true;
+        if (!IsLoaded) return; // constructor selects the segment from the profile
+        _profile.ControlMode = (ControlMode)Math.Max(0, ModeSwitch.SelectedIndex);
         _profile.Save();
     }
+
+    /// <summary>Why the budget strip may be empty — depends on the control mode.</summary>
+    private string BudgetNote() =>
+        _profile.ControlMode == ControlMode.Temperature
+            ? "temperature mode — power side off"
+            : "no power sensor on this channel — temperature control";
 
     private void OnPowerParamChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
@@ -810,7 +818,7 @@ public partial class MainWindow : Window
         var s = SelectedStatus;
         PowerInfoText.Text =
             s == null ? "" :
-            !_profile.PowerControlEnabled ? "temperature control (power control off)" :
+            _profile.ControlMode == ControlMode.Temperature ? "temperature mode — power side off" :
             s.Watts is not double w ? "temperature control — no power sensor assigned" :
             Inv($"draw {w:0} W · avg {s.WattsAvg ?? 0:0} W\nbuffer {s.BudgetJoules / 1000:0.0} kJ · needs {s.DemandLevel:0}%\nheadroom {FormatTau(s.TauSeconds)}");
     }
@@ -820,7 +828,7 @@ public partial class MainWindow : Window
     private void UpdateBudgetInfo()
     {
         var s = SelectedStatus;
-        if (s?.Watts is not double || !_profile.PowerControlEnabled)
+        if (s?.Watts is not double || _profile.ControlMode == ControlMode.Temperature)
         {
             BudgetInfoText.Text = "";
             HeadroomInfoText.Text = "";
@@ -836,9 +844,8 @@ public partial class MainWindow : Window
         // the windows in this one). Quiet gate = trend + slope windows: how long the
         // draw must be steady before headroom may count down at all.
         double band = SelectedChannel?.HysteresisC ?? 1.5;
-        HeadroomInfoText.Text = Inv(
-            $"headroom: lead {FormatMss(_profile.RampLeadSeconds)} · ±{band:0.#}°\n" +
-            $"avg {_profile.PowerAveragingSeconds:0} s · quiet gate {_profile.PowerTrendSeconds + _profile.PowerSlopeSeconds:0} s");
+        // One $-string: concatenated interpolated strings lose the FormattableString conversion.
+        HeadroomInfoText.Text = Inv($"headroom: lead {FormatMss(_profile.RampLeadSeconds)} · ±{band:0.#}°\navg {_profile.PowerAveragingSeconds:0} s · quiet gate {_profile.PowerTrendSeconds + _profile.PowerSlopeSeconds:0} s");
     }
 
     /// <summary>Compact m:ss for the readout lines (the strips' chip vocabulary).</summary>
