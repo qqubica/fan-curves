@@ -210,9 +210,9 @@ public partial class MainWindow : Window
     {
         _sizeMode = SizeMode.Fixed;
         var wa0 = Chrome.WorkAreaDip(this);
-        Width = _devMode ? 1320 : 1010;
-        // Developer mode stacks two strips under the curve — taller unless the screen
-        // is too short for it, in which case the strips share what there is.
+        // Developer mode adds the two-column panel and stacks two strips under the
+        // curve — wider and taller, unless the screen is too small for it.
+        Width = _devMode ? Math.Min(1568, wa0.Width) : 1010;
         Height = _devMode ? Math.Min(830, wa0.Height) : 660;
         var wa = Chrome.WorkAreaDip(this);
         Left = Math.Max(wa.Left, Math.Min(Left, wa.Right - Width));
@@ -334,6 +334,7 @@ public partial class MainWindow : Window
         Editor.ShowRaw = _devMode;
         HistoryView.Visibility = _devMode ? Visibility.Visible : Visibility.Collapsed;
         BudgetView.Visibility = _devMode ? Visibility.Visible : Visibility.Collapsed;
+        ClearHistoryButton.Visibility = _devMode ? Visibility.Visible : Visibility.Collapsed;
         DevButton.Tag = _devMode ? "on" : null;
         // Developer mode needs room for the panel and the two strips; the floating
         // window grows in both directions rather than squeezing the curve editor
@@ -741,6 +742,14 @@ public partial class MainWindow : Window
         if (!IsLoaded) return; // constructor selects the segment from the profile
         _profile.ControlMode = (ControlMode)Math.Max(0, ModeSwitch.SelectedIndex);
         _profile.Save();
+    }
+
+    /// <summary>Wipe the 10-minute ring on every channel; both strips start fresh.</summary>
+    private void OnClearHistory(object sender, RoutedEventArgs e)
+    {
+        foreach (var h in _histories) h.Clear();
+        HistoryView.Refresh();
+        BudgetView.Refresh();
     }
 
     /// <summary>Why the budget strip may be empty — depends on the control mode.</summary>

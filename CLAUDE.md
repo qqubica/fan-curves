@@ -103,9 +103,14 @@ No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
   title, legend, time axis, hover crosshair/chip, trace + under-fill helpers) and both
   read the same per-channel `ChannelHistory` ring, whose `HistorySample` carries the
   budget telemetry (watts, avg, credit, tau, demand, ceiling, aim, override flag).
-  Dev mode's fixed window grew to **1320×830** (from 1010×660) to fit the second strip
-  without squeezing the curve editor; `EnterFixed` clamps the height to the work area
-  on short screens. Hover chips take several wordings and draw the widest that fits the
+  Dev mode's fixed window is **1568×830** (grew from 1010×660 first to 1320×830 for
+  the second strip, then to 1568 on 2026-07-27 for the two-column dev panel);
+  `EnterFixed` clamps both dimensions to the work area on small screens.
+  A **CLEAR text-button** (2026-07-27, Kuba's ask) sits right of the history strip's
+  HISTORY title, styled like it (dev mode only): wipes the 10-min `ChannelHistory`
+  ring on EVERY channel so both strips restart from the right edge — it's a XAML
+  overlay in the chart-card grid row (the strips are OnRender-only and can't host
+  children), position tuned to seat beside the title the strip draws itself. Hover chips take several wordings and draw the widest that fits the
   plot (`DrawChip(dc, x, wide, narrow)`), so quarter-screen windows get a two-line chip
   instead of one running off the edge — `FormattedText` honours `\n`. Reference labels
   (ceiling, ramp lead) are drawn last and seated on the card colour, otherwise the
@@ -136,7 +141,14 @@ No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
   - Simple (default): two preset buttons (`Quiet · MacBook-like` — default,
     `Performance`), the two fan channels, read-only curve illustration with live
     overlay, Apply/Stop. No settings visible.
-  - Developer (top-bar toggle, or `--dev`): curve editing (drag points, double-click
+  - Developer (top-bar toggle, or `--dev`): **the panel is two columns since
+    2026-07-27 (Kuba's ask), 520 px wide** — the CONTROL MODE switch leads at the
+    top (full panel width, the headline choice), below it the temperature side
+    (BEHAVIOUR + kick/snap/probe) fills the left column and the power side (POWER
+    CONTROL + BUDGET INTERNALS + LEARNED MODEL) the right, hairline seam between,
+    SOURCES/BACKEND full-width underneath; each column is exactly as wide as the
+    old single-column panel, so the ~31-mono-char readout line breaks still hold.
+    Curve editing (drag points, double-click
     add, right-click remove; edits snap to whole °C / whole %, bands stay ≥1 °C wide,
     max 12 points per channel; Ctrl+Z / Ctrl+Y — also Ctrl+Shift+Z — undo/redo point
     edits, history in MainWindow via before/after snapshots, cleared on preset
@@ -161,7 +173,7 @@ No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
   chrome (`WindowChrome`, DWM rounded corners + dark frame via `Chrome.Apply` in
   `Ui.cs`, custom caption buttons, title-bar fan glyph that spins while applying).
   **Exactly three window sizes** (Kuba's choice 2026-07-20): the fixed floating window
-  (1010×660, 1320×830 in dev mode), quarter-of-screen (half work-area width × height, snapped to the nearest
+  (1010×660, 1568×830 in dev mode), quarter-of-screen (half work-area width × height, snapped to the nearest
   screen corner), and maximized — cycled in that order by the maximize caption button
   (its glyph previews the next size); drag-resize disabled
   (`ResizeMode=CanMinimize`, `ResizeBorderThickness=0`), and a `WM_GETMINMAXINFO` hook
@@ -434,7 +446,8 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   fuse.
 - **Control-mode switch (2026-07-27, Kuba: "switch between temperature-based and
   power-based mode" + "automatic option that considers both outputs")**: dev-panel
-  `CONTROL MODE` segmented switch (Temp · Power · Auto) → `Profile.ControlMode`
+  `CONTROL MODE` segmented switch (Temp · Power · Auto; at the TOP of the panel
+  since the same-day two-column rework — Kuba's placement) → `Profile.ControlMode`
   (string-serialized enum; app-level like the rest — no "Custom", presets don't touch
   it). The old bool `PowerControlEnabled` stays as a JSON bridge property declared
   BEFORE the enum, so pre-change profiles map false→Temperature on load while a

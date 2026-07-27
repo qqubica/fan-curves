@@ -39,6 +39,9 @@ public class ChannelHistory
         _next = (_next + 1) % Capacity;
         if (_count < Capacity) _count++;
     }
+
+    /// <summary>Forget everything; the strips grow in from the right again.</summary>
+    public void Clear() { _next = 0; _count = 0; }
 }
 
 /// <summary>
