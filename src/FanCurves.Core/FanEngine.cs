@@ -353,6 +353,7 @@ public class FanEngine : IDisposable
                                 probe.ProbeSeconds = Profile.StopProbeSeconds;
                                 probe.StableRangeC = Profile.StopProbeStableRangeC;
                                 probe.FailRetrySeconds = Profile.StopProbeRetrySeconds;
+                                probe.MaxTempC = Profile.StopProbeMaxTempC;
                                 output = probe.Step(now, temp.Value, output);
                                 if (probe.Holding) reason = OutputReason.StopProbe;
                             }

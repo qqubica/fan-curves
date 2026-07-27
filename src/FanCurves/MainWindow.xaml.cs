@@ -92,6 +92,7 @@ public partial class MainWindow : Window
         ProbeLenSlider.Value = profile.StopProbeSeconds;
         ProbeBandSlider.Value = profile.StopProbeStableRangeC;
         ProbeRetrySlider.Value = profile.StopProbeRetrySeconds;
+        ProbeMaxTempSlider.Value = profile.StopProbeMaxTempC;
         PowerAvgSlider.Value = profile.PowerAveragingSeconds;
         RampLeadSlider.Value = profile.RampLeadSeconds;
         OverrideSlider.Value = profile.OverrideTempC;
@@ -739,6 +740,7 @@ public partial class MainWindow : Window
         _profile.StopProbeSeconds = ProbeLenSlider.Value;
         _profile.StopProbeStableRangeC = ProbeBandSlider.Value;
         _profile.StopProbeRetrySeconds = ProbeRetrySlider.Value;
+        _profile.StopProbeMaxTempC = ProbeMaxTempSlider.Value;
         UpdateStopProbeLabels();
         _profile.Save();
     }
@@ -749,6 +751,7 @@ public partial class MainWindow : Window
         ProbeLenValue.Text = FormatAvg(_profile.StopProbeSeconds);
         ProbeBandValue.Text = Inv($"{_profile.StopProbeStableRangeC:0.0} °C");
         ProbeRetryValue.Text = FormatAvg(_profile.StopProbeRetrySeconds);
+        ProbeMaxTempValue.Text = Inv($"{_profile.StopProbeMaxTempC:0} °C");
     }
 
     private void OnModeChanged(object sender, SelectionChangedEventArgs e)

@@ -72,6 +72,8 @@ public class Profile
     public double StopProbeStableRangeC { get; set; } = 3.5;
     /// <summary>Wait after a failed trial before probing again.</summary>
     public double StopProbeRetrySeconds { get; set; } = 60;
+    /// <summary>No trial stop starts (and a running one aborts) above this raw temp.</summary>
+    public double StopProbeMaxTempC { get; set; } = 78;
     /// <summary>Legacy pre-2026-07-27 switch, kept so older profiles load (false →
     /// Temperature, true → leave the mode alone — the default already uses power).
     /// Declared BEFORE ControlMode: serialization follows declaration order and

@@ -20,6 +20,9 @@ public class StopProbe
     public double StableRangeC { get; set; } = 3.5;
     /// <summary>Wait after a failed trial before trying again.</summary>
     public double FailRetrySeconds { get; set; } = 60;
+    /// <summary>No trial starts while any recent sample is above this; a running trial
+    /// crossing it resumes at once (a channel this hot should never lose its fan).</summary>
+    public double MaxTempC { get; set; } = 78;
 
     /// <summary>Rise detection averages the last few seconds so single-sample jitter can't trigger it.</summary>
     private const double RiseAvgSeconds = 5;
@@ -50,7 +53,7 @@ public class StopProbe
                 return demand;
             }
             double recent = _window.Where(s => s.time >= now - RiseAvgSeconds).Average(s => s.temp);
-            if (recent > _baseline + StableRangeC || demand > _demandAtStop + 0.01)
+            if (recent > _baseline + StableRangeC || recent > MaxTempC || demand > _demandAtStop + 0.01)
             {
                 // Heat is building without the fan — hand back to the curve, and if the
                 // stop didn't even survive to the first recheck horizon, back off.
@@ -72,6 +75,7 @@ public class StopProbe
         // The sample window must actually span the running period, and stay in-band.
         if (_window[^1].time - _window[0].time < RunSeconds - 2) return demand;
         if (_window.Max(s => s.temp) - _window.Min(s => s.temp) > StableRangeC) return demand;
+        if (_window.Max(s => s.temp) > MaxTempC) return demand; // too hot to gamble on a stop
 
         _stoppedAt = now;
         _baseline = _window.Average(s => s.temp);

@@ -812,6 +812,15 @@
                                             </DockPanel>
                                             <Slider x:Name="ProbeRetrySlider" Minimum="60" Maximum="900" TickFrequency="30"
                                                     IsSnapToTickEnabled="True" ValueChanged="OnStopProbeParamChanged"/>
+
+                                            <DockPanel>
+                                                <TextBlock DockPanel.Dock="Right" x:Name="ProbeMaxTempValue" FontFamily="{StaticResource Mono}"
+                                                           FontSize="12" Foreground="#f2f2f4"/>
+                                                <TextBlock Text="No trials above" FontSize="12" Foreground="#99ffffff"
+                                                           ToolTip="Raw temperature ceiling for trial stops: a channel hotter than this is never trial-stopped, and a running trial resumes the moment the temp crosses it."/>
+                                            </DockPanel>
+                                            <Slider x:Name="ProbeMaxTempSlider" Minimum="50" Maximum="90" TickFrequency="1"
+                                                    IsSnapToTickEnabled="True" ValueChanged="OnStopProbeParamChanged"/>
                                         </StackPanel>
 
                                     </StackPanel>

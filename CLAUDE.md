@@ -272,10 +272,15 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   probe-stopped counts as stopped for the kick, same choice as zero snap); channels
   with `MinPercent > 0` are never probed (safety floor wins — Performance CPU).
   App-level like kick/zero-snap (doesn't mark "Custom", presets don't touch it):
-  `Profile.StopProbeEnabled` (**default true**) + the four params, dev-panel
+  `Profile.StopProbeEnabled` (**default true**) + the five params, dev-panel
   checkbox "Trial-stop fans when temps are stable (all channels)" + sliders
   "Steady running before trial" (10–300 s), "Trial stop length" (5–60 s), "Stable
-  band · rise to resume" (0.5–5°C), "Retry after failed trial" (60–900 s).
+  band · rise to resume" (0.5–5°C), "Retry after failed trial" (60–900 s), "No
+  trials above" (`StopProbeMaxTempC`, 50–90°C, default 78 — Kuba's ask 2026-07-27:
+  no trial starts while any raw-temp sample in the stability window is above it,
+  and a running trial resumes the moment the 5 s average crosses it even inside
+  the stable band, arming the failed-trial backoff as usual; verified by a
+  scratchpad harness the same day).
   State-machine scenarios verified by a scratchpad console harness on 2026-07-22
   (probe timing, in-trial rise + backoff, late rise without backoff, unstable
   temps never probe).
