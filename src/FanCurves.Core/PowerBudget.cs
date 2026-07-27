@@ -175,6 +175,14 @@ public class PowerBudgetController
     /// feeding the model the controller's own lower choice while an outside hand drives
     /// the fan harder would teach it that little fan cools this well. 0 outside Auto.</summary>
     public double FloorPercent { get; set; }
+    /// <summary>Auto mode: the buffer is also being drained toward the staircase floor's
+    /// next step — the floor fires there on the display average whatever the model
+    /// believes. When set, the measured headroom prong watches the trend drain toward
+    /// that line (so a settled creep reads finite instead of ∞ and the ramp glides in
+    /// ahead of the floor's snap), and a floor step that out-ranks the budget's target
+    /// brands the level it beat as measured-insufficient and is adopted as the budget's
+    /// own — the staircase IS a measurement. False outside Auto.</summary>
+    public bool GuardFloor { get; set; }
     /// <summary>The sink-trend temperature: a short rolling average that filters the die's
     /// instant jump on load onset but still tracks the heatsink warming.</summary>
     public double TrendAvgSeconds { get; set; } = 30;
@@ -212,6 +220,7 @@ public class PowerBudgetController
     private double _failedLevel = double.NaN;
     private double _failedPowerAvg;
     private double _forgiveSince = double.NaN;
+    private double _lastFloor;
 
     // Diagnostics for the engine/UI — refreshed on every Step, valid until the next one.
     /// <summary>Fuse engaged: the temperature curve is being written directly, no slew.</summary>
@@ -307,6 +316,27 @@ public class PowerBudgetController
         double steadyTarget = OverrideTempC - Math.Max(SteadyTargetMarginC, CeilingMarginC);
         SteadyTargetC = steadyTarget;
 
+        // ---- Auto's floor is a measurement, not an opinion: a floor step that out-ranks
+        // the budget's target is the staircase proving that level could not keep the sink
+        // under the step's own temperature at today's draw. Brand it like a StepUpHold
+        // step and adopt the floor's level as the budget's own target — otherwise the
+        // budget keeps insisting 0% is sustainable, the floor cycles the fan on/off
+        // around its step temperature every few minutes, and headroom reads ∞ the whole
+        // time the buffer is visibly being drained (Kuba's report, 2026-07-27). The
+        // output doesn't jump: the floor was already binding it. The display average the
+        // floor fires on is itself a sustained measure, so no draw-settled gate here.
+        if (GuardFloor && !OverrideActive && FloorPercent > _lastFloor + 0.01 &&
+            FloorPercent > _target + 0.01)
+        {
+            _failedLevel = _target;
+            _failedPowerAvg = PowerAvg;
+            _forgiveSince = double.NaN;
+            _target = FloorPercent;
+            _downSince = double.NaN;
+            _upSince = double.NaN;
+        }
+        _lastFloor = FloorPercent;
+
         double slope = TrendSlope();
         SlopeCPerSec = slope;
         double surplus = PowerNow - Model.DissipationWatts(trendTemp, _output); // for learning
@@ -365,6 +395,23 @@ public class PowerBudgetController
             ? Math.Max(0, guarded - trendTemp) / slope
             : double.PositiveInfinity;
         TauSeconds = Math.Min(tauModel, tauSlope);
+        // The temperature floor's next step is a guarded line too (Auto): the staircase
+        // fires there on the display average whatever the model believes, so headroom
+        // watches the trend drain toward it. This is what makes "the buffer is being
+        // driven down by the temperature" visible below the aim — a slow settled creep
+        // toward the floor's step reads as finite, falling headroom instead of ∞, and
+        // the ramp branch glides to a level ahead of the floor's snap. MEASURED prong
+        // only: the model arm was tried and cut the same day — near an unvisited
+        // operating point the learned R is at its least trustworthy, and one transient
+        // of ridge-inflated R(0) turned the 57° line's small clearance into a false
+        // fire during a spike (harness F4); the floor's own reactive step (adopted and
+        // branded above) is already the safety net the model arm pretended to be.
+        if (GuardFloor && drawSettled && slope > 0.005)
+        {
+            double line = NextFloorStep(curve, Math.Max(_target, FloorPercent));
+            if (!double.IsPositiveInfinity(line))
+                TauSeconds = Math.Min(TauSeconds, Math.Max(0, line - trendTemp) / slope);
+        }
         // A spent budget with the trend not clearly falling is ZERO headroom, not
         // infinite: parked at the ceiling, equilibrium gap and slope both vanish and
         // the two predictions above go blind exactly when the credit is gone.
@@ -544,6 +591,16 @@ public class PowerBudgetController
     private double Snap(double level) =>
         level > 0 && level < ZeroSnapPercent ? 0 : level;
 
+    /// <summary>Lowest staircase temperature at which the Auto floor would command more
+    /// than this level (zero-snapped like the floor itself); +∞ when nothing can.</summary>
+    private double NextFloorStep(FanCurve curve, double level)
+    {
+        double line = double.PositiveInfinity;
+        foreach (var p in curve.Points)
+            if (Snap(p.Percent) > level + 0.01 && p.TempC < line) line = p.TempC;
+        return line;
+    }
+
     private static double Mean(List<(double time, double v)> samples, double since)
     {
         double sum = 0; int n = 0;
@@ -613,6 +670,7 @@ public class PowerBudgetController
         _lastRampStep = double.NaN;
         _failedLevel = double.NaN;
         _forgiveSince = double.NaN;
+        _lastFloor = 0;
         OverrideActive = false;
         EffectiveTemp = double.NaN;
         TrendTempC = double.NaN;

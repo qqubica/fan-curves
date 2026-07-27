@@ -227,8 +227,10 @@ public class FanEngine : IDisposable
                         budget.OverrideReleaseC = Profile.OverrideReleaseC;
                         budget.OverrideReleaseSeconds = Profile.OverrideReleaseSeconds;
                         budget.LearningEnabled = Profile.ThermalLearningEnabled;
-                        // Auto mode: the temperature side's demand is a hard floor.
+                        // Auto mode: the temperature side's demand is a hard floor, and
+                        // the staircase's next step is a line the buffer drains toward.
                         budget.FloorPercent = filter?.TargetLevel ?? 0;
+                        budget.GuardFloor = filter != null;
 
                         filtered = budget.Step(now, temp.Value, watts.Value, curve);
                         budget.Model.StoreTo(ch); // learned values ride along in the profile

@@ -477,6 +477,36 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   `FloorPercent = 0` is tick-identical to the pre-change controller, so Power mode is
   untouched) plus a WPF reflection harness that clicks the switch (profile follows,
   segments render; the --screenshot flow can't scroll the dev panel that far down).
+  **Floor guard (later on 2026-07-27, Kuba: "the power mode should take into
+  consideration that the heat buffer is being drove down by the temperature — add this
+  calculation to auto mode")**: in Auto the buffer is also draining toward the
+  staircase floor's NEXT step (the lowest curve temp commanding more than the current
+  level, zero-snap respected — `NextFloorStep`), where the floor fires on the 90 s
+  average whatever the model thinks. His telemetry that night showed the resulting
+  limit cycle: ~37 W of desktop draw settles the die at 57–58°, exactly on the 57°
+  first step, so the floor cycled the fans on/off every 2–4 min all evening while the
+  budget read "headroom ∞ · demand 0" (model equilibrium 51° — optimistic, and
+  aim-referenced headroom only watches 70°). Two mechanisms, both `GuardFloor`-gated
+  (engine sets it in Auto only, so Power mode stays tick-identical): (1) the
+  MEASURED headroom prong also watches the trend drain toward the floor line —
+  settled-draw-gated slope only; the model arm was tried and cut the same day
+  because near an unvisited operating point the learned R is at its least
+  trustworthy (one transient of ridge-inflated R(0)≈1.0 turned the 57° line's small
+  clearance into a false fire during a spike, and a model-eq floor term in
+  demand/step-down LATCHED a pessimistic model's fan on at true idle — harness F4);
+  (2) **a floor step that out-ranks the budget's target is treated as measurement**:
+  the budget brands the level it beat (same brand as StepUpHold, no draw-settled
+  gate — the 90 s average crossing IS sustained evidence) and adopts the floor's
+  level as its own target, so after the floor recedes the budget holds the fan
+  steadily (why-chip: BudgetRamp "curve asks 0%") instead of following it back down
+  into the cycle; the hold unwinds through normal brand forgiveness once the
+  sustained draw genuinely drops. Sixth scratchpad harness (plant tuned to the
+  telemetry: passive die eq ≈ 60° at 38 W): old Auto 9 ON/OFF cycles per hour →
+  guarded Auto one ON then steady 20 %, die 54.9°; true idle 26 W stays silent;
+  draw-drop to 27 W stops the fan for good; sparse 150 W spikes never move it; 90 W
+  load parity with A1; a settled 40 W creep fires the measured prong at +33 s so the
+  budget glides in before the floor ever rises (model-free — works from unlearned
+  seeds); pure Power mode still tolerates the same creep (58° < the 70° aim).
 - Changing ChannelConfig field names breaks saved `%AppData%\FanCurves\profile.json`
   (old fields silently ignored, defaults kick in) — delete it after schema changes.
 - Sensor/control IDs are backend-specific; `AutoAssign` prunes IDs the current backend
