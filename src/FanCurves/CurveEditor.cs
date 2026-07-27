@@ -31,6 +31,7 @@ public class CurveEditor : FrameworkElement
     public bool ShowRaw { get; set; }
 
     private double? _liveRaw, _liveEffective, _liveOutput;
+    private double? _liveWatts, _liveWattsAvg;
 
     public event Action? CurveChanged;
 
@@ -40,11 +41,14 @@ public class CurveEditor : FrameworkElement
         set { _channel = value; InvalidateVisual(); }
     }
 
-    public void UpdateLive(double? raw, double? effective, double? output)
+    public void UpdateLive(double? raw, double? effective, double? output,
+        double? watts = null, double? wattsAvg = null)
     {
         _liveRaw = raw;
         _liveEffective = effective;
         _liveOutput = output;
+        _liveWatts = watts;
+        _liveWattsAvg = wattsAvg;
         InvalidateVisual();
     }
 
@@ -140,6 +144,21 @@ public class CurveEditor : FrameworkElement
         for (int i = 1; i < stairs.Count; i++)
             dc.DrawLine(curvePen, stairs[i - 1], stairs[i]);
 
+        // Power draw readout, developer mode (power-controlled channels only) — the
+        // text is measured here so the raw-temp label below can dodge it, but drawn
+        // LAST, seated on the card colour, so the staircase/crosshairs never run
+        // through it (same rule as the strip charts' reference labels).
+        FormattedText? power = null;
+        double powerLeft = r.Right;
+        if (ShowRaw && _liveWatts is double w)
+        {
+            double wa = _liveWattsAvg ?? w;
+            power = Label(string.Create(CultureInfo.InvariantCulture,
+                    $"draw {w:0} W · avg {wa:0} W"),
+                new SolidColorBrush(Color.FromArgb(0x73, 0xff, 0xff, 0xff)));
+            powerLeft = Math.Max(r.Left, r.Right - power.Width - 4);
+        }
+
         // Raw (unaveraged) temp, developer mode: quiet dashed reference line.
         if (ShowRaw && _liveRaw is double raw)
         {
@@ -149,7 +168,8 @@ public class CurveEditor : FrameworkElement
             dc.DrawLine(pen, new Point(x, r.Top), new Point(x, r.Bottom));
             var t = Label($"now {raw.ToString("0.0", CultureInfo.InvariantCulture)}°",
                 new SolidColorBrush(Color.FromArgb(0x73, 0xff, 0xff, 0xff)));
-            dc.DrawText(t, new Point(Math.Min(x + 6, r.Right - t.Width), r.Top + 2));
+            double maxX = power == null ? r.Right - t.Width : powerLeft - t.Width - 8;
+            dc.DrawText(t, new Point(Math.Min(x + 6, Math.Max(r.Left, maxX)), r.Top + 2));
         }
 
         // Curve points: soft halo under a crisp knob with a dark seat.
@@ -213,6 +233,14 @@ public class CurveEditor : FrameworkElement
             var (ht, hpct) = FromScreen(hp);
             DrawWhiteCrosshair(dc, r, Label, Math.Round(ht), Math.Round(hpct),
                 lineAlpha: 0x20, textAlpha: 0xb3);
+        }
+
+        if (power != null)
+        {
+            var pos = new Point(powerLeft, r.Top + 2);
+            dc.DrawRectangle(new SolidColorBrush(CardBg), null,
+                new Rect(pos.X - 4, pos.Y - 1, power.Width + 8, power.Height + 2));
+            dc.DrawText(power, pos);
         }
     }
 

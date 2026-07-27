@@ -493,7 +493,14 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   simulation because the kernel driver failed still saves the user's edits.
 - Temperature display: simple mode shows only the rolling average (the thing that
   actually drives the steps) — hero numeral + segment readouts; Developer mode adds
-  the raw "now" temp (white dashed line on the chart, "now …°" in the card header).
+  the raw "now" temp (white dashed line on the chart, "now …°" in the card header)
+  and, since 2026-07-27 (Kuba's ask), a **power readout chip in the curve chart's
+  top-right** — `draw NN W · avg NN W` (same vocabulary as the dev-panel power
+  line), fed from `ChannelStatus.Watts/WattsAvg` via `CurveEditor.UpdateLive`;
+  hidden when the channel has no power sensor or the mode is Temperature (Watts
+  is null). Measured before the raw-temp label draws (so "now …°" dodges it at
+  high raw temps) but drawn LAST, seated on the card colour, like the strip
+  charts' reference labels.
 - **Curves apply automatically from launch**; preset switches and point edits take
   effect within one engine tick (the engine reads the live Profile objects).
   **Pause (BIOS control)** hands headers back to the BIOS; app exit does too.

@@ -516,7 +516,8 @@ public partial class MainWindow : Window
             }
 
             var s = SelectedStatus;
-            if (s != null) Editor.UpdateLive(s.RawTemp, s.EffectiveTemp, s.OutputPercent);
+            if (s != null) Editor.UpdateLive(s.RawTemp, s.EffectiveTemp, s.OutputPercent,
+                s.Watts, s.WattsAvg);
             HistoryView.Refresh();
             BudgetView.LeadSeconds = _profile.RampLeadSeconds;
             BudgetView.NoPowerNote = BudgetNote();
