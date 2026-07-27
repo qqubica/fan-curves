@@ -623,7 +623,7 @@
 
                             <TextBlock x:Name="EditorHint" Grid.Row="4" FontSize="10.5" Foreground="#59ffffff"
                                        Margin="18,0,18,12" TextWrapping="Wrap" Visibility="Collapsed"
-                                       Text="Drag points · double-click adds · right-click removes · Ctrl+Z undo, Ctrl+Y redo. Each point starts a flat band. Dashed line = raw temp; the dot is the rolling average meeting the commanded fan %."/>
+                                       Text="Drag points · double-click adds · right-click removes · Ctrl+Z undo, Ctrl+Y redo. Each point starts a flat band. Amber dashed line = raw temp, white horizontal lines = power draw; the dot is the rolling average meeting the commanded fan %."/>
                         </Grid>
                     </Border>
 

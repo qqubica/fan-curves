@@ -179,15 +179,18 @@ public class CurveEditor : FrameworkElement
             scaleLeft = Math.Max(r.Left, r.Right - scaleMark.Width - 4);
         }
 
-        // Raw (unaveraged) temp, developer mode: quiet dashed reference line.
+        // Raw (unaveraged) temp, developer mode: quiet dashed reference line. Amber,
+        // like every other live-thermal readout (dot, crosshair) — temperature is
+        // the amber quantity, power stays monochrome, so the two families of
+        // reference lines never read as each other.
         if (ShowRaw && _liveRaw is double raw)
         {
-            var pen = new Pen(new SolidColorBrush(Color.FromArgb(0x40, 0xff, 0xff, 0xff)), 1)
+            var pen = new Pen(new SolidColorBrush(Color.FromArgb(0x59, Amber.R, Amber.G, Amber.B)), 1)
             { DashStyle = new DashStyle(new double[] { 3, 3 }, 0) };
             var x = ToScreen(Math.Clamp(raw, TempMin, TempMax), 0).X;
             dc.DrawLine(pen, new Point(x, r.Top), new Point(x, r.Bottom));
             var t = Label($"now {raw.ToString("0.0", CultureInfo.InvariantCulture)}°",
-                new SolidColorBrush(Color.FromArgb(0x73, 0xff, 0xff, 0xff)));
+                new SolidColorBrush(Color.FromArgb(0x99, Amber.R, Amber.G, Amber.B)));
             double maxX = scaleMark == null ? r.Right - t.Width : scaleLeft - t.Width - 8;
             dc.DrawText(t, new Point(Math.Min(x + 6, Math.Max(r.Left, maxX)), r.Top + 2));
         }

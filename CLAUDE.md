@@ -181,13 +181,16 @@ No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
   taskbar). Further elements: layered near-black surfaces (canvas `#0a0a0d`, cards `#111116` with light-from-above
   gradient hairline + drop shadow), monochrome white at graded opacities, and ONE
   accent — warm amber `#FF9E5E` — reserved strictly for live thermal state (chart
-  operating dot + crosshair with axis readout chips, status-chip dot). Hero = large
+  operating dot + crosshair with axis readout chips, status-chip dot, and since
+  2026-07-27 the dev-mode raw-temp dashed line + its "now …°" label — Kuba asked to
+  colour-differentiate the temp and wattage reference lines, so temperature is the
+  amber quantity and the power lines stay monochrome). Hero = large
   Segoe UI Variable Display Light numeral of the selected channel's rolling average;
   micro-labels letter-spaced via `Tracked.Text` (hair spaces, `Ui.cs`); numerals in
   Cascadia Mono with invariant "." decimals. Channels switch via a segmented control
   (restyled ListBox) in the chart-card header; presets are selectable cards; global
   state lives in a status chip under the hero (no status bar). Chart: sparse horizontal
-  grid only, glow-under white staircase, dashed white vertical = raw temp (dev mode).
+  grid only, glow-under white staircase, dashed amber vertical = raw temp (dev mode).
   Keep everything else monochrome — the amber stays live-data-only.
 
 ## Build / run
@@ -523,7 +526,7 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   simulation because the kernel driver failed still saves the user's edits.
 - Temperature display: simple mode shows only the rolling average (the thing that
   actually drives the steps) — hero numeral + segment readouts; Developer mode adds
-  the raw "now" temp (white dashed line on the chart, "now …°" in the card header)
+  the raw "now" temp (amber dashed line on the chart, "now …°" in the card header)
   and, since 2026-07-27 (Kuba's ask; first cut was a corner chip, he wanted "a line
   like the temperature, opposite direction"), **power draw as horizontal reference
   lines in the curve chart** — the mirror of the vertical raw-temp line: dashed
