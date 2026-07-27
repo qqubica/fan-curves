@@ -73,7 +73,7 @@ public class Profile
     /// <summary>Wait after a failed trial before probing again.</summary>
     public double StopProbeRetrySeconds { get; set; } = 60;
     /// <summary>Legacy pre-2026-07-27 switch, kept so older profiles load (false →
-    /// Temperature, true → leave the mode alone — Power is the default anyway).
+    /// Temperature, true → leave the mode alone — the default already uses power).
     /// Declared BEFORE ControlMode: serialization follows declaration order and
     /// deserialization document order, so in a new-format file ControlMode is applied
     /// after this bridge and always wins.</summary>
@@ -90,7 +90,7 @@ public class Profile
     /// thermal-budget controller (power in, heatsink mass as credit), or Auto — both at
     /// once with the higher demand winning. Channels without a power sensor always stay
     /// on the temperature filter.</summary>
-    public ControlMode ControlMode { get; set; } = ControlMode.Power;
+    public ControlMode ControlMode { get; set; } = ControlMode.Auto;
     /// <summary>Window for the sustained power average — "how much heat must actually leave".</summary>
     public double PowerAveragingSeconds { get; set; } = 60;
     /// <summary>Fans step up once the predicted time to exhaust the thermal buffer drops under this.</summary>

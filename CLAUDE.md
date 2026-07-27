@@ -378,7 +378,8 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   the fuse this degrades into exactly the hand-tuned temp staircase. The curve stays
   meaningful in power mode: ladder of allowed levels + fuse fallback + why-chip
   comparison. App-level settings (don't mark "Custom"): `ControlMode`
-  (Temp/Power/Auto — see the control-mode entry below; default Power),
+  (Temp/Power/Auto — see the control-mode entry below; default Auto since
+  2026-07-27, was Power for its first day),
   `PowerAveragingSeconds` (60), `RampLeadSeconds`, `OverrideTempC` —
   dev-panel CONTROL MODE switch + three sliders + live `draw · avg` / `buffer · needs` /
   `headroom` readout (that line renamed from `lead` 2026-07-27);
@@ -451,8 +452,12 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   (string-serialized enum; app-level like the rest — no "Custom", presets don't touch
   it). The old bool `PowerControlEnabled` stays as a JSON bridge property declared
   BEFORE the enum, so pre-change profiles map false→Temperature on load while a
-  new-format file's `ControlMode`, deserialized after it, always wins. Default Power =
-  the previous behaviour. Temperature forces every channel onto `ResponseFilter`
+  new-format file's `ControlMode`, deserialized after it, always wins (a legacy
+  true leaves the mode at the default — now Auto). **Default Auto** (Kuba's call
+  2026-07-27; was Power for its first day): the staircase is a guaranteed floor
+  and the power side may ramp earlier/higher. Temperature forces every channel
+  onto `ResponseFilter` — with the temp-path files untouched since main's
+  pre-switch state, Temperature mode IS the old temperature-only behaviour
   (power sensors unread; budget strip note + power readout say "temperature mode —
   power side off"). **Auto runs both sides every tick and the higher demand wins**,
   implemented INSIDE the controller as `PowerBudgetController.FloorPercent`: the
