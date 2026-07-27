@@ -565,6 +565,30 @@
                                     </ListBox>
                                 </Border>
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                    <!-- Developer mode: flips the chart between the temperature
+                                         staircase (°C → %) and the power staircase (W → %, the
+                                         PowerCurve mode ladder). Both editable. -->
+                                    <Button x:Name="CurveAxisButton" Click="OnToggleCurveAxis"
+                                            Visibility="Collapsed" VerticalAlignment="Center"
+                                            Margin="0,0,10,0"
+                                            ToolTip="Switch the chart between the temperature curve (°C → %) and the power curve (W → %). The power curve drives fans in Curve control mode; both are editable here.">
+                                        <Button.Template>
+                                            <ControlTemplate TargetType="Button">
+                                                <Border x:Name="AxisBorder" CornerRadius="6"
+                                                        BorderBrush="#26ffffff" BorderThickness="1"
+                                                        Background="Transparent" Padding="7,2.5">
+                                                    <ContentPresenter/>
+                                                </Border>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter TargetName="AxisBorder" Property="BorderBrush" Value="#59ffffff"/>
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Button.Template>
+                                        <TextBlock x:Name="CurveAxisText" local:Tracked.Text="CURVE °C"
+                                                   FontSize="9" Foreground="#8cffffff" FontWeight="SemiBold"/>
+                                    </Button>
                                     <Border x:Name="SimTag" CornerRadius="6" BorderBrush="#26ffffff"
                                             BorderThickness="1" Padding="7,2.5" Margin="0,0,10,0"
                                             Visibility="Collapsed" VerticalAlignment="Center">
@@ -623,7 +647,7 @@
 
                             <TextBlock x:Name="EditorHint" Grid.Row="4" FontSize="10.5" Foreground="#59ffffff"
                                        Margin="18,0,18,12" TextWrapping="Wrap" Visibility="Collapsed"
-                                       Text="Drag points · double-click adds · right-click removes · Ctrl+Z undo, Ctrl+Y redo. Each point starts a flat band. Amber dashed line = raw temp, white horizontal lines = power draw; the dot is the rolling average meeting the commanded fan %."/>
+                                       Text="Drag points · double-click adds · right-click removes · Ctrl+Z undo, Ctrl+Y redo. Each point starts a flat band. Amber dashed line = raw temp, white horizontal lines = power draw; the dot is the rolling average meeting the commanded fan %. CURVE °C/W (top right) flips to the power staircase — the ladder Curve control mode drives fans with."/>
                         </Grid>
                     </Border>
 
@@ -638,7 +662,7 @@
                                      wins. -->
                                 <TextBlock local:Tracked.Text="CONTROL MODE" Style="{StaticResource MicroLabel}"
                                            Margin="0,0,0,6"/>
-                                <Border Background="#0affffff" CornerRadius="11" Width="340"
+                                <Border Background="#0affffff" CornerRadius="11" Width="400"
                                         HorizontalAlignment="Left" BorderBrush="#12ffffff"
                                         BorderThickness="1" Padding="3">
                                     <ListBox x:Name="ModeSwitch" Background="Transparent" BorderThickness="0"
@@ -658,6 +682,9 @@
                                         </ListBoxItem>
                                         <ListBoxItem ToolTip="Both run at once and the higher demand wins: the temperature staircase is a guaranteed floor, and the power side may still ramp earlier — or push higher — when its predicted headroom runs out.">
                                             <TextBlock Text="Auto" FontSize="12" FontWeight="Medium" HorizontalAlignment="Center"/>
+                                        </ListBoxItem>
+                                        <ListBoxItem ToolTip="Channels with a power sensor follow their own watts→% staircase directly: the sustained power average picks the step, with the same averaging/hysteresis/hold/slew feel as the temperature filter — deterministic, no predictive layer. The temperature staircase stays as a safety floor and the hard-override fuse still applies. Edit the watts curve via the CURVE °C/W toggle above the chart.">
+                                            <TextBlock Text="Curve" FontSize="12" FontWeight="Medium" HorizontalAlignment="Center"/>
                                         </ListBoxItem>
                                     </ListBox>
                                 </Border>
@@ -836,6 +863,14 @@
                                             <TextBlock Text="Power averaging" FontSize="12" Foreground="#99ffffff"/>
                                         </DockPanel>
                                         <Slider x:Name="PowerAvgSlider" Minimum="10" Maximum="180" TickFrequency="5"
+                                                IsSnapToTickEnabled="True" ValueChanged="OnPowerParamChanged"/>
+
+                                        <DockPanel ToolTip="Curve mode only: a step of the power curve is left downward only once the sustained draw sits this many watts clear of the band edge — the watts twin of the temperature hysteresis.">
+                                            <TextBlock DockPanel.Dock="Right" x:Name="PowerHystValue" FontFamily="{StaticResource Mono}"
+                                                       FontSize="12" Foreground="#f2f2f4"/>
+                                            <TextBlock Text="Power-curve hysteresis" FontSize="12" Foreground="#99ffffff"/>
+                                        </DockPanel>
+                                        <Slider x:Name="PowerHystSlider" Minimum="2" Maximum="50" TickFrequency="1"
                                                 IsSnapToTickEnabled="True" ValueChanged="OnPowerParamChanged"/>
 
                                         <DockPanel>

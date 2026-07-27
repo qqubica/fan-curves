@@ -18,6 +18,7 @@ public enum OutputReason
     BudgetHold,   // power control: the thermal buffer lets the fan run below the temp curve
     BudgetRamp,   // power control: the buffer/power demands more than the temp curve asks
     HardOverride, // fuse: die at/over the override temp — temp curve direct, no slew
+    PowerCurve,   // power-curve mode: the watts staircase demands more than the temp curve
 }
 
 public record ChannelStatus(
@@ -57,9 +58,15 @@ public class FanEngine : IDisposable
     private readonly IHardwareBackend _hw;
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private readonly Dictionary<ChannelConfig, ResponseFilter> _filters = new();
+    private readonly Dictionary<ChannelConfig, ResponseFilter> _powerFilters = new();
     private readonly Dictionary<ChannelConfig, PowerBudgetController> _budgets = new();
     private readonly Dictionary<ChannelConfig, IdleKick> _kicks = new();
     private readonly Dictionary<ChannelConfig, StopProbe> _probes = new();
+    // PowerCurve mode runs without the budget controller, so it needs its own fuse
+    // latch per channel (same contract: raw temp ≥ override → temp staircase on the
+    // RAW temp, instantly, and the output never decays while latched).
+    private sealed class FuseState { public bool Active; public double OkSince = double.NaN; public double Held; }
+    private readonly Dictionary<ChannelConfig, FuseState> _fuses = new();
     private readonly object _lock = new();
     private Timer? _timer;
 
@@ -100,9 +107,11 @@ public class FanEngine : IDisposable
             StopApplyingControlsNotIn(p);
             Profile = p;
             _filters.Clear();
+            _powerFilters.Clear();
             _budgets.Clear();
             _kicks.Clear();
             _probes.Clear();
+            _fuses.Clear();
         }
     }
 
@@ -180,13 +189,15 @@ public class FanEngine : IDisposable
                     double filtered;
 
                     // The temperature filter runs whenever it has a say: alone when the
-                    // channel has no live power side, and in Auto mode, where its target
+                    // channel has no live power side, in Auto mode, where its target
                     // rides into the budget controller as a floor — whichever side asks
                     // for more fan wins, and the budget's physics stay honest because its
-                    // slewed output IS the physical output.
+                    // slewed output IS the physical output — and in PowerCurve mode,
+                    // where it is the safety floor under the watts staircase.
                     ResponseFilter? filter = null;
                     double tempFiltered = 0;
-                    if (!watts.HasValue || Profile.ControlMode == ControlMode.Auto)
+                    if (!watts.HasValue ||
+                        Profile.ControlMode is ControlMode.Auto or ControlMode.PowerCurve)
                     {
                         if (!_filters.TryGetValue(ch, out filter))
                         {
@@ -202,7 +213,116 @@ public class FanEngine : IDisposable
                         tempFiltered = filter.Step(now, temp.Value, curve);
                     }
 
-                    if (watts.HasValue)
+                    if (watts.HasValue && Profile.ControlMode == ControlMode.PowerCurve)
+                    {
+                        // Power-curve mode: the same MacBook filter, run in the WATTS
+                        // dimension — sustained draw average → watts staircase → slewed
+                        // output. Deterministic: what the curve says is what runs. The
+                        // temperature side above stays as a safety floor, and the fuse
+                        // still snaps to the temp staircase on the raw die temp; the
+                        // predictive budget layer is off entirely.
+                        if (!_powerFilters.TryGetValue(ch, out var pfilter))
+                        {
+                            pfilter = new ResponseFilter();
+                            _powerFilters[ch] = pfilter;
+                        }
+                        pfilter.AveragingSeconds = Profile.PowerAveragingSeconds;
+                        pfilter.HysteresisC = Profile.PowerCurveHysteresisW; // watts here
+                        pfilter.StepDownHoldSeconds = ch.StepDownHoldSeconds;
+                        pfilter.SlewUpPercentPerSec = ch.SlewUpPercentPerSec;
+                        pfilter.SlewDownPercentPerSec = ch.SlewDownPercentPerSec;
+                        pfilter.ZeroSnapPercent = Profile.ZeroSnapEnabled ? Profile.ZeroSnapPercent : 0;
+
+                        bool hasPowerCurve = ch.PowerPoints.Count > 0;
+                        double pFiltered = hasPowerCurve
+                            ? pfilter.Step(now, watts.Value, FanCurve.FromPower(ch.PowerPoints))
+                            : 0;
+                        double tTarget = filter!.TargetLevel;
+                        double pTarget = hasPowerCurve ? pfilter.TargetLevel : 0;
+                        effectiveTemp = filter.EffectiveTemp;
+                        wattsAvg = hasPowerCurve ? pfilter.EffectiveTemp : watts;
+                        // Gates the stop probe exactly like the budget's DemandLevel: a
+                        // die-limited load reads "stable" to the probe, but its draw
+                        // keeps the watts staircase asking for fan.
+                        demandLevel = pTarget;
+
+                        if (!_fuses.TryGetValue(ch, out var fuse))
+                        {
+                            fuse = new FuseState();
+                            _fuses[ch] = fuse;
+                        }
+                        if (temp.Value >= Profile.OverrideTempC)
+                        {
+                            fuse.Active = true;
+                            fuse.OkSince = double.NaN;
+                        }
+                        else if (fuse.Active)
+                        {
+                            if (temp.Value <= Profile.OverrideTempC - Profile.OverrideReleaseC)
+                            {
+                                if (double.IsNaN(fuse.OkSince)) fuse.OkSince = now;
+                                if (now - fuse.OkSince >= Profile.OverrideReleaseSeconds)
+                                    fuse.Active = false;
+                            }
+                            else fuse.OkSince = double.NaN;
+                        }
+                        overrideActive = fuse.Active;
+
+                        filtered = Math.Max(tempFiltered, pFiltered);
+                        if (fuse.Active)
+                        {
+                            fuse.Held = Math.Max(fuse.Held,
+                                Math.Max(curve.Evaluate(temp.Value), filtered));
+                            filtered = fuse.Held;
+                        }
+                        else fuse.Held = 0;
+
+                        output = Math.Max(ch.MinPercent, filtered);
+                        targetPct = Math.Max(ch.MinPercent, Math.Max(tTarget, pTarget));
+
+                        // Most specific explanation wins; later checks override earlier ones.
+                        if (overrideActive)
+                        {
+                            reason = OutputReason.HardOverride;
+                            reasonLevel = curve.Evaluate(temp.Value);
+                        }
+                        else
+                        {
+                            bool powerLeads = pTarget > tTarget + 0.5;
+                            if (powerLeads)
+                            {
+                                reason = OutputReason.PowerCurve;
+                                reasonLevel = tTarget; // what the temp curve alone asks
+                            }
+                            // A pending step-down only matters on the side whose level is
+                            // in force, and only while it would actually lower the max.
+                            var leadF = powerLeads ? pfilter : filter;
+                            double otherTarget = powerLeads ? tTarget : pTarget;
+                            if (!double.IsNaN(leadF.DownHoldRemaining) &&
+                                leadF.PendingDownLevel >= otherTarget - 0.5)
+                            {
+                                reason = OutputReason.StepDownHold;
+                                reasonLevel = Math.Max(ch.MinPercent,
+                                    Math.Max(otherTarget, leadF.PendingDownLevel));
+                                reasonSeconds = leadF.DownHoldRemaining;
+                            }
+                            if ((powerLeads ? pfilter.SnappedToZero : filter.SnappedToZero)
+                                && output <= 0.01)
+                            {
+                                reason = OutputReason.ZeroSnap;
+                                reasonLevel = powerLeads ? pfilter.CurveLevel : filter.CurveLevel;
+                            }
+                            if (Math.Abs(output - targetPct) > 0.5)
+                                reason = output < targetPct ? OutputReason.RampUp : OutputReason.RampDown;
+                            if (ch.MinPercent > 0 && filtered < ch.MinPercent - 0.01)
+                            {
+                                reason = OutputReason.MinFloor;
+                                reasonLevel = Math.Max(filter.CurveLevel,
+                                    hasPowerCurve ? pfilter.CurveLevel : 0);
+                            }
+                        }
+                    }
+                    else if (watts.HasValue)
                     {
                         if (!_budgets.TryGetValue(ch, out var budget))
                         {

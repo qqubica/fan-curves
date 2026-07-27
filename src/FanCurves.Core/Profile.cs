@@ -25,6 +25,9 @@ public class ChannelConfig
     public double SlewDownPercentPerSec { get; set; } = 8;
     /// <summary>Power sensors (watts, summed) for thermal-budget control; empty = temperature control.</summary>
     public List<string> PowerSensorIds { get; set; } = new();
+    /// <summary>The power curve (PowerCurve mode): at PointN.Watts sustained draw and above,
+    /// run at PointN.Percent — the watts twin of Points. Ignored in the other modes.</summary>
+    public List<PowerPoint> PowerPoints { get; set; } = new();
     /// <summary>Learned thermal mass in J/°C (0 = not learned yet; see ThermalModel).</summary>
     public double LearnedThermalMassJPerC { get; set; }
     /// <summary>Learned cool-idle baseline temperature (0 = not learned yet).</summary>
@@ -45,6 +48,12 @@ public enum ControlMode
     /// guaranteed baseline while the power side may still ramp earlier (or push higher)
     /// when its predicted headroom runs out.</summary>
     Auto,
+    /// <summary>Channels with a power sensor follow their own watts→% staircase
+    /// (ChannelConfig.PowerPoints) directly: the sustained power average picks the step,
+    /// run through the same averaging/hysteresis/hold/slew filter as the temperature
+    /// side — deterministic, no predictive budget layer. The temperature staircase keeps
+    /// running as a safety floor and the hard-override fuse still applies.</summary>
+    PowerCurve,
 }
 
 public class Profile
@@ -95,6 +104,9 @@ public class Profile
     public ControlMode ControlMode { get; set; } = ControlMode.Auto;
     /// <summary>Window for the sustained power average — "how much heat must actually leave".</summary>
     public double PowerAveragingSeconds { get; set; } = 60;
+    /// <summary>PowerCurve mode: a step is only left downward once the sustained draw sits
+    /// this many watts clear of the band edge — the watts twin of ChannelConfig.HysteresisC.</summary>
+    public double PowerCurveHysteresisW { get; set; } = 10;
     /// <summary>Fans step up once the predicted time to exhaust the thermal buffer drops under this.</summary>
     public double RampLeadSeconds { get; set; } = 45;
     /// <summary>Downward relief (probing below the staircase floor once the up-march is
@@ -155,6 +167,20 @@ public class Profile
                     new CurvePoint(88, 90),
                     new CurvePoint(92, 100),
                 },
+                // The watts twin (PowerCurve mode): sized for a ~200 W-class CPU —
+                // silence through desktop draw, the same ladder of levels as the
+                // temp staircase so the two sides agree on the allowed speeds.
+                PowerPoints =
+                {
+                    new PowerPoint(0, 0),
+                    new PowerPoint(95, 20),
+                    new PowerPoint(125, 40),
+                    new PowerPoint(150, 50),
+                    new PowerPoint(175, 65),
+                    new PowerPoint(195, 81),
+                    new PowerPoint(215, 90),
+                    new PowerPoint(235, 100),
+                },
                 // 90 s averaging window: only genuinely sustained load moves the fans.
                 AveragingSeconds = 90, HysteresisC = 1.5, StepDownHoldSeconds = 25,
                 SlewUpPercentPerSec = 9, SlewDownPercentPerSec = 8,
@@ -170,6 +196,15 @@ public class Profile
                     new CurvePoint(70, 40),
                     new CurvePoint(80, 55),
                     new CurvePoint(88, 70),
+                },
+                // Case channel sums CPU+GPU draw, so the steps sit higher.
+                PowerPoints =
+                {
+                    new PowerPoint(0, 0),
+                    new PowerPoint(140, 25),
+                    new PowerPoint(220, 40),
+                    new PowerPoint(300, 55),
+                    new PowerPoint(380, 70),
                 },
                 AveragingSeconds = 25, HysteresisC = 4, StepDownHoldSeconds = 10,
                 SlewUpPercentPerSec = 7, SlewDownPercentPerSec = 7,
@@ -195,6 +230,14 @@ public class Profile
                     new CurvePoint(80, 90),
                     new CurvePoint(90, 100),
                 },
+                PowerPoints =
+                {
+                    new PowerPoint(0, 45),
+                    new PowerPoint(80, 60),
+                    new PowerPoint(130, 75),
+                    new PowerPoint(180, 90),
+                    new PowerPoint(220, 100),
+                },
                 AveragingSeconds = 8, HysteresisC = 2, StepDownHoldSeconds = 5,
                 SlewUpPercentPerSec = 6, SlewDownPercentPerSec = 2,
             },
@@ -209,6 +252,14 @@ public class Profile
                     new CurvePoint(60, 55),
                     new CurvePoint(75, 75),
                     new CurvePoint(85, 95),
+                },
+                PowerPoints =
+                {
+                    new PowerPoint(0, 25),
+                    new PowerPoint(100, 40),
+                    new PowerPoint(180, 55),
+                    new PowerPoint(260, 75),
+                    new PowerPoint(340, 95),
                 },
                 AveragingSeconds = 10, HysteresisC = 2, StepDownHoldSeconds = 5,
                 SlewUpPercentPerSec = 4, SlewDownPercentPerSec = 2,
@@ -228,6 +279,7 @@ public class Profile
             var mine = Channels[i];
             var src = preset.Channels[i];
             mine.Points = src.Points.ToList();
+            mine.PowerPoints = src.PowerPoints.ToList();
             mine.AveragingSeconds = src.AveragingSeconds;
             mine.HysteresisC = src.HysteresisC;
             mine.StepDownHoldSeconds = src.StepDownHoldSeconds;
@@ -272,7 +324,18 @@ public class Profile
             if (File.Exists(ConfigPath))
             {
                 var p = JsonSerializer.Deserialize<Profile>(File.ReadAllText(ConfigPath), JsonOpts);
-                if (p != null && p.Channels.Count > 0) return p;
+                if (p != null && p.Channels.Count > 0)
+                {
+                    // Profiles saved before the power curve existed carry no watts
+                    // points; seed them from the default preset so PowerCurve mode
+                    // has a ladder to stand on. (The editor never leaves a curve
+                    // with fewer than two points, so empty means "never had one".)
+                    var seed = MacBookLike();
+                    for (int i = 0; i < p.Channels.Count && i < seed.Channels.Count; i++)
+                        if (p.Channels[i].PowerPoints.Count == 0)
+                            p.Channels[i].PowerPoints = seed.Channels[i].PowerPoints.ToList();
+                    return p;
+                }
             }
         }
         catch { /* corrupted config → fall back to default */ }

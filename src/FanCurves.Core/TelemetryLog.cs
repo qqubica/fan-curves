@@ -157,6 +157,7 @@ public class TelemetryLog : IDisposable
         OutputReason.BudgetHold => Inv($"budget hold (curve asks {s.ReasonLevel:0}%, headroom {Seconds(s.ReasonSeconds)})"),
         OutputReason.BudgetRamp => Inv($"budget ramp (curve asks {s.ReasonLevel:0}%, headroom {Seconds(s.ReasonSeconds)})"),
         OutputReason.HardOverride => Inv($"FUSE — raw-temp curve direct ({s.ReasonLevel:0}%)"),
+        OutputReason.PowerCurve => Inv($"power curve (temp curve asks {s.ReasonLevel:0}%)"),
         _ => "steady on the curve",
     };
 
@@ -183,7 +184,7 @@ public class TelemetryLog : IDisposable
         sb.Append(p.StopProbeEnabled
             ? Inv($" · probe {p.StopProbeRunSeconds:0}s/{p.StopProbeSeconds:0}s/{p.StopProbeStableRangeC:0.#}°/{p.StopProbeRetrySeconds:0}s/<{p.StopProbeMaxTempC:0}°")
             : " · probe off");
-        sb.Append(Inv($" · pwrAvg {p.PowerAveragingSeconds:0}s · lead {p.RampLeadSeconds:0}s · relief <{p.ReliefMaxWatts:0}W"));
+        sb.Append(Inv($" · pwrAvg {p.PowerAveragingSeconds:0}s · pwrHyst {p.PowerCurveHysteresisW:0}W · lead {p.RampLeadSeconds:0}s · relief <{p.ReliefMaxWatts:0}W"));
         sb.Append(Inv($" · pfloor {p.PowerFloorPercentAt100W:0}%@100W/{p.PowerFloorPercentAt200W:0}%@200W"));
         sb.Append(Inv($" · fuse {p.OverrideTempC:0}° (release −{p.OverrideReleaseC:0}°/{p.OverrideReleaseSeconds:0}s)"));
         sb.Append(Inv($" · ceilM {p.BudgetCeilingMarginC:0}° · aimM {p.SteadyTargetMarginC:0}°"));
@@ -196,6 +197,11 @@ public class TelemetryLog : IDisposable
             sb.Append(Inv($" · slew {ch.SlewUpPercentPerSec:0}/{ch.SlewDownPercentPerSec:0}"));
             sb.Append(" · curve ");
             sb.Append(string.Join(' ', ch.Points.Select(pt => Inv($"{pt.TempC:0}:{pt.Percent:0}"))));
+            if (ch.PowerPoints.Count > 0)
+            {
+                sb.Append(" · pwrCurve ");
+                sb.Append(string.Join(' ', ch.PowerPoints.Select(pt => Inv($"{pt.Watts:0}:{pt.Percent:0}"))));
+            }
             if (ch.PowerSensorIds.Count > 0) sb.Append(Inv($" · pwr[{ch.PowerSensorIds.Count}]"));
         }
         return sb.ToString();

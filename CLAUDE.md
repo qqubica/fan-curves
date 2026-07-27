@@ -550,9 +550,49 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   restored in 17 s, no fuse; C9 draw over the relief cap — floor never undercut;
   C10 post-load descent = one target snap + power-floor glide, monotonic 90→0,
   fans off 94 s after load end.
+- **Power curve — Curve control mode (2026-07-27, Kuba: "can we create a curve for
+  power consumption?", direct-driver variant chosen via AskUserQuestion)**: each
+  channel carries a second staircase `ChannelConfig.PowerPoints`
+  (`PowerPoint(Watts, Percent)` in FanCurve.cs) — the watts twin of `Points`. In
+  the new 4th control mode **Curve** (`ControlMode.PowerCurve`), channels with a
+  power sensor are driven by it DIRECTLY: a second `ResponseFilter` instance runs
+  in the watts dimension (input = instantaneous draw, averaging =
+  `PowerAveragingSeconds`, hysteresis = `Profile.PowerCurveHysteresisW` — new
+  app-level setting, default 10 W, POWER CONTROL slider 2–50 W; hold/slew/zero-snap
+  from the channel), so the whole MacBook feel — spike immunity, step-down hold,
+  slew — applies to watts, deterministically, with the predictive budget layer off
+  entirely. The temperature filter keeps running as a safety floor
+  (output = max of the two), and a per-channel fuse latch in `FanEngine`
+  (`FuseState`, same contract as the budget's: raw ≥ `OverrideTempC` → temp
+  staircase on the RAW temp instantly, output never decays while latched, release
+  −`OverrideReleaseC` for `OverrideReleaseSeconds`) stays armed. The watts-side
+  target also feeds `DemandLevel`, which keeps the stop-probe demand gate working
+  (a die-limited load would otherwise trial-stop at full draw — the C6 trap).
+  `FanCurve` got axis bounds (`axisMin/axisMax` ctor args; `FromPower` builds the
+  watts staircase — without this, Normalize used to clamp watts into 15–100!).
+  Empty `PowerPoints` = pure temp behaviour; `LoadOrDefault` seeds missing power
+  curves from the Quiet preset (both presets ship defaults sized for a ~200 W CPU /
+  CPU+GPU case sum; `AdoptTuning` copies them; editor never leaves <2 points, so
+  empty means "never had one"). **UI**: `CurveEditor` is axis-generic now
+  (`PowerAxis` property; °C snaps whole degrees/1° min gap, W snaps 5 W/5 W gap;
+  power axis top = max(300, top point + headroom) rounded to 50) — a `CURVE °C/W`
+  toggle button in the chart-card header (dev mode only, resets to °C on leaving
+  dev mode) flips the chart; on the power axis the operating dot/crosshair is
+  WHITE (amber stays thermal-only) at (sustained draw, output) and the dashed
+  vertical is the instantaneous draw. Undo/redo shares the one stack (`CurveEdit.Power`
+  flag; power snapshots carry watts in the TempC slot, internal only); undoing a
+  power edit flips the chart to the power axis so the restore is visible. Why-chip
+  reason `PowerCurve` ("power curve: avg NNN W → X% · temp curve asks Y%") when the
+  watts side out-asks the temp floor; behavior log describes it and the settings
+  line carries `pwrHyst` + per-channel `pwrCurve W:%…`. Verified by a scratchpad
+  console harness (eighth): constant 180 W settles 65% steady; ±7 W swing across a
+  step edge never flaps; 8 s/250 W spike train at idle stays silent; fuse latches
+  instantly at raw 90° and releases clean; hot-but-low-draw lets the temp floor
+  win; empty power curve is tick-identical to the pure temp path; load-end winds
+  down to stopped in ~69 s. Editor render verified by a WPF harness PNG on both axes.
 - **Control-mode switch (2026-07-27, Kuba: "switch between temperature-based and
   power-based mode" + "automatic option that considers both outputs")**: dev-panel
-  `CONTROL MODE` segmented switch (Temp · Power · Auto; at the TOP of the panel
+  `CONTROL MODE` segmented switch (Temp · Power · Auto · Curve; at the TOP of the panel
   since the same-day two-column rework — Kuba's placement) → `Profile.ControlMode`
   (string-serialized enum; app-level like the rest — no "Custom", presets don't touch
   it). The old bool `PowerControlEnabled` stays as a JSON bridge property declared

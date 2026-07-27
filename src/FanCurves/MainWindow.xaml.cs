@@ -23,13 +23,34 @@ public partial class MainWindow : Window
     private IReadOnlyList<ChannelStatus>? _lastStatuses;
 
     // Undo/redo for curve edits (drag / add / remove), Ctrl+Z / Ctrl+Y. Each entry is
-    // one committed edit; _pointsBaseline holds the last known points per channel so a
+    // one committed edit; the baselines hold the last known points per channel so a
     // CurveChanged can be diffed into a before/after pair. Presets reset everything.
-    private sealed record CurveEdit(ChannelConfig Channel,
+    // Power-curve edits ride the same stack: Power=true, and the snapshot lists carry
+    // watts in the TempC slot (internal only — never serialized that way).
+    private sealed record CurveEdit(ChannelConfig Channel, bool Power,
         List<CurvePoint> Before, List<CurvePoint> After, string BeforeName);
     private readonly List<CurveEdit> _undoStack = new();
     private readonly List<CurveEdit> _redoStack = new();
     private readonly Dictionary<ChannelConfig, List<CurvePoint>> _pointsBaseline = new();
+    private readonly Dictionary<ChannelConfig, List<CurvePoint>> _powerBaseline = new();
+
+    private static List<CurvePoint> SnapPoints(ChannelConfig ch, bool power) => power
+        ? ch.PowerPoints.Select(p => new CurvePoint(p.Watts, p.Percent)).ToList()
+        : ch.Points.ToList();
+
+    private static void RestorePoints(ChannelConfig ch, bool power, List<CurvePoint> pts)
+    {
+        if (power)
+        {
+            ch.PowerPoints.Clear();
+            ch.PowerPoints.AddRange(pts.Select(p => new PowerPoint(p.TempC, p.Percent)));
+        }
+        else
+        {
+            ch.Points.Clear();
+            ch.Points.AddRange(pts);
+        }
+    }
 
     // Live readouts in the dev panel's source lists: temp before each sensor name,
     // watts before each power sensor, rpm before each fan header name. Rebuilt with
@@ -94,6 +115,7 @@ public partial class MainWindow : Window
         ProbeRetrySlider.Value = profile.StopProbeRetrySeconds;
         ProbeMaxTempSlider.Value = profile.StopProbeMaxTempC;
         PowerAvgSlider.Value = profile.PowerAveragingSeconds;
+        PowerHystSlider.Value = profile.PowerCurveHysteresisW;
         RampLeadSlider.Value = profile.RampLeadSeconds;
         ReliefMaxSlider.Value = profile.ReliefMaxWatts;
         PowerFloor100Slider.Value = profile.PowerFloorPercentAt100W;
@@ -119,6 +141,7 @@ public partial class MainWindow : Window
             _channelVms.Add(new ChannelVm(ch));
             _histories.Add(new ChannelHistory());
             _pointsBaseline[ch] = ch.Points.ToList();
+            _powerBaseline[ch] = SnapPoints(ch, power: true);
         }
         ChannelList.ItemsSource = _channelVms;
         ChannelList.SelectedIndex = 0;
@@ -262,7 +285,11 @@ public partial class MainWindow : Window
         // A preset rewrites every curve; stale before/after pairs would restore nonsense.
         _undoStack.Clear();
         _redoStack.Clear();
-        foreach (var ch in _profile.Channels) _pointsBaseline[ch] = ch.Points.ToList();
+        foreach (var ch in _profile.Channels)
+        {
+            _pointsBaseline[ch] = ch.Points.ToList();
+            _powerBaseline[ch] = SnapPoints(ch, power: true);
+        }
         OnChannelSelected(this, null!);
         Editor.InvalidateVisual();
         UpdatePresetHighlight();
@@ -281,13 +308,16 @@ public partial class MainWindow : Window
     {
         var ch = Editor.Channel;
         if (ch == null) return;
-        var before = _pointsBaseline.TryGetValue(ch, out var b) ? b : ch.Points.ToList();
-        if (before.SequenceEqual(ch.Points)) return; // e.g. a click on a point with no drag
+        bool power = Editor.PowerAxis;
+        var baseline = power ? _powerBaseline : _pointsBaseline;
+        var current = SnapPoints(ch, power);
+        var before = baseline.TryGetValue(ch, out var b) ? b : current;
+        if (before.SequenceEqual(current)) return; // e.g. a click on a point with no drag
 
-        _undoStack.Add(new CurveEdit(ch, before, ch.Points.ToList(), _profile.Name));
+        _undoStack.Add(new CurveEdit(ch, power, before, current, _profile.Name));
         if (_undoStack.Count > 100) _undoStack.RemoveAt(0);
         _redoStack.Clear();
-        _pointsBaseline[ch] = ch.Points.ToList();
+        baseline[ch] = current;
 
         _profile.Name = "Custom";
         _profile.Save();
@@ -300,7 +330,7 @@ public partial class MainWindow : Window
         var edit = _undoStack[^1];
         _undoStack.RemoveAt(_undoStack.Count - 1);
         _redoStack.Add(edit);
-        ApplyCurveEdit(edit.Channel, edit.Before, edit.BeforeName);
+        ApplyCurveEdit(edit, edit.Before, edit.BeforeName);
     }
 
     private void RedoCurveEdit()
@@ -309,22 +339,35 @@ public partial class MainWindow : Window
         var edit = _redoStack[^1];
         _redoStack.RemoveAt(_redoStack.Count - 1);
         _undoStack.Add(edit);
-        ApplyCurveEdit(edit.Channel, edit.After, "Custom");
+        ApplyCurveEdit(edit, edit.After, "Custom");
     }
 
-    private void ApplyCurveEdit(ChannelConfig ch, List<CurvePoint> points, string name)
+    private void ApplyCurveEdit(CurveEdit edit, List<CurvePoint> points, string name)
     {
-        ch.Points.Clear();
-        ch.Points.AddRange(points);
-        _pointsBaseline[ch] = points.ToList();
+        var ch = edit.Channel;
+        RestorePoints(ch, edit.Power, points);
+        (edit.Power ? _powerBaseline : _pointsBaseline)[ch] = points.ToList();
         _profile.Name = name;
         _profile.Save();
 
-        // Bring the affected channel on screen so the restore is visible.
+        // Bring the affected channel — and the axis the edit lives on — on screen
+        // so the restore is visible.
         int i = _channelVms.FindIndex(vm => vm.Config == ch);
         if (i >= 0 && ChannelList.SelectedIndex != i) ChannelList.SelectedIndex = i;
+        if (_devMode && Editor.PowerAxis != edit.Power) SetCurveAxis(edit.Power);
         Editor.InvalidateVisual();
         UpdatePresetHighlight();
+    }
+
+    // ---- Curve axis (°C ↔ W) ----
+
+    private void OnToggleCurveAxis(object sender, RoutedEventArgs e) =>
+        SetCurveAxis(!Editor.PowerAxis);
+
+    private void SetCurveAxis(bool power)
+    {
+        Editor.PowerAxis = power;
+        Tracked.SetText(CurveAxisText, power ? "CURVE W" : "CURVE °C");
     }
 
     // ---- Developer mode ----
@@ -339,6 +382,8 @@ public partial class MainWindow : Window
         HistoryView.Visibility = _devMode ? Visibility.Visible : Visibility.Collapsed;
         BudgetView.Visibility = _devMode ? Visibility.Visible : Visibility.Collapsed;
         ClearHistoryButton.Visibility = _devMode ? Visibility.Visible : Visibility.Collapsed;
+        CurveAxisButton.Visibility = _devMode ? Visibility.Visible : Visibility.Collapsed;
+        if (!_devMode) SetCurveAxis(false); // simple mode always shows the temp curve
         DevButton.Tag = _devMode ? "on" : null;
         // Developer mode needs room for the panel and the two strips; the floating
         // window grows in both directions rather than squeezing the curve editor
@@ -630,6 +675,8 @@ public partial class MainWindow : Window
                 : Inv($"sustained {s.WattsAvg ?? 0:0} W needs {s.TargetPercent:0}% · temp curve asks {s.ReasonLevel:0}%"),
             OutputReason.HardOverride =>
                 Inv($"OVERRIDE · die {s.RawTemp ?? 0:0}° ≥ {_profile.OverrideTempC:0}° — temp curve direct, no slew"),
+            OutputReason.PowerCurve =>
+                Inv($"power curve: avg {s.WattsAvg ?? 0:0} W → {s.TargetPercent:0}% · temp curve asks {s.ReasonLevel:0}%"),
             _ => null,
         };
         WhyChip.Visibility = why == null ? Visibility.Collapsed : Visibility.Visible;
@@ -783,6 +830,7 @@ public partial class MainWindow : Window
         // Fires mid-XAML-parse (setting Minimum) and from the constructor — both guarded.
         if (!IsLoaded || _loadingUi) return;
         _profile.PowerAveragingSeconds = PowerAvgSlider.Value;
+        _profile.PowerCurveHysteresisW = PowerHystSlider.Value;
         _profile.RampLeadSeconds = RampLeadSlider.Value;
         _profile.ReliefMaxWatts = ReliefMaxSlider.Value;
         _profile.PowerFloorPercentAt100W = PowerFloor100Slider.Value;
@@ -798,6 +846,7 @@ public partial class MainWindow : Window
     private void UpdatePowerLabels()
     {
         PowerAvgValue.Text = FormatAvg(_profile.PowerAveragingSeconds);
+        PowerHystValue.Text = Inv($"{_profile.PowerCurveHysteresisW:0} W");
         RampLeadValue.Text = FormatAvg(_profile.RampLeadSeconds);
         ReliefMaxValue.Text = Inv($"{_profile.ReliefMaxWatts:0} W");
         PowerFloor100Value.Text = Inv($"{_profile.PowerFloorPercentAt100W:0} %");
@@ -857,6 +906,8 @@ public partial class MainWindow : Window
             s == null ? "" :
             _profile.ControlMode == ControlMode.Temperature ? "temperature mode — power side off" :
             s.Watts is not double w ? "temperature control — no power sensor assigned" :
+            _profile.ControlMode == ControlMode.PowerCurve ?
+                Inv($"draw {w:0} W · avg {s.WattsAvg ?? 0:0} W\npower curve asks {s.DemandLevel:0}%") :
             Inv($"draw {w:0} W · avg {s.WattsAvg ?? 0:0} W\nbuffer {s.BudgetJoules / 1000:0.0} kJ · needs {s.DemandLevel:0}%\nheadroom {FormatTau(s.TauSeconds)}");
     }
 
@@ -868,6 +919,14 @@ public partial class MainWindow : Window
         if (s?.Watts is not double || _profile.ControlMode == ControlMode.Temperature)
         {
             BudgetInfoText.Text = "";
+            HeadroomInfoText.Text = "";
+            return;
+        }
+        if (_profile.ControlMode == ControlMode.PowerCurve)
+        {
+            // The watts staircase drives directly; the predictive machinery these
+            // numbers describe is off (only the fuse remains).
+            BudgetInfoText.Text = "curve mode — predictive\nbudget layer off (fuse stays)";
             HeadroomInfoText.Text = "";
             return;
         }

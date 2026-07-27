@@ -68,6 +68,21 @@ allowed fan speeds and the fallback curve for the override. Power control can
 be turned off per app (Developer mode), and channels without a power sensor
 simply keep the temperature behaviour above.
 
+### Control modes
+
+The Developer panel's CONTROL MODE switch picks how the two sides combine:
+
+- **Temp** — classic temperature-only staircase control.
+- **Power** — the thermal-budget controller above drives power-sensing channels.
+- **Auto** (default) — both run at once and the higher demand wins: the
+  temperature staircase is a guaranteed floor, the power side may ramp earlier.
+- **Curve** — a second, fully deterministic staircase you draw in **watts**:
+  the sustained power average picks the step directly, run through the same
+  averaging/hysteresis/hold/slew filter as the temperature side — no predictive
+  layer, what you draw is what runs. The temperature curve stays as a safety
+  floor and the fuse still applies. Flip the chart between the two staircases
+  with the CURVE °C/W toggle above it; both are editable the same way.
+
 ## Download & run
 
 Grab the latest zip from [Releases](../../releases), unzip anywhere, run
