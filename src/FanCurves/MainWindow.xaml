@@ -856,6 +856,24 @@
                                                 IsSnapToTickEnabled="True" ValueChanged="OnPowerParamChanged"/>
 
                                         <DockPanel>
+                                            <TextBlock DockPanel.Dock="Right" x:Name="PowerFloor100Value" FontFamily="{StaticResource Mono}"
+                                                       FontSize="12" Foreground="#f2f2f4"/>
+                                            <TextBlock Text="Power floor · fan at 100 W" FontSize="12" Foreground="#99ffffff"
+                                                       ToolTip="Minimum fan for a sustained 100 W draw. With the 200 W point it defines a line mapping sustained draw to a minimum fan — always binding, futility latch or not. Both at 0 = off."/>
+                                        </DockPanel>
+                                        <Slider x:Name="PowerFloor100Slider" Minimum="0" Maximum="100" TickFrequency="5"
+                                                IsSnapToTickEnabled="True" ValueChanged="OnPowerParamChanged"/>
+
+                                        <DockPanel>
+                                            <TextBlock DockPanel.Dock="Right" x:Name="PowerFloor200Value" FontFamily="{StaticResource Mono}"
+                                                       FontSize="12" Foreground="#f2f2f4"/>
+                                            <TextBlock Text="Power floor · fan at 200 W" FontSize="12" Foreground="#99ffffff"
+                                                       ToolTip="Minimum fan for a sustained 200 W draw (see the 100 W point)."/>
+                                        </DockPanel>
+                                        <Slider x:Name="PowerFloor200Slider" Minimum="0" Maximum="100" TickFrequency="5"
+                                                IsSnapToTickEnabled="True" ValueChanged="OnPowerParamChanged"/>
+
+                                        <DockPanel>
                                             <TextBlock DockPanel.Dock="Right" x:Name="OverrideValue" FontFamily="{StaticResource Mono}"
                                                        FontSize="12" Foreground="#f2f2f4"/>
                                             <TextBlock Text="Hard override above" FontSize="12" Foreground="#99ffffff"/>

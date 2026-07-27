@@ -100,6 +100,10 @@ public class Profile
     /// <summary>Downward relief (probing below the staircase floor once the up-march is
     /// proven futile) only runs while the sustained draw is under this many watts.</summary>
     public double ReliefMaxWatts { get; set; } = 190;
+    /// <summary>Power floor calibration: minimum fan % at 100 W and at 200 W sustained
+    /// draw (linear through the two points, clamped outside; both 0 = off).</summary>
+    public double PowerFloorPercentAt100W { get; set; } = 30;
+    public double PowerFloorPercentAt200W { get; set; } = 80;
     /// <summary>Fuse: at/above this raw die temp the channel's temp curve takes over instantly, no slew.</summary>
     public double OverrideTempC { get; set; } = 90;
     /// <summary>Budget ceiling = OverrideTempC − this. The credit E = C·(ceiling − temp) is

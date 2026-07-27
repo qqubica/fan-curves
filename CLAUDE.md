@@ -520,17 +520,36 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   baseline it was proven on or the draw crosses the cap; a VANISHED load instead
   keeps the waiver standing so the stale floor (90 s average, hot for another
   minute) cannot pull the fans UP right as the heat goes away — it clears
-  quietly once the floor falls to it. Verified by the
+  quietly once the floor falls to it.
+  **Power floor (later that night, Kuba: "200 sustained draw requires 80% fan,
+  100 requires 30%")**: his calibration is a first-class mapping the die-referenced
+  model cannot express (at 200 W the die clamps at every fan speed, so no
+  die-temperature aim reproduces "80% is right") — a continuous line through
+  (100 W → `PowerFloorPercentAt100W`, default 30) and (200 W →
+  `PowerFloorPercentAt200W`, default 80), linear, extrapolated and clamped
+  [0, 100], evaluated on the sustained power average each tick and folded into
+  `EffectiveFloor` — so it binds the OUTPUT continuously (need not be a ladder
+  level), outranks the futility latch AND the relief waiver (the waiver only
+  waives the temperature staircase), and rides under the fuse too. At idle draws
+  the line falls below the zero-snap threshold, so fans still stop; both sliders
+  at 0 = off. Two POWER CONTROL sliders (0–100%), app-level like the rest;
+  settings line logs `pfloor 30%@100W/80%@200W`. Chess repro now bottoms out ON
+  the line (~64% at 168 W — matching his original "lower it to 60%" better than
+  the ladder's 50), and post-load descents glide down the line as the average
+  decays instead of stepping. Verified by the
   **seventh scratchpad harness** (2026-07-27): C1 chess repro from his actual
   learned model + margins in Auto (floor climb → one probe 81→90 → back, 25 s
-  above 81%, then relief 81→65→50 and steady); C2 90 W on a fan-effective plant
+  above 81%, then relief settles ON the power-floor line at 64%, line never
+  undercut); C2 90 W on a fan-effective plant
   still fires and settles 40%/64°; C3 188 W from seeds on a plant where 81%
   genuinely can't hold the preset aim still climbs to 90% (a helping step's
   verdict clears — trend falls); C4 spike train silent; C5 floor-guard 40 W creep
   still one-steady-ON; C6 the ungated stop probe latching 0% at full load below
   the 78° probe ceiling (why the demand gate exists); C7 load-end during relief —
   no fan bump, unwinds to silence; C8 clamp shifting 85.3→88 mid-relief — floor
-  restored in 17 s, no fuse; C9 draw over the relief cap — floor never undercut.
+  restored in 17 s, no fuse; C9 draw over the relief cap — floor never undercut;
+  C10 post-load descent = one target snap + power-floor glide, monotonic 90→0,
+  fans off 94 s after load end.
 - **Control-mode switch (2026-07-27, Kuba: "switch between temperature-based and
   power-based mode" + "automatic option that considers both outputs")**: dev-panel
   `CONTROL MODE` segmented switch (Temp · Power · Auto; at the TOP of the panel

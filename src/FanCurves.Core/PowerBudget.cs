@@ -226,6 +226,16 @@ public class PowerBudgetController
     /// <summary>Downward relief only runs while the sustained draw is under this many
     /// watts — above it the staircase floor rules unconditionally (Kuba's 190 W cap).</summary>
     public double ReliefMaxWatts { get; set; } = 190;
+    /// <summary>POWER FLOOR (Kuba's calibration, 2026-07-27: "200 W sustained requires
+    /// 80% fan, 100 W requires 30%"): a continuous line through these two points maps
+    /// the sustained draw to a minimum fan %, extrapolated and clamped to [0, 100]
+    /// outside them. The die-referenced thermal model cannot express this — at 200 W
+    /// the die sits near its boost clamp at every fan speed — so the mapping binds the
+    /// OUTPUT directly, outranking the futility latch and the relief waiver (which
+    /// only waives the temperature staircase). At idle draws the line falls under the
+    /// zero-snap threshold, so fans still stop. Both 0 disables the floor.</summary>
+    public double PowerFloorPercentAt100W { get; set; } = 30;
+    public double PowerFloorPercentAt200W { get; set; } = 80;
 
     public ThermalModel Model { get; } = new();
 
@@ -286,14 +296,17 @@ public class PowerBudgetController
     public double EffectiveTemp { get; private set; } = double.NaN;
     /// <summary>What the plain temperature staircase would ask at the display average.</summary>
     public double CurveLevelAtAvg { get; private set; }
-    /// <summary>The level the slew is gliding toward (floor and zero-snap applied).</summary>
+    /// <summary>The level the slew is gliding toward (floors and zero-snap applied).</summary>
     public double TargetLevel => double.IsNaN(_target) ? 0 : Snap(Math.Max(_target, EffectiveFloor));
-    /// <summary>The chosen ladder level (floor applied) before the zero snap.</summary>
+    /// <summary>The chosen ladder level (floors applied) before the zero snap.</summary>
     public double PreSnapTarget => double.IsNaN(_target) ? 0 : Math.Max(_target, EffectiveFloor);
-    /// <summary>The floor actually binding the output: the Auto floor, unless a standing
-    /// downward-relief waiver (measured: less fan changes nothing here) undercuts it.</summary>
-    private double EffectiveFloor =>
-        !double.IsNaN(_reliefLevel) && _reliefLevel < FloorPercent ? _reliefLevel : FloorPercent;
+    /// <summary>The floor actually binding the output: the larger of the power floor
+    /// (sustained draw → minimum fan, always binding) and the Auto temp floor — the
+    /// latter waived by a standing downward-relief waiver (measured: less fan changes
+    /// nothing here).</summary>
+    private double EffectiveFloor => Math.Max(_powerFloor,
+        !double.IsNaN(_reliefLevel) && _reliefLevel < FloorPercent ? _reliefLevel : FloorPercent);
+    private double _powerFloor;
     /// <summary>The chosen level was above 0 but collapsed to 0 by the zero snap.</summary>
     public bool SnappedToZero { get; private set; }
     /// <summary>Package power, short average (last ~10 s).</summary>
@@ -347,6 +360,10 @@ public class PowerBudgetController
         PowerNow = Mean(_powers, now - ShortPowerSeconds);
         PowerAvg = _powers.Average(s => s.v);
         CurveLevelAtAvg = curve.Evaluate(EffectiveTemp);
+        _powerFloor = Math.Clamp(
+            PowerFloorPercentAt100W +
+            (PowerAvg - 100) * (PowerFloorPercentAt200W - PowerFloorPercentAt100W) / 100.0,
+            0, 100);
 
         double dt = double.IsNaN(_lastTime) ? 1 : Math.Clamp(now - _lastTime, 0.05, 10);
         _lastTime = now;
@@ -862,7 +879,7 @@ public class PowerBudgetController
             else
                 _output = Math.Max(snapped, _output - SlewDownPercentPerSec * dt);
         }
-        else _output = Math.Max(_output, FloorPercent); // the fuse never yields below the temp side
+        else _output = Math.Max(_output, Math.Max(FloorPercent, _powerFloor)); // the fuse never yields below either floor
 
         // ---- Online learning — only with the fan settled, so the plant response
         //      isn't a mix of fan changes and power changes.
@@ -1016,6 +1033,7 @@ public class PowerBudgetController
         _reliefLevel = double.NaN;
         _reliefBad = double.NaN;
         _descFrom = double.NaN;
+        _powerFloor = 0;
         _lastFloor = 0;
         OverrideActive = false;
         EffectiveTemp = double.NaN;

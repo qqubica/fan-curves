@@ -219,6 +219,8 @@ public class FanEngine : IDisposable
                         budget.PowerAveragingSeconds = Profile.PowerAveragingSeconds;
                         budget.RampLeadSeconds = Profile.RampLeadSeconds;
                         budget.ReliefMaxWatts = Profile.ReliefMaxWatts;
+                        budget.PowerFloorPercentAt100W = Profile.PowerFloorPercentAt100W;
+                        budget.PowerFloorPercentAt200W = Profile.PowerFloorPercentAt200W;
                         budget.OverrideTempC = Profile.OverrideTempC;
                         budget.CeilingMarginC = Profile.BudgetCeilingMarginC;
                         budget.SteadyTargetMarginC = Profile.SteadyTargetMarginC;
