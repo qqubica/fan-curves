@@ -346,12 +346,17 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   StepUpHold step (an optimistically-wrong model otherwise argues the fan straight
   back down after every predictive step — slow on/off hunt, harness S5); gate-closed
   (model-only) fires don't brand — no measured corroboration yet.
-  Steps DOWN one ladder level
-  per StepDownHoldSeconds once the power average no longer needs the current one —
-  after a load ends this reacts minutes before the cooling temp average would — and
-  (2026-07-27) only onto a level predicted to hold the aim even at **5/4 of today's
-  sustained draw**: hysteresis in the DRAW dimension, where the swings actually
-  live. A ±HysteresisC temperature band alone is worth ~4 W at a 20% fan level —
+  Steps DOWN after ONE
+  StepDownHoldSeconds hold once the power average no longer needs the current
+  level — **snapping straight to the lowest ladder level that holds the aim at
+  5/4 of today's sustained draw** (Kuba later on 2026-07-27: "after a step-down
+  timer, snap to the fan curve"; the old one-level-per-hold walk kept the fans
+  dawdling ABOVE the staircase for a hold per level after a load ended — in Auto
+  the floor IS the curve, so the visible descent now hands straight back to the
+  hand-tuned staircase; harness C10: 90→0 in one snap, no intermediate levels,
+  never below a branded level, slew still glides the output). After a load ends
+  this reacts minutes before the cooling temp average would. The 5/4 margin is
+  hysteresis in the DRAW dimension, where the swings actually live. A ±HysteresisC temperature band alone is worth ~4 W at a 20% fan level —
   a constant load equilibrating exactly AT the aim hunted 20↔40% across it, and a
   game's minute-scale swells re-crossed it constantly (harness S7). Deliberately
   NOT stacked with the temperature band: the double margin blocked the final step

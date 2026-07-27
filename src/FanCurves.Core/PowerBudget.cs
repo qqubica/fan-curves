@@ -135,12 +135,15 @@ public class ThermalModel
 ///    window a further step happens only if the chosen level has become objectively
 ///    insufficient — the draw rose enough that its predicted equilibrium no longer
 ///    clears the ceiling. The fuse is not rate-limited by any of this.
-/// 4. It steps DOWN one ladder level per StepDownHoldSeconds once the sustained power
-///    average no longer needs the current one — and only onto a level predicted to hold
-///    the aim with the channel's HysteresisC to spare (the budget twin of the temp
-///    filter's step-down hysteresis; without it a level that equilibrates right AT the
-///    aim is stepped onto and back off in a slow hunt). After a load ends this reacts
-///    to the power collapse, minutes before a cooling temperature average would.
+/// 4. It steps DOWN after one StepDownHoldSeconds hold once the sustained power average
+///    no longer needs the current level — SNAPPING straight to the lowest ladder level
+///    predicted to hold the aim at 5/4 of today's draw (the budget twin of the temp
+///    filter's step-down hysteresis; without the margin a level that equilibrates right
+///    AT the aim is stepped onto and back off in a slow hunt). One hold, one snap — the
+///    old one-level-per-hold walk kept the fans dawdling above the staircase after a
+///    load ended (2026-07-27). In Auto the floor hands the visible descent to the
+///    hand-tuned curve; either way this reacts to the power collapse minutes before a
+///    cooling temperature average would.
 /// 5. The sustained aim is also enforced UPWARD: once the sink trend is past the steady
 ///    target and either the sustained average needs a higher ladder level or the temp
 ///    has settled there, it steps up one level per StepDownHoldSeconds. The tau trigger
@@ -800,18 +803,27 @@ public class PowerBudgetController
         else if (TauSeconds >= RampLeadSeconds && DemandLevel < _target - 0.01 &&
                  trendTemp < ceiling - 1)
         {
-            // Sustained power no longer needs this level: one ladder step down per hold.
-            double below = ladder[0];
-            foreach (var l in ladder) if (l < _target - 0.01) below = l;
-            // The level below must hold the aim even at 5/4 of today's sustained draw —
-            // hysteresis in the draw dimension, where the swings actually live. The
-            // ±HysteresisC temperature band alone is worth only ~4 W at a 20% fan
-            // level, so a game's minute-scale power swells crossed it constantly and
-            // the fan chased them up and down (harness S7). Deliberately NOT stacked
-            // with the temperature band: the double margin blocked the final step to
-            // silence at warm idle, with 0%'s predicted equilibrium under the aim but
-            // inside the stacked band (harness S5b).
-            if (Model.BaseTempC + Model.R(below) * (PowerAvg * 1.25) > steadyTarget)
+            // Sustained power no longer needs this level. After ONE hold the target
+            // SNAPS to the lowest ladder level that still holds the aim at 5/4 of
+            // today's sustained draw, instead of walking the ladder one level per
+            // hold — post-load the budget used to dawdle ABOVE the staircase for a
+            // hold per level while the curve had long asked for less (Kuba's ask,
+            // 2026-07-27: "after a step-down timer, snap to the fan curve" — in Auto
+            // the floor IS the curve, so the visible descent hands straight back to
+            // the hand-tuned staircase; the slew still glides the actual output).
+            // The 5/4-draw condition is hysteresis in the draw dimension, where the
+            // swings actually live: the ±HysteresisC temperature band alone is worth
+            // only ~4 W at a 20% fan level, so a game's minute-scale power swells
+            // crossed it constantly and the fan chased them up and down (harness
+            // S7). Deliberately NOT stacked with the temperature band: the double
+            // margin blocked the final step to silence at warm idle (harness S5b).
+            // Never below a branded level — measured insufficiency still outranks.
+            double snapTo = double.NaN;
+            foreach (var l in ladder)
+                if (l < _target - 0.01 && Eq(l, PowerAvg * 1.25) <= steadyTarget)
+                { snapTo = l; break; }
+            if (!double.IsNaN(snapTo)) snapTo = Math.Max(snapTo, DemandLevel);
+            if (double.IsNaN(snapTo) || snapTo >= _target - 0.01)
             {
                 _downSince = double.NaN;
                 _upSince = double.NaN;
@@ -822,13 +834,13 @@ public class PowerBudgetController
                 _upSince = double.NaN;
                 if (now - _downSince >= StepDownHoldSeconds)
                 {
-                    _target = below;
+                    _target = snapTo;
                     _expFrom = double.NaN;
                     _downSince = double.NaN;
                 }
                 else
                 {
-                    PendingDownLevel = Snap(below);
+                    PendingDownLevel = Snap(snapTo);
                     DownHoldRemaining = StepDownHoldSeconds - (now - _downSince);
                 }
             }
