@@ -163,7 +163,13 @@ public class ThermalModel
 ///    unchanged draw without having dropped HysteresisC, the step is taken back and
 ///    further steps above the returned-to level are latched off until the draw or trend
 ///    leaves the proven neighbourhood. One short probe instead of a march; the fuse
-///    stays the hard stop.
+///    stays the hard stop. And the proof cuts BOTH ways — while the latch stands and
+///    the sustained draw is under ReliefMaxWatts, the controller probes DOWNWARD too,
+///    one level per hold, allowed to waive even the Auto floor: on a die-limited load
+///    missing airflow is paid in clocks, so a level is judged too low when the short
+///    draw average sags (the CPU throttling), and the whole waiver dies the moment the
+///    trend climbs off the flat baseline it was proven on. Bounded at half the start
+///    level and the zero-snap threshold — less fan, never none.
 /// 6. Fuse: raw die temp at/over OverrideTempC snaps the output to the channel's own
 ///    temperature curve instantly, without slew, until the temp clears the threshold.
 ///    Silence is never bought at the price of throttling.
@@ -214,6 +220,9 @@ public class PowerBudgetController
     public double OverrideReleaseSeconds { get; set; } = 10;
     /// <summary>When false the model stops refining itself (frozen at today's values).</summary>
     public bool LearningEnabled { get; set; } = true;
+    /// <summary>Downward relief only runs while the sustained draw is under this many
+    /// watts — above it the staircase floor rules unconditionally (Kuba's 190 W cap).</summary>
+    public double ReliefMaxWatts { get; set; } = 190;
 
     public ThermalModel Model { get; } = new();
 
@@ -251,6 +260,21 @@ public class PowerBudgetController
     private double _futileAbove = double.NaN;  // latch: no measured benefit above this
     private double _futileDraw;
     private double _futileTrend;
+    private double _futileTime;
+    // Downward relief (Kuba's ask, 2026-07-27: "try lowering the speed; if the
+    // parameters stay the same keep it lower, if they start rising raise the RPM"):
+    // once the up-march is proven futile, "less fan measurably changes nothing" cuts
+    // both ways — the same experiment runs in reverse, one ladder level per hold,
+    // allowed to WAIVE the Auto floor. Bounded (never below half the start level nor
+    // the zero-snap threshold — relief means less fan, never none) and guarded: the
+    // waiver dies the moment the trend climbs off the flat baseline it was proven on.
+    private double _reliefLevel = double.NaN;  // standing waiver: effective floor
+    private double _reliefRoot;                // level the descent started from
+    private double _reliefGuardTrend;          // flat baseline the waiver is guarded on
+    private double _reliefBad = double.NaN;    // lowest level proven too low this episode
+    private double _descFrom = double.NaN;     // level the current descent step left
+    private double _descDraw;                  // short-average draw at the step
+    private double _descTime;
 
     // Diagnostics for the engine/UI — refreshed on every Step, valid until the next one.
     /// <summary>Fuse engaged: the temperature curve is being written directly, no slew.</summary>
@@ -260,9 +284,13 @@ public class PowerBudgetController
     /// <summary>What the plain temperature staircase would ask at the display average.</summary>
     public double CurveLevelAtAvg { get; private set; }
     /// <summary>The level the slew is gliding toward (floor and zero-snap applied).</summary>
-    public double TargetLevel => double.IsNaN(_target) ? 0 : Snap(Math.Max(_target, FloorPercent));
+    public double TargetLevel => double.IsNaN(_target) ? 0 : Snap(Math.Max(_target, EffectiveFloor));
     /// <summary>The chosen ladder level (floor applied) before the zero snap.</summary>
-    public double PreSnapTarget => double.IsNaN(_target) ? 0 : Math.Max(_target, FloorPercent);
+    public double PreSnapTarget => double.IsNaN(_target) ? 0 : Math.Max(_target, EffectiveFloor);
+    /// <summary>The floor actually binding the output: the Auto floor, unless a standing
+    /// downward-relief waiver (measured: less fan changes nothing here) undercuts it.</summary>
+    private double EffectiveFloor =>
+        !double.IsNaN(_reliefLevel) && _reliefLevel < FloorPercent ? _reliefLevel : FloorPercent;
     /// <summary>The chosen level was above 0 but collapsed to 0 by the zero snap.</summary>
     public bool SnappedToZero { get; private set; }
     /// <summary>Package power, short average (last ~10 s).</summary>
@@ -363,6 +391,9 @@ public class PowerBudgetController
             _forgiveSince = double.NaN;
             _target = FloorPercent;
             _expFrom = double.NaN; // the jump confounds any experiment in flight
+            _reliefLevel = double.NaN; // a RISING floor is heat the waiver must yield to
+            _reliefBad = double.NaN;
+            _descFrom = double.NaN;
             _downSince = double.NaN;
             _upSince = double.NaN;
         }
@@ -419,9 +450,20 @@ public class PowerBudgetController
         // a live draw never stops fluctuating, so the gate never opened, headroom sat
         // pinned at ∞ and the die climbed through 80° with the fans parked until the
         // reactive path finally caught it above the aim (Kuba's report, 2026-07-27).
-        double tauModel = trendTemp < guarded && eq > guarded + clearBy
+        // The model prong assumes a first-order approach toward its equilibrium; a
+        // trend measurably FALLING contradicts that outright — after a load ends, the
+        // still-hot minute-average claimed "seconds to the aim" while the die plunged
+        // a degree per second through it, firing a pointless ramp (harness C7). The
+        // draw-quietness gate stays off this prong (see below); only the slope sign
+        // vetoes it.
+        double tauModel = trendTemp < guarded && eq > guarded + clearBy && slope > -0.01
             ? Model.R(_output) * Model.MassJPerC * Math.Log((eq - trendTemp) / (eq - guarded))
             : double.PositiveInfinity;
+        // While the futility latch stands, the measured flat trend has overruled the
+        // model's equilibrium in this neighbourhood — a model prong predicting doom at
+        // a level measurement just proved indistinguishable is exactly the false
+        // accuser the latch exists to silence. The measured prong stays armed.
+        if (!double.IsNaN(_futileAbove)) tauModel = double.PositiveInfinity;
         double tauSlope = drawSettled && slope > 0.005
             ? Math.Max(0, guarded - trendTemp) / slope
             : double.PositiveInfinity;
@@ -452,13 +494,49 @@ public class PowerBudgetController
         // moves clearly away (lighter load unwinds normally; heavier load has earned a
         // fresh experiment) or the trend moves past HysteresisC of the proven-flat
         // temperature (cooler: the limit lifted; hotter: the verdict no longer covers
-        // this state and the fan must be allowed to try again).
+        // this state and the fan must be allowed to try again). A HOTTER exit also
+        // restores the level any downward descent started from — the fan is needed
+        // after all; a vanished load keeps the waiver standing, so the stale floor
+        // (90 s average still hot) cannot pull the fans UP just as the heat goes away.
         if (!double.IsNaN(_futileAbove))
         {
             double band = Math.Max(5, _futileDraw * 0.1);
-            if (PowerAvg < _futileDraw - band || PowerAvg > _futileDraw + band ||
-                Math.Abs(trendTemp - _futileTrend) > HysteresisC)
+            bool hotter = trendTemp > _futileTrend + HysteresisC ||
+                          PowerAvg > _futileDraw + band;
+            if (hotter || PowerAvg < _futileDraw - band ||
+                trendTemp < _futileTrend - HysteresisC)
+            {
                 _futileAbove = double.NaN;
+                _descFrom = double.NaN;
+                if (hotter && !double.IsNaN(_reliefLevel))
+                {
+                    _target = Math.Max(_target, _reliefRoot);
+                    _reliefLevel = double.NaN;
+                }
+                _reliefBad = double.NaN;
+            }
+        }
+        // ---- Standing-waiver guard: independent of the latch, the waiver dies the
+        // moment the trend climbs off the flat baseline it was proven on, or the
+        // sustained draw crosses the relief cap — restoring the descent's start level —
+        // and quietly once it stops mattering (the floor itself fell to it; in
+        // floor-less Power mode, the latch that justified it is gone).
+        if (!double.IsNaN(_reliefLevel))
+        {
+            if (trendTemp > _reliefGuardTrend + HysteresisC || PowerAvg >= ReliefMaxWatts)
+            {
+                _target = Math.Max(_target, _reliefRoot);
+                _reliefLevel = double.NaN;
+                _reliefBad = double.NaN;
+                _descFrom = double.NaN;
+            }
+            else if (GuardFloor ? FloorPercent <= _reliefLevel + 0.01
+                                : double.IsNaN(_futileAbove))
+            {
+                _reliefLevel = double.NaN;
+                _reliefBad = double.NaN;
+                _descFrom = double.NaN;
+            }
         }
         // ---- Experiment verdict, only once the plant has settled again (flat slope,
         // draw still quiet): a fallen trend proves the step helped; a flat trend at
@@ -486,6 +564,7 @@ public class PowerBudgetController
                     _futileAbove = _expFrom;
                     _futileDraw = PowerAvg;
                     _futileTrend = trendTemp;
+                    _futileTime = now;
                     _target = Math.Min(_target, _expFrom);
                     // The level was not too weak — the aim is unreachable here; keeping
                     // the brand would march the demand right back up over the latch.
@@ -550,6 +629,69 @@ public class PowerBudgetController
             _target = Math.Max(_target, must);
             _output = Math.Max(_output, must);
             _expFrom = double.NaN;
+            _reliefLevel = double.NaN;
+            _reliefBad = double.NaN;
+            _descFrom = double.NaN;
+            _downSince = double.NaN;
+            _upSince = double.NaN;
+        }
+        else if (!double.IsNaN(_futileAbove) && !double.IsNaN(_reliefLevel))
+        {
+            // Downward relief in progress: the up-march was proven futile, so the same
+            // measurement runs in reverse — one ladder level per hold. On a die-limited
+            // load missing airflow is paid in CLOCKS, not degrees, so the tell that a
+            // level is too low is the short draw average sagging under the step's
+            // baseline (the CPU throttling to hold its clamp); a rising temperature
+            // instead is the waiver guard's job and restores the start level at once.
+            if (!double.IsNaN(_descFrom) &&
+                PowerNow < _descDraw - Math.Max(5, _descDraw * 0.05))
+            {
+                _reliefBad = _reliefLevel;   // proven too low this episode
+                _target = _descFrom;
+                _reliefLevel = _descFrom;
+                _descFrom = double.NaN;
+            }
+            else if (now - _descTime >= StepDownHoldSeconds && drawSettled &&
+                     Math.Abs(slope) < 0.005)
+            {
+                _descFrom = double.NaN;      // the step held — accepted
+                // The hold-and-judge caution applies to the FIRST step-down only
+                // (Kuba's ask): once one level down is proven parameter-flat, snap
+                // straight to the relief bound — the per-tick draw-sag check and the
+                // waiver guard keep watching the snapped level and step back to the
+                // last proven one if it turns out too low.
+                double below = ReliefLowest(ladder, _reliefLevel, _reliefRoot);
+                if (!double.IsNaN(below))
+                {
+                    _descFrom = _reliefLevel;
+                    _descDraw = PowerNow;
+                    _descTime = now;
+                    _reliefLevel = below;
+                    _target = below;
+                }
+            }
+            _downSince = double.NaN;
+            _upSince = double.NaN;
+        }
+        else if (!double.IsNaN(_futileAbove) && double.IsNaN(_reliefLevel) &&
+                 now - _futileTime >= StepDownHoldSeconds && PowerAvg < ReliefMaxWatts &&
+                 trendTemp > steadyTarget && drawSettled && Math.Abs(slope) < 0.005)
+        {
+            // Arm downward relief: latched, flat, hot, the draw under the relief cap
+            // and quiet — try one level below the level actually running (the Auto
+            // floor included: the waiver is what lets the output undercut it).
+            double root = Math.Max(_target, FloorPercent);
+            double below = ReliefBelow(ladder, root, root);
+            if (!double.IsNaN(below))
+            {
+                _reliefRoot = root;
+                _reliefGuardTrend = trendTemp;
+                _descFrom = root;
+                _descDraw = PowerNow;
+                _descTime = now;
+                _reliefLevel = below;
+                _target = below;
+            }
             _downSince = double.NaN;
             _upSince = double.NaN;
         }
@@ -617,8 +759,8 @@ public class PowerBudgetController
             _downSince = double.NaN;
             _upSince = double.NaN;
         }
-        else if (trendTemp > steadyTarget && _target < ladder[^1] - 0.01 &&
-                 (DemandLevel > _target + 0.01 || (slope > -0.002 && stepUpUseful)))
+        else if (trendTemp > steadyTarget && _target < ladder[^1] - 0.01 && slope > -0.002 &&
+                 (DemandLevel > _target + 0.01 || stepUpUseful))
         {
             // The sink is already past the sustained aim and either the power average
             // needs a level this one cannot hold, or the temp has settled there (not
@@ -629,7 +771,10 @@ public class PowerBudgetController
             // ceiling with the fans never asked for more. Gating on the trend keeps
             // burst immunity: short spikes never drag the trend past the aim; gating
             // the settled arm on stepUpUseful keeps a die-limited load from being
-            // marched to max fan for fractions of a degree.
+            // marched to max fan for fractions of a degree. A clearly FALLING trend
+            // never needs a step, whatever the demand says — the still-hot power
+            // average of a just-ended load used to fire one pointless step-up during
+            // the decay minute (harness C7).
             if (double.IsNaN(_upSince)) _upSince = now;
             _downSince = double.NaN;
             if (now - _upSince >= StepDownHoldSeconds)
@@ -693,7 +838,9 @@ public class PowerBudgetController
         // The external floor binds the OUTPUT, not _target: the budget's own choice keeps
         // evolving underneath (step-downs included), and when the floor drops the output
         // simply slews back to it. The floor arrives already zero-snapped by its filter.
-        double floored = Math.Max(_target, FloorPercent);
+        // A standing relief waiver may undercut it (EffectiveFloor) — measured evidence
+        // that less fan changes nothing outranks the staircase's opinion, within guards.
+        double floored = Math.Max(_target, EffectiveFloor);
         double snapped = Snap(floored);
         SnappedToZero = !OverrideActive && floored > 0 && snapped <= 0;
         if (!OverrideActive)
@@ -726,6 +873,36 @@ public class PowerBudgetController
     /// <summary>Predicted settled temperature at a fan level and sustained draw.</summary>
     private double Eq(double level, double watts) =>
         Model.BaseTempC + Model.R(level) * watts;
+
+    /// <summary>Highest ladder level strictly below `from` that downward relief may
+    /// take: bounded by half the level the descent started from and by the zero-snap
+    /// threshold (relief means less fan, never none), skipping levels already proven
+    /// too low in this episode. NaN when nothing qualifies.</summary>
+    private double ReliefBelow(List<double> ladder, double from, double root)
+    {
+        double bound = Math.Max(ZeroSnapPercent, root / 2);
+        double best = double.NaN;
+        foreach (var l in ladder)
+            if (l < from - 0.01 && l >= bound - 0.01 &&
+                (double.IsNaN(_reliefBad) || l > _reliefBad + 0.01) &&
+                (double.IsNaN(best) || l > best))
+                best = l;
+        return best;
+    }
+
+    /// <summary>Lowest qualifying relief level below `from` (same bounds as
+    /// ReliefBelow) — the snap destination once the first step-down has held.</summary>
+    private double ReliefLowest(List<double> ladder, double from, double root)
+    {
+        double bound = Math.Max(ZeroSnapPercent, root / 2);
+        double best = double.NaN;
+        foreach (var l in ladder)
+            if (l < from - 0.01 && l >= bound - 0.01 &&
+                (double.IsNaN(_reliefBad) || l > _reliefBad + 0.01) &&
+                (double.IsNaN(best) || l < best))
+                best = l;
+        return best;
+    }
 
     /// <summary>The lowest ladder level whose equilibrium at this draw holds the aim —
     /// or, when NO level can, the lowest within HysteresisC of the best equilibrium the
@@ -824,6 +1001,9 @@ public class PowerBudgetController
         _forgiveSince = double.NaN;
         _expFrom = double.NaN;
         _futileAbove = double.NaN;
+        _reliefLevel = double.NaN;
+        _reliefBad = double.NaN;
+        _descFrom = double.NaN;
         _lastFloor = 0;
         OverrideActive = false;
         EffectiveTemp = double.NaN;

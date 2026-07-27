@@ -95,6 +95,7 @@ public partial class MainWindow : Window
         ProbeMaxTempSlider.Value = profile.StopProbeMaxTempC;
         PowerAvgSlider.Value = profile.PowerAveragingSeconds;
         RampLeadSlider.Value = profile.RampLeadSeconds;
+        ReliefMaxSlider.Value = profile.ReliefMaxWatts;
         OverrideSlider.Value = profile.OverrideTempC;
         CeilingMarginSlider.Value = profile.BudgetCeilingMarginC;
         SteadyMarginSlider.Value = profile.SteadyTargetMarginC;
@@ -781,6 +782,7 @@ public partial class MainWindow : Window
         if (!IsLoaded || _loadingUi) return;
         _profile.PowerAveragingSeconds = PowerAvgSlider.Value;
         _profile.RampLeadSeconds = RampLeadSlider.Value;
+        _profile.ReliefMaxWatts = ReliefMaxSlider.Value;
         _profile.OverrideTempC = OverrideSlider.Value;
         UpdatePowerLabels();
         // The budget strip draws the lead as its trigger line — move it with the slider.
@@ -793,6 +795,7 @@ public partial class MainWindow : Window
     {
         PowerAvgValue.Text = FormatAvg(_profile.PowerAveragingSeconds);
         RampLeadValue.Text = FormatAvg(_profile.RampLeadSeconds);
+        ReliefMaxValue.Text = Inv($"{_profile.ReliefMaxWatts:0} W");
         OverrideValue.Text = Inv($"{_profile.OverrideTempC:0} °C");
     }
 

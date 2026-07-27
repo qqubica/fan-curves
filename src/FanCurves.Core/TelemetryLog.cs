@@ -183,7 +183,7 @@ public class TelemetryLog : IDisposable
         sb.Append(p.StopProbeEnabled
             ? Inv($" · probe {p.StopProbeRunSeconds:0}s/{p.StopProbeSeconds:0}s/{p.StopProbeStableRangeC:0.#}°/{p.StopProbeRetrySeconds:0}s/<{p.StopProbeMaxTempC:0}°")
             : " · probe off");
-        sb.Append(Inv($" · pwrAvg {p.PowerAveragingSeconds:0}s · lead {p.RampLeadSeconds:0}s"));
+        sb.Append(Inv($" · pwrAvg {p.PowerAveragingSeconds:0}s · lead {p.RampLeadSeconds:0}s · relief <{p.ReliefMaxWatts:0}W"));
         sb.Append(Inv($" · fuse {p.OverrideTempC:0}° (release −{p.OverrideReleaseC:0}°/{p.OverrideReleaseSeconds:0}s)"));
         sb.Append(Inv($" · ceilM {p.BudgetCeilingMarginC:0}° · aimM {p.SteadyTargetMarginC:0}°"));
         sb.Append(Inv($" · trend {p.PowerTrendSeconds:0}s · slope {p.PowerSlopeSeconds:0}s · now {p.PowerNowSeconds:0}s"));

@@ -218,6 +218,7 @@ public class FanEngine : IDisposable
                         budget.ZeroSnapPercent = Profile.ZeroSnapEnabled ? Profile.ZeroSnapPercent : 0;
                         budget.PowerAveragingSeconds = Profile.PowerAveragingSeconds;
                         budget.RampLeadSeconds = Profile.RampLeadSeconds;
+                        budget.ReliefMaxWatts = Profile.ReliefMaxWatts;
                         budget.OverrideTempC = Profile.OverrideTempC;
                         budget.CeilingMarginC = Profile.BudgetCeilingMarginC;
                         budget.SteadyTargetMarginC = Profile.SteadyTargetMarginC;

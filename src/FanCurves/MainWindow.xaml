@@ -847,6 +847,15 @@
                                                 IsSnapToTickEnabled="True" ValueChanged="OnPowerParamChanged"/>
 
                                         <DockPanel>
+                                            <TextBlock DockPanel.Dock="Right" x:Name="ReliefMaxValue" FontFamily="{StaticResource Mono}"
+                                                       FontSize="12" Foreground="#f2f2f4"/>
+                                            <TextBlock Text="Downward relief below draw" FontSize="12" Foreground="#99ffffff"
+                                                       ToolTip="Once more fan is measured futile, the output may probe below the staircase floor — but only while the sustained draw is under this."/>
+                                        </DockPanel>
+                                        <Slider x:Name="ReliefMaxSlider" Minimum="50" Maximum="400" TickFrequency="10"
+                                                IsSnapToTickEnabled="True" ValueChanged="OnPowerParamChanged"/>
+
+                                        <DockPanel>
                                             <TextBlock DockPanel.Dock="Right" x:Name="OverrideValue" FontFamily="{StaticResource Mono}"
                                                        FontSize="12" Foreground="#f2f2f4"/>
                                             <TextBlock Text="Hard override above" FontSize="12" Foreground="#99ffffff"/>

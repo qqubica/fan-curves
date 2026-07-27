@@ -97,6 +97,9 @@ public class Profile
     public double PowerAveragingSeconds { get; set; } = 60;
     /// <summary>Fans step up once the predicted time to exhaust the thermal buffer drops under this.</summary>
     public double RampLeadSeconds { get; set; } = 45;
+    /// <summary>Downward relief (probing below the staircase floor once the up-march is
+    /// proven futile) only runs while the sustained draw is under this many watts.</summary>
+    public double ReliefMaxWatts { get; set; } = 190;
     /// <summary>Fuse: at/above this raw die temp the channel's temp curve takes over instantly, no slew.</summary>
     public double OverrideTempC { get; set; } = 90;
     /// <summary>Budget ceiling = OverrideTempC − this. The credit E = C·(ceiling − temp) is

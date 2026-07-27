@@ -315,7 +315,13 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   rising and rising through 80° and the fans not kicking in")**: the MODEL prong
   runs UNGATED — it reads only sustained quantities (PowerAvg, trend) and its
   aim-clearance margin (equilibrium must clear the line by ≥ HysteresisC) absorbs
-  power-window aliasing. The first cut gated BOTH prongs on burst-quietness, which
+  power-window aliasing. (One veto since later that day: a trend measurably
+  FALLING — slope < −0.01 — contradicts the prong's first-order-approach premise
+  outright; the still-hot minute-average of a just-ended load otherwise computed
+  "seconds to the aim" while the die plunged 1°/s through it and fired a
+  pointless ramp mid-decay — harness C7. The settled StepUpHold arm got the same
+  treatment: its slope condition now gates BOTH disjuncts, so a stale demand
+  cannot step up while the trend is clearly falling.) The first cut gated BOTH prongs on burst-quietness, which
   silenced the whole predictive layer under a real game: a live draw never stops
   fluctuating (peak−avg ≈ 55 W for the entire session), the gate never opened,
   headroom sat pinned at ∞ and only reactive StepUpHold caught the climb — late,
@@ -395,8 +401,9 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   comparison. App-level settings (don't mark "Custom"): `ControlMode`
   (Temp/Power/Auto — see the control-mode entry below; default Auto since
   2026-07-27, was Power for its first day),
-  `PowerAveragingSeconds` (60), `RampLeadSeconds`, `OverrideTempC` —
-  dev-panel CONTROL MODE switch + three sliders + live `draw · avg` / `buffer · needs` /
+  `PowerAveragingSeconds` (60), `RampLeadSeconds`, `ReliefMaxWatts` (190),
+  `OverrideTempC` — dev-panel CONTROL MODE switch + four sliders + live
+  `draw · avg` / `buffer · needs` /
   `headroom` readout (that line renamed from `lead` 2026-07-27);
   channels without power sensors keep the temp filter. Why-chip reasons: BudgetHold /
   BudgetRamp / HardOverride.
@@ -488,14 +495,37 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   clamped load (81% at avg 85.3° on his curve), the budget adds ONE ~25 s probe
   step, proves it futile, and holds — a boost-clamped CPU converting fan into
   watts at constant temp (draw rose ~7 W per step all session) counts as futile by
-  design; a clearly grown draw (>10%) re-baselines instead. Verified by the
+  design; a clearly grown draw (>10%) re-baselines instead.
+  **Downward relief (same night, Kuba: "try lowering the speed; if the parameters
+  stay the same lower it, if they start rising raise the RPM" + "only if the
+  sustained load is below 190 W, add a slider" + "step-down hold applies to the
+  first step only, then instantly snap")**: while the latch stands, the draw is
+  settled+under `Profile.ReliefMaxWatts` (default 190, POWER CONTROL slider
+  50–400 W) and the trend flat above the aim, the controller probes BELOW the
+  running level — **the only case where measured evidence may waive the Auto
+  floor** (`EffectiveFloor` in the controller; `_reliefLevel` is a standing
+  waiver). First step down one ladder level, judged for a StepDownHold like the
+  up-experiments; once it holds, SNAP straight to the relief bound —
+  max(ZeroSnapPercent, half the start level), so 81% floor → 65 trial → 50 —
+  less fan, never none. A level is "too low" when the short draw average sags
+  max(5 W, 5%) under the step's baseline (missing airflow is paid in CLOCKS on a
+  clamped die — the CPU throttles at constant temp); that level is remembered bad
+  for the episode and the last proven level comes back. The whole waiver dies
+  restoring the start level the instant the trend climbs HysteresisC off the flat
+  baseline it was proven on or the draw crosses the cap; a VANISHED load instead
+  keeps the waiver standing so the stale floor (90 s average, hot for another
+  minute) cannot pull the fans UP right as the heat goes away — it clears
+  quietly once the floor falls to it. Verified by the
   **seventh scratchpad harness** (2026-07-27): C1 chess repro from his actual
   learned model + margins in Auto (floor climb → one probe 81→90 → back, 25 s
-  above 81%, steady to the end); C2 90 W on a fan-effective plant still fires and
-  settles 40%/64°; C3 188 W from seeds on a plant where 81% genuinely can't hold
-  the preset aim still climbs to 90% (a helping step's verdict clears — trend
-  falls); C4 spike train silent; C5 floor-guard 40 W creep still one-steady-ON;
-  C6 the ungated stop probe latching 0% at full load (why the demand gate exists).
+  above 81%, then relief 81→65→50 and steady); C2 90 W on a fan-effective plant
+  still fires and settles 40%/64°; C3 188 W from seeds on a plant where 81%
+  genuinely can't hold the preset aim still climbs to 90% (a helping step's
+  verdict clears — trend falls); C4 spike train silent; C5 floor-guard 40 W creep
+  still one-steady-ON; C6 the ungated stop probe latching 0% at full load below
+  the 78° probe ceiling (why the demand gate exists); C7 load-end during relief —
+  no fan bump, unwinds to silence; C8 clamp shifting 85.3→88 mid-relief — floor
+  restored in 17 s, no fuse; C9 draw over the relief cap — floor never undercut.
 - **Control-mode switch (2026-07-27, Kuba: "switch between temperature-based and
   power-based mode" + "automatic option that considers both outputs")**: dev-panel
   `CONTROL MODE` segmented switch (Temp · Power · Auto; at the TOP of the panel
