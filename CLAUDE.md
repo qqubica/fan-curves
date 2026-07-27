@@ -534,7 +534,25 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
 - Real hardware wins over simulation whenever it reads any temp sensor, even with
   zero controllable headers (channels then show "[no fan header]").
 - Diagnostics in `%AppData%\FanCurves\`: `sensors.txt` (all sensors + values at
-  launch and +15 s), `events.txt` (startup/backend/crash/exit log).
+  launch and +15 s), `events.txt` (startup/backend/crash/exit log), and since
+  2026-07-27 the **review log** in `logs\` (`TelemetryLog.cs` in Core, hooked to
+  `engine.Ticked` in App on the engine thread so it records even if the UI faults;
+  Kuba's ask "log the data and the behavior so I can explain which parts I don't
+  like"): `telemetry-YYYY-MM-DD.csv` — one row per channel per tick with every
+  controller input/output (raw/avg/trend temp, draw + sustained avg, out/target %,
+  why-chip reason, headroom, demand, ceiling/aim, learned base/R/mass), daily
+  rotation, 7 days kept — and `behavior.txt` (4 MB cap → `behavior-old.txt`) with
+  CHANGES only: fan ON/OFF, target ladder steps, reason transitions (pure
+  None↔Ramp flips suppressed — the target line already implies the ramp),
+  driving/released flips, `·· <event>` markers (`App.Telemetry?.Event`, used for
+  the learned-model reset), and a full settings line whenever any tuning knob,
+  curve point or the control mode changes (snapshot diffed every tick — catches
+  presets/sliders/edits with no per-handler wiring). Dev flows write
+  `telemetry-sim-*.csv` / `behavior-sim.txt` (same rule as sensors.sim.txt).
+  UTF-8 **with BOM** — Windows PowerShell 5.1 reads BOM-less UTF-8 as ANSI and
+  mangles °/·/∞. Writers buffer (CSV flushed every 5 s, behavior per event);
+  first failed write disables logging for the session — it must never take the
+  engine down.
 - **Installed & verified on real hardware 2026-07-23** (the X870 Steel Legend /
   9950X3D build): v0.1.0 exe at `%LOCALAPPDATA%\Programs\FanCurves\FanCurves.exe`,
   autostart task registered, PawnIO 2.2.0 installed (silent flags are

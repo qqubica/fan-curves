@@ -818,6 +818,8 @@ public partial class MainWindow : Window
         _engine.ResetThermalModels();
         _profile.Save();
         UpdateModelInfo();
+        // Not visible in the settings snapshot (learned values aren't tuning), so mark it.
+        App.Telemetry?.Event("learned thermal model reset to seeds");
     }
 
     /// <summary>Live line under the power sliders: draw, buffer and predicted headroom of

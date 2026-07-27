@@ -32,6 +32,9 @@ public partial class App : Application
     private static System.Threading.Mutex? _instanceMutex;
     private static DateTime _lastUiCrashLog = DateTime.MinValue;
 
+    /// <summary>Per-tick data + behavior-change review log (see TelemetryLog).</summary>
+    public static TelemetryLog? Telemetry { get; private set; }
+
     /// <summary>Lifecycle/crash log → %AppData%\FanCurves\events.txt (best-effort).</summary>
     public static void Log(string message)
     {
@@ -107,6 +110,12 @@ public partial class App : Application
         DumpSensors(hw);
         AutoAssign(profile, hw);
         var engine = new FanEngine(hw, profile);
+
+        // Review log: per-tick CSV + behavior transitions → %AppData%\FanCurves\logs\.
+        // Hooked on the engine's own thread so it keeps recording even if the UI faults.
+        Telemetry = new TelemetryLog(Profile.ConfigDir, simulated: Profile.ReadOnly);
+        engine.Ticked += statuses => Telemetry?.Record(engine.Profile, statuses);
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => Telemetry?.Dispose();
 
         var win = new MainWindow(hw, engine, profile, devMode);
         MainWindow = win;
