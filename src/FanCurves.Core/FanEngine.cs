@@ -342,7 +342,14 @@ public class FanEngine : IDisposable
                             // Trial stop runs BEFORE the kick, so a probe-stopped channel counts
                             // as stopped for the idle kick (same choice as zero snap). Channels
                             // with a safety floor are never trial-stopped — the floor wins.
-                            if (Profile.StopProbeEnabled && ch.MinPercent <= 0)
+                            // Nor is a channel whose sustained power draw demands any fan: the
+                            // probe's stability test is blind to a die-limited load — a CPU
+                            // clamping its own temperature reads perfectly "stable" at 180 W,
+                            // and a trial stop then holds the fan off indefinitely while the
+                            // die self-throttles (chess-engine report, 2026-07-27: fan held
+                            // at 0% at 178 W because the clamped die could never "rise").
+                            if (Profile.StopProbeEnabled && ch.MinPercent <= 0 &&
+                                demandLevel <= 0.01)
                             {
                                 if (!_probes.TryGetValue(ch, out var probe))
                                 {

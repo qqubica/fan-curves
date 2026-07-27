@@ -284,6 +284,13 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   State-machine scenarios verified by a scratchpad console harness on 2026-07-22
   (probe timing, in-trial rise + backoff, late rise without backoff, unstable
   temps never probe).
+  **Demand gate (2026-07-27, from Kuba's chess-engine report)**: a budget-driven
+  channel is never trial-stopped while `DemandLevel > 0` — the probe's stability
+  test is blind to a die-limited load (a CPU clamping its own temperature reads
+  perfectly "stable" at 180 W, and because the clamped die can never "rise", an
+  ungated trial held the fan at 0% at 178 W indefinitely while the CPU throttled;
+  harness C6 documents the latch). Temp-only channels are unaffected (their
+  demandLevel is always 0).
 - **Thermal-budget control ("control with power, not temperature", added 2026-07-24)**:
   channels with assigned power sensors (`ChannelConfig.PowerSensorIds`, watts summed;
   AutoAssign wires CPU package power to the CPU channel, CPU+GPU to the case channel)
@@ -453,6 +460,42 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   stay finite — but **long trend/slope windows are the risky end**: at 120 s/120 s the
   ramp waits until 205 s and the die reaches 89.9 °, i.e. it only just stays under the
   fuse.
+- **Futility edge + experiment latch (2026-07-27, Kuba's chess-engine report: fans
+  at 100% "and I don't think it is doing that much because the radiator is barely
+  hot")**: a die-limited load — conduction gradient under the die dwarfs what
+  airflow can touch, so the die self-clamps at the same temperature at every fan
+  speed (his 9950X3D read 85.3° at 81, 90, 100% AND fans-off alike at ~180 W;
+  nearly all of the learned 0.29 °C/W is inside the package) — used to read as
+  demand = max: no ladder level held the 70° aim, so `DemandLevel` fell through to
+  `ladder[^1]` and the settled StepUpHold arm marched one step per 25 s to 100%,
+  buying <1° total. Two mechanisms in `PowerBudgetController`, both HysteresisC-
+  scaled: (1) **model band** (`UsefulLevel`) — when no level's predicted equilibrium
+  holds the aim, demand and both step-up paths go no further than the lowest level
+  within HysteresisC of the best equilibrium the ladder offers (the ramp branch's
+  blind `ladder[^1]` fallback got the same treatment); (2) **experiment latch** —
+  the band alone loses to online learning (LearnSteady teaches the visited anchor
+  the measured R while unvisited anchors stay stale-optimistic, so the model
+  perpetually claims the NEXT step buys degrees — harness C1 caught the march
+  resuming at 81→90 exactly this way), so every model-driven up-step from a settled
+  state (|slope| < 0.005, draw settled) records (level, trend, draw); once the
+  trend is flat again at unchanged draw (±max(5 W, 10%)) without having dropped
+  HysteresisC, the step is taken back, the brand it set is cleared (the level
+  wasn't weak — the aim is unreachable), and model-driven steps above the
+  returned-to level are latched off until draw or trend leaves that neighbourhood
+  (trend release is symmetric ±HysteresisC, so a wrong verdict self-heals as the
+  temp climbs). Floor-adopt/fuse/step-down clear an in-flight experiment (the jump
+  confounds it). Net effect in Auto: the hand-tuned staircase floor is what rules a
+  clamped load (81% at avg 85.3° on his curve), the budget adds ONE ~25 s probe
+  step, proves it futile, and holds — a boost-clamped CPU converting fan into
+  watts at constant temp (draw rose ~7 W per step all session) counts as futile by
+  design; a clearly grown draw (>10%) re-baselines instead. Verified by the
+  **seventh scratchpad harness** (2026-07-27): C1 chess repro from his actual
+  learned model + margins in Auto (floor climb → one probe 81→90 → back, 25 s
+  above 81%, steady to the end); C2 90 W on a fan-effective plant still fires and
+  settles 40%/64°; C3 188 W from seeds on a plant where 81% genuinely can't hold
+  the preset aim still climbs to 90% (a helping step's verdict clears — trend
+  falls); C4 spike train silent; C5 floor-guard 40 W creep still one-steady-ON;
+  C6 the ungated stop probe latching 0% at full load (why the demand gate exists).
 - **Control-mode switch (2026-07-27, Kuba: "switch between temperature-based and
   power-based mode" + "automatic option that considers both outputs")**: dev-panel
   `CONTROL MODE` segmented switch (Temp · Power · Auto; at the TOP of the panel

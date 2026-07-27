@@ -150,6 +150,20 @@ public class ThermalModel
 ///    Each step up brands the level it left as measured-insufficient at that draw, so an
 ///    unlearned model cannot argue the fan straight back down into an on/off limit cycle;
 ///    the brand lifts once the sustained draw falls clearly below the draw that failed.
+///    Both upward paths stop at the FUTILITY EDGE: when no ladder level can hold the aim
+///    (die-limited load — the conduction gradient under the die dwarfs what airflow can
+///    touch, so the die self-clamps at the same temperature at every fan speed), demand
+///    and the step-up logic go no further than the lowest level within HysteresisC of
+///    the best equilibrium the ladder offers. Treating the unreachable aim as
+///    demand = max marched the fans to 100% for fractions of a degree (a chess engine
+///    pinned the die at 85.3° at 81, 90 and 100% alike, 2026-07-27). The model band
+///    alone cannot hold the line — LearnSteady keeps teaching the visited anchor the
+///    measured R while unvisited anchors stay stale-optimistic — so every model-driven
+///    step from a settled state doubles as an EXPERIMENT: if the trend is flat again at
+///    unchanged draw without having dropped HysteresisC, the step is taken back and
+///    further steps above the returned-to level are latched off until the draw or trend
+///    leaves the proven neighbourhood. One short probe instead of a march; the fuse
+///    stays the hard stop.
 /// 6. Fuse: raw die temp at/over OverrideTempC snaps the output to the channel's own
 ///    temperature curve instantly, without slew, until the temp clears the threshold.
 ///    Silence is never bought at the price of throttling.
@@ -221,6 +235,22 @@ public class PowerBudgetController
     private double _failedPowerAvg;
     private double _forgiveSince = double.NaN;
     private double _lastFloor;
+    // A model-driven up-step from a settled state is an EXPERIMENT: it promised the
+    // settled trend would come down. If the trend is flat again at unchanged draw and
+    // has not dropped by HysteresisC, the promise is proven false — the die is limited
+    // by something airflow cannot touch (boost clamp, conduction gradient) — so the
+    // step is taken back and further model-driven steps above the returned-to level
+    // are LATCHED off until the draw or the trend leaves the proven neighbourhood.
+    // The model band alone cannot catch this: LearnSteady keeps pulling the visited
+    // anchor up to the measured R while unvisited anchors keep stale lower values, so
+    // the model perpetually believes the next step buys degrees it cannot.
+    private double _expFrom = double.NaN;      // level the experiment left
+    private double _expTrend;                  // settled trend before the step
+    private double _expDraw;                   // sustained draw before the step
+    private double _expTime;
+    private double _futileAbove = double.NaN;  // latch: no measured benefit above this
+    private double _futileDraw;
+    private double _futileTrend;
 
     // Diagnostics for the engine/UI — refreshed on every Step, valid until the next one.
     /// <summary>Fuse engaged: the temperature curve is being written directly, no slew.</summary>
@@ -332,6 +362,7 @@ public class PowerBudgetController
             _failedPowerAvg = PowerAvg;
             _forgiveSince = double.NaN;
             _target = FloorPercent;
+            _expFrom = double.NaN; // the jump confounds any experiment in flight
             _downSince = double.NaN;
             _upSince = double.NaN;
         }
@@ -417,9 +448,55 @@ public class PowerBudgetController
         // the two predictions above go blind exactly when the credit is gone.
         if (BudgetJoules <= 0 && slope > -0.002) TauSeconds = 0;
 
-        DemandLevel = ladder[^1];
-        foreach (var l in ladder)
-            if (Model.BaseTempC + Model.R(l) * PowerAvg <= steadyTarget) { DemandLevel = l; break; }
+        // ---- Futility latch release: the proven neighbourhood is left once the draw
+        // moves clearly away (lighter load unwinds normally; heavier load has earned a
+        // fresh experiment) or the trend moves past HysteresisC of the proven-flat
+        // temperature (cooler: the limit lifted; hotter: the verdict no longer covers
+        // this state and the fan must be allowed to try again).
+        if (!double.IsNaN(_futileAbove))
+        {
+            double band = Math.Max(5, _futileDraw * 0.1);
+            if (PowerAvg < _futileDraw - band || PowerAvg > _futileDraw + band ||
+                Math.Abs(trendTemp - _futileTrend) > HysteresisC)
+                _futileAbove = double.NaN;
+        }
+        // ---- Experiment verdict, only once the plant has settled again (flat slope,
+        // draw still quiet): a fallen trend proves the step helped; a flat trend at
+        // unchanged draw proves it bought nothing — take the step back and latch. A
+        // clearly grown draw makes the flat trend inconclusive (a boost-clamped CPU
+        // converts fan into watts at constant temperature, but so does a genuinely
+        // heavier load) — re-baseline and keep watching.
+        if (!double.IsNaN(_expFrom))
+        {
+            double band = Math.Max(5, _expDraw * 0.1);
+            if (PowerAvg < _expDraw - band) _expFrom = double.NaN; // load shrank — moot
+            else if (now - _expTime >= StepDownHoldSeconds && drawSettled &&
+                     Math.Abs(slope) < 0.005)
+            {
+                if (trendTemp <= _expTrend - HysteresisC)
+                    _expFrom = double.NaN;                         // measured: it helped
+                else if (PowerAvg > _expDraw + band)
+                {
+                    _expTrend = trendTemp;                         // inconclusive: rebase
+                    _expDraw = PowerAvg;
+                    _expTime = now;
+                }
+                else
+                {
+                    _futileAbove = _expFrom;
+                    _futileDraw = PowerAvg;
+                    _futileTrend = trendTemp;
+                    _target = Math.Min(_target, _expFrom);
+                    // The level was not too weak — the aim is unreachable here; keeping
+                    // the brand would march the demand right back up over the latch.
+                    _failedLevel = double.NaN;
+                    _forgiveSince = double.NaN;
+                    _expFrom = double.NaN;
+                }
+            }
+        }
+
+        DemandLevel = UsefulLevel(ladder, PowerAvg, steadyTarget);
         // Measured insufficiency outranks the model's estimate: while a level stands
         // proven too weak for today's draw, demand cannot fall to it or below. The
         // brand lifts only once the sustained draw has stayed clearly below the draw
@@ -442,6 +519,23 @@ public class PowerBudgetController
         if (!double.IsNaN(_failedLevel))
             foreach (var l in ladder)
                 if (l > _failedLevel + 0.01) { DemandLevel = Math.Max(DemandLevel, l); break; }
+        // Measured futility outranks both the model and the brand: while the latch
+        // stands, no level above it is worth asking for.
+        if (!double.IsNaN(_futileAbove))
+            DemandLevel = Math.Min(DemandLevel, _futileAbove);
+
+        // First ladder level above the current target, and whether the settled upward
+        // enforcement stepping onto it would do measurable good: yes while the model
+        // claims THIS level holds the aim (a settled trend above the aim proves it
+        // wrong, and the step is what teaches it), or while the next level is expected
+        // to buy at least the dead band — and never past the futility latch. A
+        // die-limited load fails these, so the settled march stops at the futility
+        // edge instead of running to max fan.
+        double stepAbove = ladder[^1];
+        foreach (var l in ladder) if (l > _target + 0.01) { stepAbove = l; break; }
+        bool stepUpUseful = (double.IsNaN(_futileAbove) || stepAbove <= _futileAbove + 0.01) &&
+                            (Eq(_target, PowerAvg) <= steadyTarget ||
+                             Eq(stepAbove, PowerAvg) <= Eq(_target, PowerAvg) - HysteresisC);
 
         PendingDownLevel = double.NaN;
         DownHoldRemaining = double.NaN;
@@ -455,6 +549,7 @@ public class PowerBudgetController
             double must = curve.Evaluate(rawTemp);
             _target = Math.Max(_target, must);
             _output = Math.Max(_output, must);
+            _expFrom = double.NaN;
             _downSince = double.NaN;
             _upSince = double.NaN;
         }
@@ -472,29 +567,58 @@ public class PowerBudgetController
             // only after the window turns over — or immediately if the draw has risen
             // enough that the level just chosen no longer holds the aim.
             double up = ladder[^1];
+            bool holdsAim = false;
             foreach (var l in ladder)
             {
                 if (l <= _target + 0.01) continue;
-                if (Model.BaseTempC + Model.R(l) * PowerNow <= steadyTarget) { up = l; break; }
+                if (Eq(l, PowerNow) <= steadyTarget) { up = l; holdsAim = true; break; }
             }
-            // With the draw settled this step is measured evidence, same as a StepUpHold
-            // step: brand the level being left as insufficient at this sustained draw.
-            // Without the brand an optimistically-wrong model argues the fan straight
-            // back down after every predictive step and the pair hunts in a slow
-            // on/off cycle (harness S5). Model-prong fires during an unsettled draw
-            // (burst still in flight) stay unbranded — no measured corroboration yet.
-            if (drawSettled)
+            if (!holdsAim)
             {
-                _failedLevel = _target;
-                _failedPowerAvg = PowerAvg;
+                // Aim unreachable at any higher speed — die-limited territory. Step only
+                // to the futility edge (lowest level within HysteresisC of the ladder's
+                // best equilibrium); if this level already sits inside that band, more
+                // fan buys fractions of a degree and the step is skipped outright.
+                double best = Eq(ladder[^1], PowerNow);
+                if (Eq(_target, PowerNow) <= best + HysteresisC) up = _target;
+                else
+                    foreach (var l in ladder)
+                    {
+                        if (l <= _target + 0.01) continue;
+                        if (Eq(l, PowerNow) <= best + HysteresisC) { up = l; break; }
+                    }
             }
-            _target = up;
-            _lastRampStep = now;
+            if (!double.IsNaN(_futileAbove)) up = Math.Min(up, _futileAbove);
+            if (up > _target + 0.01)
+            {
+                // With the draw settled this step is measured evidence, same as a
+                // StepUpHold step: brand the level being left as insufficient at this
+                // sustained draw. Without the brand an optimistically-wrong model argues
+                // the fan straight back down after every predictive step and the pair
+                // hunts in a slow on/off cycle (harness S5). Model-prong fires during an
+                // unsettled draw (burst still in flight) stay unbranded — no measured
+                // corroboration yet. A step from a genuinely settled state also opens
+                // a futility experiment: the promised trend drop is now on the record.
+                if (drawSettled)
+                {
+                    _failedLevel = _target;
+                    _failedPowerAvg = PowerAvg;
+                    if (Math.Abs(slope) < 0.005)
+                    {
+                        _expFrom = _target;
+                        _expTrend = trendTemp;
+                        _expDraw = PowerAvg;
+                        _expTime = now;
+                    }
+                }
+                _target = up;
+                _lastRampStep = now;
+            }
             _downSince = double.NaN;
             _upSince = double.NaN;
         }
         else if (trendTemp > steadyTarget && _target < ladder[^1] - 0.01 &&
-                 (DemandLevel > _target + 0.01 || slope > -0.002))
+                 (DemandLevel > _target + 0.01 || (slope > -0.002 && stepUpUseful)))
         {
             // The sink is already past the sustained aim and either the power average
             // needs a level this one cannot hold, or the temp has settled there (not
@@ -503,21 +627,28 @@ public class PowerBudgetController
             // The tau trigger never fires at a settled equilibrium (surplus and slope
             // both vanish), so without this the die would park anywhere below the
             // ceiling with the fans never asked for more. Gating on the trend keeps
-            // burst immunity: short spikes never drag the trend past the aim.
-            double above = ladder[^1];
-            foreach (var l in ladder) if (l > _target + 0.01) { above = l; break; }
+            // burst immunity: short spikes never drag the trend past the aim; gating
+            // the settled arm on stepUpUseful keeps a die-limited load from being
+            // marched to max fan for fractions of a degree.
             if (double.IsNaN(_upSince)) _upSince = now;
             _downSince = double.NaN;
             if (now - _upSince >= StepDownHoldSeconds)
             {
                 _failedLevel = _target;      // measured: this level cannot hold the aim
                 _failedPowerAvg = PowerAvg;  // at this sustained draw
-                _target = above;
+                if (Math.Abs(slope) < 0.005)
+                {
+                    _expFrom = _target;      // futility experiment: settled state left
+                    _expTrend = trendTemp;
+                    _expDraw = PowerAvg;
+                    _expTime = now;
+                }
+                _target = stepAbove;
                 _upSince = double.NaN;
             }
             else
             {
-                PendingUpLevel = Snap(above);
+                PendingUpLevel = Snap(stepAbove);
                 UpHoldRemaining = StepDownHoldSeconds - (now - _upSince);
             }
         }
@@ -547,6 +678,7 @@ public class PowerBudgetController
                 if (now - _downSince >= StepDownHoldSeconds)
                 {
                     _target = below;
+                    _expFrom = double.NaN;
                     _downSince = double.NaN;
                 }
                 else
@@ -590,6 +722,26 @@ public class PowerBudgetController
 
     private double Snap(double level) =>
         level > 0 && level < ZeroSnapPercent ? 0 : level;
+
+    /// <summary>Predicted settled temperature at a fan level and sustained draw.</summary>
+    private double Eq(double level, double watts) =>
+        Model.BaseTempC + Model.R(level) * watts;
+
+    /// <summary>The lowest ladder level whose equilibrium at this draw holds the aim —
+    /// or, when NO level can, the lowest within HysteresisC of the best equilibrium the
+    /// ladder offers (the futility edge). A die-limited load used to read as
+    /// demand = max because every level "failed" the unreachable aim, marching the fans
+    /// to 100% for fractions of a degree (chess-engine report, 2026-07-27: die clamped
+    /// at 85.3° at 81, 90 and 100% fan alike, heatsink barely warm).</summary>
+    private double UsefulLevel(List<double> ladder, double watts, double aim)
+    {
+        foreach (var l in ladder)
+            if (Eq(l, watts) <= aim) return l;
+        double best = Eq(ladder[^1], watts);
+        foreach (var l in ladder)
+            if (Eq(l, watts) <= best + HysteresisC) return l;
+        return ladder[^1];
+    }
 
     /// <summary>Lowest staircase temperature at which the Auto floor would command more
     /// than this level (zero-snapped like the floor itself); +∞ when nothing can.</summary>
@@ -670,6 +822,8 @@ public class PowerBudgetController
         _lastRampStep = double.NaN;
         _failedLevel = double.NaN;
         _forgiveSince = double.NaN;
+        _expFrom = double.NaN;
+        _futileAbove = double.NaN;
         _lastFloor = 0;
         OverrideActive = false;
         EffectiveTemp = double.NaN;

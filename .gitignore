@@ -3,3 +3,4 @@ obj/
 *.user
 publish/
 *.zip
+.claude/
