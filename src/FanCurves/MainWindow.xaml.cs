@@ -516,8 +516,21 @@ public partial class MainWindow : Window
             }
 
             var s = SelectedStatus;
-            if (s != null) Editor.UpdateLive(s.RawTemp, s.EffectiveTemp, s.OutputPercent,
-                s.Watts, s.WattsAvg);
+            if (s != null)
+            {
+                // The curve chart's watts scale ranges over the same 10-min window as
+                // the budget strip, so the two right-hand scales agree and the power
+                // lines don't jump with every sample.
+                double wattsPeak = 0;
+                var hist = HistoryView.History;
+                for (int i = 0; hist != null && i < hist.Count; i++)
+                {
+                    if (hist[i].Watts is double hw) wattsPeak = Math.Max(wattsPeak, hw);
+                    if (hist[i].WattsAvg is double ha) wattsPeak = Math.Max(wattsPeak, ha);
+                }
+                Editor.UpdateLive(s.RawTemp, s.EffectiveTemp, s.OutputPercent,
+                    s.Watts, s.WattsAvg, wattsPeak);
+            }
             HistoryView.Refresh();
             BudgetView.LeadSeconds = _profile.RampLeadSeconds;
             BudgetView.NoPowerNote = BudgetNote();

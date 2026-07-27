@@ -494,13 +494,20 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
 - Temperature display: simple mode shows only the rolling average (the thing that
   actually drives the steps) — hero numeral + segment readouts; Developer mode adds
   the raw "now" temp (white dashed line on the chart, "now …°" in the card header)
-  and, since 2026-07-27 (Kuba's ask), a **power readout chip in the curve chart's
-  top-right** — `draw NN W · avg NN W` (same vocabulary as the dev-panel power
-  line), fed from `ChannelStatus.Watts/WattsAvg` via `CurveEditor.UpdateLive`;
-  hidden when the channel has no power sensor or the mode is Temperature (Watts
-  is null). Measured before the raw-temp label draws (so "now …°" dodges it at
-  high raw temps) but drawn LAST, seated on the card colour, like the strip
-  charts' reference labels.
+  and, since 2026-07-27 (Kuba's ask; first cut was a corner chip, he wanted "a line
+  like the temperature, opposite direction"), **power draw as horizontal reference
+  lines in the curve chart** — the mirror of the vertical raw-temp line: dashed
+  faint = instantaneous draw, solid brighter = sustained average (the budget
+  strip's trace vocabulary), read against a right-hand watts scale (0 W at the
+  bottom, `BudgetChart.NiceWatts` ladder top — made internal for this — printed as
+  a chip on the 100% gridline's right end). MainWindow feeds the selected
+  channel's 10-min history peak into `CurveEditor.UpdateLive` so the scale agrees
+  with the budget strip and doesn't breathe with every sample. Labels `draw NN W` /
+  `avg NN W` seat at the lines' right ends (avg above its line, draw below — the
+  ceiling/aim rule; merged into one chip when the lines sit within a label height),
+  drawn LAST on the card colour; the raw-temp "now …°" label dodges the scale chip.
+  Hidden when the channel has no power sensor or the mode is Temperature (Watts is
+  null).
 - **Curves apply automatically from launch**; preset switches and point edits take
   effect within one engine tick (the engine reads the live Profile objects).
   **Pause (BIOS control)** hands headers back to the BIOS; app exit does too.

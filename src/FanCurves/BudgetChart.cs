@@ -39,8 +39,9 @@ public class BudgetChart : StripChart
         return Plot.Bottom - f * Plot.Height;
     }
 
-    /// <summary>Round a peak up to a readable axis top (the ladder keeps the label short).</summary>
-    private static double NiceWatts(double peak)
+    /// <summary>Round a peak up to a readable axis top (the ladder keeps the label short).
+    /// Shared with the curve editor's power reference lines so both read the same scale.</summary>
+    internal static double NiceWatts(double peak)
     {
         foreach (double step in new[] { 25.0, 50, 75, 100, 150, 200, 250, 300, 400, 500, 600, 800, 1000 })
             if (peak <= step) return step;

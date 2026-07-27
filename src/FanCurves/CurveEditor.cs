@@ -32,6 +32,7 @@ public class CurveEditor : FrameworkElement
 
     private double? _liveRaw, _liveEffective, _liveOutput;
     private double? _liveWatts, _liveWattsAvg;
+    private double _wattsPeak; // recent-history peak — keeps the right-hand watts scale steady
 
     public event Action? CurveChanged;
 
@@ -42,13 +43,14 @@ public class CurveEditor : FrameworkElement
     }
 
     public void UpdateLive(double? raw, double? effective, double? output,
-        double? watts = null, double? wattsAvg = null)
+        double? watts = null, double? wattsAvg = null, double wattsPeak = 0)
     {
         _liveRaw = raw;
         _liveEffective = effective;
         _liveOutput = output;
         _liveWatts = watts;
         _liveWattsAvg = wattsAvg;
+        _wattsPeak = wattsPeak;
         InvalidateVisual();
     }
 
@@ -144,19 +146,37 @@ public class CurveEditor : FrameworkElement
         for (int i = 1; i < stairs.Count; i++)
             dc.DrawLine(curvePen, stairs[i - 1], stairs[i]);
 
-        // Power draw readout, developer mode (power-controlled channels only) — the
-        // text is measured here so the raw-temp label below can dodge it, but drawn
-        // LAST, seated on the card colour, so the staircase/crosshairs never run
-        // through it (same rule as the strip charts' reference labels).
-        FormattedText? power = null;
-        double powerLeft = r.Right;
+        // Power draw, developer mode (power-controlled channels only): the mirror of
+        // the raw-temp line — HORIZONTAL reference lines read against a watts scale
+        // on the RIGHT (0 W at the bottom, a NiceWatts ladder top shared with the
+        // budget strip; the recent-history peak keeps the scale from breathing with
+        // every sample). Lines draw here, under the knobs and the operating dot;
+        // their labels draw LAST, seated on the card colour, so the staircase and
+        // crosshairs never run through them.
+        FormattedText? scaleMark = null, drawLabel = null, avgLabel = null;
+        double scaleLeft = r.Right, yDraw = 0, yAvg = 0;
         if (ShowRaw && _liveWatts is double w)
         {
             double wa = _liveWattsAvg ?? w;
-            power = Label(string.Create(CultureInfo.InvariantCulture,
-                    $"draw {w:0} W · avg {wa:0} W"),
-                new SolidColorBrush(Color.FromArgb(0x73, 0xff, 0xff, 0xff)));
-            powerLeft = Math.Max(r.Left, r.Right - power.Width - 4);
+            double scale = BudgetChart.NiceWatts(Math.Max(25, Math.Max(_wattsPeak, Math.Max(w, wa))));
+            double YOf(double watts) => r.Bottom - Math.Clamp(watts / scale, 0, 1) * r.Height;
+            yDraw = YOf(w);
+            yAvg = YOf(wa);
+
+            // Instantaneous draw mirrors the raw-temp line (faint, dashed); the
+            // sustained average is the brighter solid one — same vocabulary as the
+            // budget strip's traces.
+            var drawPen = new Pen(new SolidColorBrush(Color.FromArgb(0x40, 0xff, 0xff, 0xff)), 1)
+            { DashStyle = new DashStyle(new double[] { 3, 3 }, 0) };
+            var avgPen = new Pen(new SolidColorBrush(Color.FromArgb(0x59, 0xff, 0xff, 0xff)), 1);
+            dc.DrawLine(drawPen, new Point(r.Left, yDraw), new Point(r.Right, yDraw));
+            dc.DrawLine(avgPen, new Point(r.Left, yAvg), new Point(r.Right, yAvg));
+
+            var quiet = new SolidColorBrush(Color.FromArgb(0x73, 0xff, 0xff, 0xff));
+            drawLabel = Label(string.Create(CultureInfo.InvariantCulture, $"draw {w:0} W"), quiet);
+            avgLabel = Label(string.Create(CultureInfo.InvariantCulture, $"avg {wa:0} W"), quiet);
+            scaleMark = Label(string.Create(CultureInfo.InvariantCulture, $"{scale:0} W"));
+            scaleLeft = Math.Max(r.Left, r.Right - scaleMark.Width - 4);
         }
 
         // Raw (unaveraged) temp, developer mode: quiet dashed reference line.
@@ -168,7 +188,7 @@ public class CurveEditor : FrameworkElement
             dc.DrawLine(pen, new Point(x, r.Top), new Point(x, r.Bottom));
             var t = Label($"now {raw.ToString("0.0", CultureInfo.InvariantCulture)}°",
                 new SolidColorBrush(Color.FromArgb(0x73, 0xff, 0xff, 0xff)));
-            double maxX = power == null ? r.Right - t.Width : powerLeft - t.Width - 8;
+            double maxX = scaleMark == null ? r.Right - t.Width : scaleLeft - t.Width - 8;
             dc.DrawText(t, new Point(Math.Min(x + 6, Math.Max(r.Left, maxX)), r.Top + 2));
         }
 
@@ -235,12 +255,45 @@ public class CurveEditor : FrameworkElement
                 lineAlpha: 0x20, textAlpha: 0xb3);
         }
 
-        if (power != null)
+        if (scaleMark != null && drawLabel != null && avgLabel != null)
         {
-            var pos = new Point(powerLeft, r.Top + 2);
-            dc.DrawRectangle(new SolidColorBrush(CardBg), null,
-                new Rect(pos.X - 4, pos.Y - 1, power.Width + 8, power.Height + 2));
-            dc.DrawText(power, pos);
+            var chipBg = new SolidColorBrush(CardBg);
+            void Chip(FormattedText t, Point pos)
+            {
+                dc.DrawRectangle(chipBg, null,
+                    new Rect(pos.X - 4, pos.Y - 1, t.Width + 8, t.Height + 2));
+                dc.DrawText(t, pos);
+            }
+
+            // Top of the watts scale, centred on the 100% gridline like the left
+            // axis labels — everything below it reads on this 0..top range.
+            Chip(scaleMark, new Point(scaleLeft, r.Top - scaleMark.Height / 2));
+
+            // avg seats ABOVE its line, draw BELOW (the ceiling/aim rule from the
+            // history strip); when the two would still collide — draw and avg a few
+            // watts apart — they merge into one chip under the lower line.
+            double LabX(FormattedText t) => Math.Max(r.Left, r.Right - t.Width - 4);
+            double top = r.Top + scaleMark.Height + 2;
+            double bottom = Math.Max(top, r.Bottom - avgLabel.Height);
+            var avgPos = new Point(LabX(avgLabel),
+                Math.Clamp(yAvg - avgLabel.Height - 2, top, bottom));
+            var drawPos = new Point(LabX(drawLabel),
+                Math.Clamp(yDraw + 3, top, bottom));
+            bool collide = Math.Abs(avgPos.Y - drawPos.Y) < avgLabel.Height + 2;
+            if (collide)
+            {
+                double wNow = _liveWatts!.Value, wAvg = _liveWattsAvg ?? wNow;
+                var both = Label(string.Create(CultureInfo.InvariantCulture,
+                        $"draw {wNow:0} · avg {wAvg:0} W"),
+                    new SolidColorBrush(Color.FromArgb(0x73, 0xff, 0xff, 0xff)));
+                Chip(both, new Point(LabX(both),
+                    Math.Clamp(Math.Max(yDraw, yAvg) + 3, top, bottom)));
+            }
+            else
+            {
+                Chip(avgLabel, avgPos);
+                Chip(drawLabel, drawPos);
+            }
         }
     }
 
