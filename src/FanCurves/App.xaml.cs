@@ -62,6 +62,18 @@ public partial class App : Application
         }
 
         Log($"startup (args: {string.Join(" ", e.Args)}, elevated: {IsElevated})");
+
+        // A saturated CPU must not starve fan control: with a 32-core chess engine
+        // running, the normal-priority UI thread waited seconds for time slices and
+        // Windows ghosted the window (it blanks and reappears — looks like the app
+        // restarting, 2026-07-29), and the engine tick + PWM writes ride on the same
+        // process. High priority costs nothing here — the app uses a few % of one core.
+        try
+        {
+            using var self = System.Diagnostics.Process.GetCurrentProcess();
+            self.PriorityClass = System.Diagnostics.ProcessPriorityClass.High;
+        }
+        catch { /* best-effort */ }
         AppDomain.CurrentDomain.UnhandledException += (_, ex) =>
             Log($"CRASH (AppDomain): {ex.ExceptionObject}");
         DispatcherUnhandledException += (_, ex) =>

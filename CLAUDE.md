@@ -674,6 +674,33 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   load parity with A1; a settled 40 W creep fires the measured prong at +33 s so the
   budget glides in before the floor ever rises (model-free — works from unlearned
   seeds); pure Power mode still tolerates the same creep (58° < the 70° aim).
+- **Instant apply on settings change (2026-07-29, Kuba: "after a change is done in
+  the developer settings, apply it instantly")**: the engine fingerprints every
+  control-shaping setting each tick (`FanEngine.SettingsSignature` — mode, zero
+  snap, power knobs, per-channel tuning, both curves, sensor assignments; learned
+  model values and kick/probe params deliberately excluded — a false positive
+  jumps the fan). A changed fingerprint means a user edit landed (slider, curve
+  drag, preset, mode switch), and every live `ResponseFilter` /
+  `PowerBudgetController` gets a one-shot `ApplyNow()`: on that tick the new
+  settings' verdict is adopted immediately — no step-down hold, no hysteresis
+  carry-over, no slew glide, pending budget holds count as served and the
+  one-step-per-window ramp brake lifts. Before this an edit was read within ~1 s
+  but *felt* only after the 25 s hold + ramp (Kuba's 01:21–01:28 curve-editing
+  session: target followed a curve edit 27 s late). Measurement state — averaging
+  windows, brands, futility latch, relief, learned model — is untouched: it
+  encodes evidence, not settings (harness C3: the snap stopped at a still-branded
+  level, correctly). Verified by a scratchpad harness (15 checks): filter snap
+  down/up mid-hold and mid-slew, budget snap with output jump, fingerprint
+  stability against per-tick learned-value writes.
+- **Process priority High (2026-07-29)**: set best-effort in `App.OnStartup`. A
+  32-core chess run starved the normal-priority UI thread until Windows ghosted
+  the window (blank → reappear), which read as "the app closed and opened again";
+  the process never actually restarted (same PID across the session — events.txt
+  showed no startup line). High priority keeps both the UI and the engine tick
+  scheduled under full load; the app uses a few % of one core. (Separate finding
+  from that night's logs: the 2026-07-28 14:10 reboot was an OS-level hard crash —
+  Kernel-Power 41, "restarted without clean shutdown" — not the app; watch for
+  recurrence, it may be platform instability under load on the new build.)
 - Changing ChannelConfig field names breaks saved `%AppData%\FanCurves\profile.json`
   (old fields silently ignored, defaults kick in) — delete it after schema changes.
 - Sensor/control IDs are backend-specific; `AutoAssign` prunes IDs the current backend

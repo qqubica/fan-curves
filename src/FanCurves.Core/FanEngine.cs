@@ -69,6 +69,7 @@ public class FanEngine : IDisposable
     private readonly Dictionary<ChannelConfig, FuseState> _fuses = new();
     private readonly object _lock = new();
     private Timer? _timer;
+    private string? _settingsSig;
 
     public Profile Profile { get; private set; }
     public bool Applying { get; private set; }
@@ -112,6 +113,7 @@ public class FanEngine : IDisposable
             _kicks.Clear();
             _probes.Clear();
             _fuses.Clear();
+            _settingsSig = null;
         }
     }
 
@@ -134,6 +136,46 @@ public class FanEngine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Fingerprint of every setting that shapes the control path: mode, zero snap, the
+    /// power knobs, per-channel tuning, both curves and the sensor assignments. When it
+    /// changes between ticks the change came from a user edit — a slider, a curve drag,
+    /// a preset, the mode switch — and every live filter/budget is told to apply it
+    /// INSTANTLY: re-evaluate and jump, skipping step-down holds, hysteresis and the
+    /// slew glide (Kuba's ask, 2026-07-29 — an edit used to be felt only after the
+    /// 25 s hold + ramp). Learned model values, idle-kick/stop-probe params and
+    /// UI-only settings stay out: they either change by themselves every tick or need
+    /// no snap, and a false positive here jumps the fan for no reason.
+    /// </summary>
+    private string SettingsSignature()
+    {
+        var sb = new System.Text.StringBuilder(512);
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        void N(double v) { sb.Append(v.ToString("R", inv)).Append(' '); }
+        var p = Profile;
+        sb.Append((int)p.ControlMode).Append(' ');
+        N(p.ZeroSnapEnabled ? p.ZeroSnapPercent : 0);
+        N(p.PowerAveragingSeconds); N(p.PowerCurveHysteresisW); N(p.RampLeadSeconds);
+        N(p.ReliefEnabled ? p.ReliefMaxWatts : 0);
+        N(p.PowerFloorEnabled ? p.PowerFloorPercentAt100W : 0);
+        N(p.PowerFloorEnabled ? p.PowerFloorPercentAt200W : 0);
+        N(p.OverrideTempC); N(p.BudgetCeilingMarginC); N(p.SteadyTargetMarginC);
+        N(p.PowerTrendSeconds); N(p.PowerSlopeSeconds); N(p.PowerNowSeconds);
+        N(p.OverrideReleaseC); N(p.OverrideReleaseSeconds);
+        foreach (var ch in p.Channels)
+        {
+            sb.Append('|').Append(ch.Enabled ? '+' : '-');
+            N(ch.MinPercent); N(ch.AveragingSeconds); N(ch.HysteresisC);
+            N(ch.StepDownHoldSeconds); N(ch.SlewUpPercentPerSec); N(ch.SlewDownPercentPerSec);
+            foreach (var pt in ch.Points) { N(pt.TempC); N(pt.Percent); }
+            sb.Append('/');
+            foreach (var pt in ch.PowerPoints) { N(pt.Watts); N(pt.Percent); }
+            sb.Append('/').Append(string.Join(",", ch.SensorIds));
+            sb.Append('/').Append(string.Join(",", ch.PowerSensorIds));
+        }
+        return sb.ToString();
+    }
+
     private void StopApplyingControlsNotIn(Profile p)
     {
         var keep = p.Channels.SelectMany(c => c.ControlIds).ToHashSet();
@@ -149,6 +191,17 @@ public class FanEngine : IDisposable
             _hw.Update();
             double now = _clock.Elapsed.TotalSeconds;
             var statuses = new List<ChannelStatus>();
+
+            // A changed fingerprint = a user edit landed since the last tick →
+            // apply it on THIS tick, skipping holds and the slew glide.
+            string sig = SettingsSignature();
+            if (_settingsSig != null && sig != _settingsSig)
+            {
+                foreach (var f in _filters.Values) f.ApplyNow();
+                foreach (var f in _powerFilters.Values) f.ApplyNow();
+                foreach (var b in _budgets.Values) b.ApplyNow();
+            }
+            _settingsSig = sig;
 
             foreach (var ch in Profile.Channels)
             {

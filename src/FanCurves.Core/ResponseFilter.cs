@@ -29,6 +29,14 @@ public class ResponseFilter
     private double _output = double.NaN;
     private double _targetLevel = double.NaN;
     private double _downSince = double.NaN;
+    private bool _applyNow;
+
+    /// <summary>One-shot: the next Step re-evaluates the curve at the current average
+    /// and jumps straight to that level — no step-down hold, no hysteresis, no slew
+    /// glide. The engine calls this when a tuning setting or curve point changes, so
+    /// an edit is FELT the tick it lands instead of tens of seconds later. The
+    /// averaging window is untouched: it is measurement, not settings.</summary>
+    public void ApplyNow() => _applyNow = true;
 
     /// <summary>Averaged temperature actually driving the curve (for UI display).</summary>
     public double EffectiveTemp { get; private set; } = double.NaN;
@@ -66,7 +74,16 @@ public class ResponseFilter
         // Snap BOTH evaluations so the hysteresis/hold logic reasons about the level
         // the fan will actually run at; the slew still glides to/from real steps.
         double levelAtAvg = Snap(CurveLevel);
-        if (double.IsNaN(_targetLevel))
+        if (_applyNow)
+        {
+            // Settings just changed: adopt what the new curve/settings say at the
+            // current average, immediately — target, holds and slew position alike.
+            _applyNow = false;
+            _targetLevel = levelAtAvg;
+            _downSince = double.NaN;
+            _output = _targetLevel;
+        }
+        else if (double.IsNaN(_targetLevel))
         {
             _targetLevel = levelAtAvg;
         }
@@ -121,6 +138,7 @@ public class ResponseFilter
         _output = double.NaN;
         _targetLevel = double.NaN;
         _downSince = double.NaN;
+        _applyNow = false;
         EffectiveTemp = double.NaN;
         CurveLevel = 0;
         SnappedToZero = false;

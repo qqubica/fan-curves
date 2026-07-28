@@ -246,6 +246,7 @@ public class PowerBudgetController
     private double _output = double.NaN;
     private double _downSince = double.NaN;
     private double _upSince = double.NaN;
+    private bool _applyNow;
     private double _overrideOkSince = double.NaN;
     private double _lastTime = double.NaN;
     private double _lastRampStep = double.NaN;
@@ -338,6 +339,11 @@ public class PowerBudgetController
     /// <summary>The sustained aim in force: OverrideTempC − max(SteadyTargetMarginC, CeilingMarginC).</summary>
     public double SteadyTargetC { get; private set; }
 
+    /// <summary>One-shot: the next Step applies whatever transition the (changed)
+    /// settings imply immediately — pending holds count as served, the ramp brake
+    /// lifts, the output jumps instead of slewing. See the comment inside Step.</summary>
+    public void ApplyNow() => _applyNow = true;
+
     /// <param name="now">Monotonic time in seconds (same clock every call).</param>
     /// <param name="rawTemp">Raw channel temperature (max of assigned sensors).</param>
     /// <param name="watts">Sum of the channel's power sensors.</param>
@@ -367,6 +373,20 @@ public class PowerBudgetController
 
         double dt = double.IsNaN(_lastTime) ? 1 : Math.Clamp(now - _lastTime, 0.05, 10);
         _lastTime = now;
+
+        // Settings just changed (ApplyNow): whatever transition the new settings imply
+        // must happen on THIS tick — pending holds count as already served, the
+        // one-step-per-window ramp brake lifts, and the output skips the slew glide
+        // below. Measurement state — brands, the futility latch, relief, the learned
+        // model — is untouched: it encodes evidence about the plant, not settings.
+        bool applyNow = _applyNow;
+        _applyNow = false;
+        if (applyNow)
+        {
+            _lastRampStep = double.NaN;
+            _downSince = now - StepDownHoldSeconds;
+            _upSince = now - StepDownHoldSeconds;
+        }
 
         if (double.IsNaN(_target)) _target = curve.Evaluate(rawTemp);
         if (double.IsNaN(_output)) _output = Snap(_target);
@@ -874,7 +894,9 @@ public class PowerBudgetController
         SnappedToZero = !OverrideActive && floored > 0 && snapped <= 0;
         if (!OverrideActive)
         {
-            if (snapped > _output)
+            if (applyNow)
+                _output = snapped; // settings change: jump, don't glide
+            else if (snapped > _output)
                 _output = Math.Min(snapped, _output + SlewUpPercentPerSec * dt);
             else
                 _output = Math.Max(snapped, _output - SlewDownPercentPerSec * dt);
@@ -1023,6 +1045,7 @@ public class PowerBudgetController
         _output = double.NaN;
         _downSince = double.NaN;
         _upSince = double.NaN;
+        _applyNow = false;
         _overrideOkSince = double.NaN;
         _lastTime = double.NaN;
         _lastRampStep = double.NaN;
