@@ -195,7 +195,7 @@ public class TelemetryLog : IDisposable
         sb.Append($" · learn {(p.ThermalLearningEnabled ? "on" : "off")}");
         foreach (var ch in p.Channels)
         {
-            sb.Append(Inv($" | {ch.Name}: min {ch.MinPercent:0}% · avg {ch.AveragingSeconds:0}s"));
+            sb.Append(Inv($" | {ch.Name}: min {(p.SafetyFloorEnabled ? Inv($"{ch.MinPercent:0}%") : "off")} · avg {ch.AveragingSeconds:0}s"));
             sb.Append(Inv($" · hyst {ch.HysteresisC:0.#}° · hold {ch.StepDownHoldSeconds:0}s"));
             sb.Append(Inv($" · slew {ch.SlewUpPercentPerSec:0}/{ch.SlewDownPercentPerSec:0}"));
             sb.Append(" · curve ");

@@ -154,8 +154,11 @@ No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
     toggleable feature is a titled group whose **master checkbox IS the group
     header** (MicroLabel-styled content inside the checkbox; explanation moved to
     tooltips). Left column: CHANNEL RESPONSE (renamed from BEHAVIOUR — the
-    per-channel filter knobs, always active, no checkbox) then STOPPED-FAN KICK /
-    STOP INSTEAD OF SLOW (zero snap) / TRIAL STOPS (stop probe). Right column:
+    per-channel filter knobs, always active, no checkbox) then SAFETY FLOOR
+    (2026-07-29 — the floor slider moved out of CHANNEL RESPONSE into its own
+    group, relabelled "Never below"; see the behaviour contract) /
+    STOPPED-FAN KICK / STOP INSTEAD OF SLOW (zero snap) / TRIAL STOPS (stop
+    probe). Right column:
     POWER CONTROL (power averaging, power-curve hysteresis, ramp lead — that label
     shortened from "Ramp when headroom under", which had collided with its
     "1 min 30 s" value) then DOWNWARD RELIEF / POWER FLOOR / HARD OVERRIDE (the
@@ -263,6 +266,23 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   (Kuba 2026-07-21: settings must be reachable with the checkbox off). Gotcha: slider `ValueChanged` fires mid-XAML-parse
   (setting `Minimum`), so `OnKickParamChanged` bails while `KickTimeValue == null` —
   removing that guard crashes the app at startup.
+- **Safety floor switch (2026-07-29, Kuba's ask — "the same way other features have
+  the turn on turn off option")**: `Profile.SafetyFloorEnabled` (default true,
+  app-level like the other feature toggles — doesn't mark "Custom", presets don't
+  touch it) is the master switch of the per-channel `MinPercent`. Implemented in
+  `FanEngine.Tick` as ONE gated local — `double minPct = Profile.SafetyFloorEnabled
+  ? ch.MinPercent : 0` — that every floor read in the tick uses (all three control
+  paths' output/target, the `MinFloor` why-chip, the stop probe's `minPct <= 0`
+  gate), and the settings fingerprint reads the gated value too, so flipping the
+  switch snaps instantly like any other edit. With it off a floored channel can go
+  to a full stop AND becomes trial-stoppable (the probe gate is the floor's, not a
+  separate rule); the per-channel value itself is kept, so switching back restores
+  it. Dev-panel group SAFETY FLOOR (master checkbox) + the "Never below" slider
+  (0–60%, per channel, still marks the profile "Custom"); the behavior log's
+  settings line prints `min off` in place of `min NN%`. Verified by a scratchpad
+  harness driving the real engine against a fake backend (floor holds 30% cool →
+  off stops the fan → curve's own 60% unaffected → back on restores → probe gated
+  on/off with the switch).
 - **Zero snap (stop instead of running slow, added 2026-07-22)**: any filter target
   above 0% but strictly below the threshold (default 20% since later that day;
   was 30%) runs the fan at 0% —
@@ -270,8 +290,9 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   `ResponseFilter` (`ZeroSnapPercent`, snap applied to BOTH curve evaluations so
   hysteresis/step-down hold reason about the snapped level; slew still glides
   to/from real steps, so ramps pass through the low range transiently — that's
-  intended). Channel `MinPercent` is applied after the filter and still wins
-  (Performance CPU keeps its 30% floor); a snapped-to-0 channel counts as stopped
+  intended). Channel `MinPercent` is applied after the filter and still wins while
+  the safety floor is on (Performance CPU keeps its 30% floor);
+  a snapped-to-0 channel counts as stopped
   for the idle kick. App-level like the kick (doesn't mark "Custom", presets don't
   touch it): `Profile.ZeroSnapEnabled` (default true) + `Profile.ZeroSnapPercent`
   (default 20), dev-panel group STOP INSTEAD OF SLOW (master checkbox) + "Stop
@@ -293,7 +314,8 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   settles into an on/off cycle; a later rise resumes without backoff. `StopProbe`
   in Core (per-channel state in `FanEngine.Tick`, runs BEFORE the idle kick →
   probe-stopped counts as stopped for the kick, same choice as zero snap); channels
-  with `MinPercent > 0` are never probed (safety floor wins — Performance CPU).
+  with `MinPercent > 0` are never probed (safety floor wins — Performance CPU;
+  unless `SafetyFloorEnabled` is off, which drops the floor to 0 everywhere).
   App-level like kick/zero-snap (doesn't mark "Custom", presets don't touch it):
   `Profile.StopProbeEnabled` (**default true**) + the five params, dev-panel
   group TRIAL STOPS (master checkbox) + sliders

@@ -109,6 +109,10 @@ public class Profile
     public double PowerCurveHysteresisW { get; set; } = 10;
     /// <summary>Fans step up once the predicted time to exhaust the thermal buffer drops under this.</summary>
     public double RampLeadSeconds { get; set; } = 45;
+    /// <summary>When false every channel's MinPercent is ignored — the fans are allowed
+    /// all the way to a stop wherever the curve/budget asks for less than the floor.
+    /// App-level like the other feature switches; the per-channel value itself is kept.</summary>
+    public bool SafetyFloorEnabled { get; set; } = true;
     /// <summary>When false, downward relief never probes below the staircase floor
     /// (a standing waiver is withdrawn on the next tick).</summary>
     public bool ReliefEnabled { get; set; } = true;

@@ -165,7 +165,8 @@ public class FanEngine : IDisposable
         foreach (var ch in p.Channels)
         {
             sb.Append('|').Append(ch.Enabled ? '+' : '-');
-            N(ch.MinPercent); N(ch.AveragingSeconds); N(ch.HysteresisC);
+            N(p.SafetyFloorEnabled ? ch.MinPercent : 0);
+            N(ch.AveragingSeconds); N(ch.HysteresisC);
             N(ch.StepDownHoldSeconds); N(ch.SlewUpPercentPerSec); N(ch.SlewDownPercentPerSec);
             foreach (var pt in ch.Points) { N(pt.TempC); N(pt.Percent); }
             sb.Append('/');
@@ -224,6 +225,11 @@ public class FanEngine : IDisposable
                         if (_hw.ReadValue(id) is double w and >= 0) { sum += w; any = true; }
                     if (any) watts = sum;
                 }
+
+                // The safety floor degrades to "no floor" when the feature is off — a
+                // disabled floor must not block a stop, gate the trial stops, or claim
+                // the MinFloor why-chip.
+                double minPct = Profile.SafetyFloorEnabled ? ch.MinPercent : 0;
 
                 double output = 0;
                 bool applied = false;
@@ -330,8 +336,8 @@ public class FanEngine : IDisposable
                         }
                         else fuse.Held = 0;
 
-                        output = Math.Max(ch.MinPercent, filtered);
-                        targetPct = Math.Max(ch.MinPercent, Math.Max(tTarget, pTarget));
+                        output = Math.Max(minPct, filtered);
+                        targetPct = Math.Max(minPct, Math.Max(tTarget, pTarget));
 
                         // Most specific explanation wins; later checks override earlier ones.
                         if (overrideActive)
@@ -355,7 +361,7 @@ public class FanEngine : IDisposable
                                 leadF.PendingDownLevel >= otherTarget - 0.5)
                             {
                                 reason = OutputReason.StepDownHold;
-                                reasonLevel = Math.Max(ch.MinPercent,
+                                reasonLevel = Math.Max(minPct,
                                     Math.Max(otherTarget, leadF.PendingDownLevel));
                                 reasonSeconds = leadF.DownHoldRemaining;
                             }
@@ -367,7 +373,7 @@ public class FanEngine : IDisposable
                             }
                             if (Math.Abs(output - targetPct) > 0.5)
                                 reason = output < targetPct ? OutputReason.RampUp : OutputReason.RampDown;
-                            if (ch.MinPercent > 0 && filtered < ch.MinPercent - 0.01)
+                            if (minPct > 0 && filtered < minPct - 0.01)
                             {
                                 reason = OutputReason.MinFloor;
                                 reasonLevel = Math.Max(filter.CurveLevel,
@@ -426,8 +432,8 @@ public class FanEngine : IDisposable
                         baseTempC = budget.Model.BaseTempC;
                         resistanceCPerW = budget.Model.R(filtered);
                         overrideActive = budget.OverrideActive;
-                        output = Math.Max(ch.MinPercent, filtered);
-                        targetPct = Math.Max(ch.MinPercent, budget.TargetLevel);
+                        output = Math.Max(minPct, filtered);
+                        targetPct = Math.Max(minPct, budget.TargetLevel);
 
                         // Most specific explanation wins; later checks override earlier ones.
                         if (overrideActive)
@@ -440,13 +446,13 @@ public class FanEngine : IDisposable
                             if (!double.IsNaN(budget.DownHoldRemaining))
                             {
                                 reason = OutputReason.StepDownHold;
-                                reasonLevel = Math.Max(ch.MinPercent, budget.PendingDownLevel);
+                                reasonLevel = Math.Max(minPct, budget.PendingDownLevel);
                                 reasonSeconds = budget.DownHoldRemaining;
                             }
                             else if (!double.IsNaN(budget.UpHoldRemaining))
                             {
                                 reason = OutputReason.StepUpHold;
-                                reasonLevel = Math.Max(ch.MinPercent, budget.PendingUpLevel);
+                                reasonLevel = Math.Max(minPct, budget.PendingUpLevel);
                                 reasonSeconds = budget.UpHoldRemaining;
                             }
                             else if (budget.SnappedToZero && output <= 0.01)
@@ -469,7 +475,7 @@ public class FanEngine : IDisposable
                             if (Math.Abs(output - targetPct) > 0.5 &&
                                 reason is OutputReason.None or OutputReason.BudgetHold)
                                 reason = output < targetPct ? OutputReason.RampUp : OutputReason.RampDown;
-                            if (ch.MinPercent > 0 && filtered < ch.MinPercent - 0.01)
+                            if (minPct > 0 && filtered < minPct - 0.01)
                             {
                                 reason = OutputReason.MinFloor;
                                 reasonLevel = budget.PreSnapTarget;
@@ -480,14 +486,14 @@ public class FanEngine : IDisposable
                     {
                         filtered = tempFiltered;
                         effectiveTemp = filter!.EffectiveTemp;
-                        output = Math.Max(ch.MinPercent, filtered);
-                        targetPct = Math.Max(ch.MinPercent, filter.TargetLevel);
+                        output = Math.Max(minPct, filtered);
+                        targetPct = Math.Max(minPct, filter.TargetLevel);
 
                         // Most specific explanation wins; later checks override earlier ones.
                         if (!double.IsNaN(filter.DownHoldRemaining))
                         {
                             reason = OutputReason.StepDownHold;
-                            reasonLevel = Math.Max(ch.MinPercent, filter.PendingDownLevel);
+                            reasonLevel = Math.Max(minPct, filter.PendingDownLevel);
                             reasonSeconds = filter.DownHoldRemaining;
                         }
                         else if (filter.HysteresisHolding)
@@ -501,7 +507,7 @@ public class FanEngine : IDisposable
                         }
                         if (Math.Abs(output - targetPct) > 0.5)
                             reason = output < targetPct ? OutputReason.RampUp : OutputReason.RampDown;
-                        if (ch.MinPercent > 0 && filtered < ch.MinPercent - 0.01)
+                        if (minPct > 0 && filtered < minPct - 0.01)
                         {
                             reason = OutputReason.MinFloor;
                             reasonLevel = filter.CurveLevel;
@@ -527,7 +533,7 @@ public class FanEngine : IDisposable
                             // and a trial stop then holds the fan off indefinitely while the
                             // die self-throttles (chess-engine report, 2026-07-27: fan held
                             // at 0% at 178 W because the clamped die could never "rise").
-                            if (Profile.StopProbeEnabled && ch.MinPercent <= 0 &&
+                            if (Profile.StopProbeEnabled && minPct <= 0 &&
                                 demandLevel <= 0.01)
                             {
                                 if (!_probes.TryGetValue(ch, out var probe))
