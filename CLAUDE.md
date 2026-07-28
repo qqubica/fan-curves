@@ -143,11 +143,31 @@ No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
     overlay, Apply/Stop. No settings visible.
   - Developer (top-bar toggle, or `--dev`): **the panel is two columns since
     2026-07-27 (Kuba's ask), 520 px wide** — the CONTROL MODE switch leads at the
-    top (full panel width, the headline choice), below it the temperature side
-    (BEHAVIOUR + kick/snap/probe) fills the left column and the power side (POWER
-    CONTROL + BUDGET INTERNALS + LEARNED MODEL) the right, hairline seam between,
+    top (full panel width, the headline choice), hairline seam between the columns,
     SOURCES/BACKEND full-width underneath; each column is exactly as wide as the
     old single-column panel, so the ~31-mono-char readout line breaks still hold.
+    **Settings regrouped into feature groups 2026-07-28 (Kuba: "grouped in more
+    clear way. Add checkboxes to enable/disable all the features")**: every
+    toggleable feature is a titled group whose **master checkbox IS the group
+    header** (MicroLabel-styled content inside the checkbox; explanation moved to
+    tooltips). Left column: CHANNEL RESPONSE (renamed from BEHAVIOUR — the
+    per-channel filter knobs, always active, no checkbox) then STOPPED-FAN KICK /
+    STOP INSTEAD OF SLOW (zero snap) / TRIAL STOPS (stop probe). Right column:
+    POWER CONTROL (power averaging, power-curve hysteresis, ramp lead — that label
+    shortened from "Ramp when headroom under", which had collided with its
+    "1 min 30 s" value) then DOWNWARD RELIEF / POWER FLOOR / HARD OVERRIDE (the
+    fuse's trigger + release drop/hold, gathered from POWER CONTROL and BUDGET
+    INTERNALS; deliberately **no off switch** — the fuse is the last line before
+    the BIOS would have to save the die) / BUDGET INTERNALS (ceiling/aim margins +
+    the three windows) / LEARNED MODEL. Relief and the power floor got their
+    first enable switches: **`Profile.ReliefEnabled` / `Profile.PowerFloorEnabled`**
+    (both default true, app-level like the other feature toggles); off is
+    implemented in `FanEngine` by feeding the controller its natural "never
+    fires" values (relief cap 0 W — never undercut, and an active waiver dies on
+    the next tick; floor anchors 0/0 — the line is 0 everywhere), so
+    `PowerBudgetController` needed no changes. A group whose switch is off **dims
+    to 45 % opacity but stays editable** (the 2026-07-21 reachability rule);
+    the behavior log's settings line prints `relief off` / `pfloor off`.
     Curve editing (drag points, double-click
     add, right-click remove; edits snap to whole °C / whole %, bands stay ≥1 °C wide,
     max 12 points per channel; Ctrl+Z / Ctrl+Y — also Ctrl+Shift+Z — undo/redo point
@@ -229,7 +249,7 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   `IdleKick` in Core (per-channel state in `FanEngine.Tick`, bypasses the slew
   filter); not active while paused/BIOS-controlled. Configurable in the dev panel
   (all global/app-level like the tray/autostart toggles — don't mark the profile
-  "Custom", presets don't touch them): checkbox "Stopped-fan kick (all channels)"
+  "Custom", presets don't touch them): the STOPPED-FAN KICK group's master checkbox
   (`Profile.IdleKickEnabled`, **default false since 2026-07-22** — Kuba runs with
   the kick off; was default-on at 60 s/20%/20 s through 2026-07-21) plus three
   sliders — idle time before
@@ -251,8 +271,8 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   (Performance CPU keeps its 30% floor); a snapped-to-0 channel counts as stopped
   for the idle kick. App-level like the kick (doesn't mark "Custom", presets don't
   touch it): `Profile.ZeroSnapEnabled` (default true) + `Profile.ZeroSnapPercent`
-  (default 20), dev-panel checkbox "Stop fans instead of running slow (all
-  channels)" + "Stop below" slider (1–50%). With the 20% threshold and the
+  (default 20), dev-panel group STOP INSTEAD OF SLOW (master checkbox) + "Stop
+  below" slider (1–50%). With the 20% threshold and the
   2026-07-22 default curves, no band is snapped (the snap is strictly-below, so
   the CPU's 20% band runs at 20%) — the feature only bites when a curve/threshold
   edit puts a band under the threshold.
@@ -273,7 +293,7 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   with `MinPercent > 0` are never probed (safety floor wins — Performance CPU).
   App-level like kick/zero-snap (doesn't mark "Custom", presets don't touch it):
   `Profile.StopProbeEnabled` (**default true**) + the five params, dev-panel
-  checkbox "Trial-stop fans when temps are stable (all channels)" + sliders
+  group TRIAL STOPS (master checkbox) + sliders
   "Steady running before trial" (10–300 s), "Trial stop length" (5–60 s), "Stable
   band · rise to resume" (0.5–5°C), "Retry after failed trial" (60–900 s), "No
   trials above" (`StopProbeMaxTempC`, 50–90°C, default 78 — Kuba's ask 2026-07-27:
@@ -505,8 +525,9 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   stay the same lower it, if they start rising raise the RPM" + "only if the
   sustained load is below 190 W, add a slider" + "step-down hold applies to the
   first step only, then instantly snap")**: while the latch stands, the draw is
-  settled+under `Profile.ReliefMaxWatts` (default 190, POWER CONTROL slider
-  50–400 W) and the trend flat above the aim, the controller probes BELOW the
+  settled+under `Profile.ReliefMaxWatts` (default 190, DOWNWARD RELIEF group
+  slider 50–400 W; the group's `Profile.ReliefEnabled` master checkbox —
+  2026-07-28 — turns the whole probe off) and the trend flat above the aim, the controller probes BELOW the
   running level — **the only case where measured evidence may waive the Auto
   floor** (`EffectiveFloor` in the controller; `_reliefLevel` is a standing
   waiver). First step down one ladder level, judged for a StepDownHold like the
@@ -532,8 +553,9 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   level), outranks the futility latch AND the relief waiver (the waiver only
   waives the temperature staircase), and rides under the fuse too. At idle draws
   the line falls below the zero-snap threshold, so fans still stop; both sliders
-  at 0 = off. Two POWER CONTROL sliders (0–100%), app-level like the rest;
-  settings line logs `pfloor 30%@100W/80%@200W`. Chess repro now bottoms out ON
+  at 0 = off. Two POWER FLOOR group sliders (0–100%) behind the group's
+  `Profile.PowerFloorEnabled` master checkbox (2026-07-28), app-level like the
+  rest; settings line logs `pfloor 30%@100W/80%@200W` (or `pfloor off`). Chess repro now bottoms out ON
   the line (~64% at 168 W — matching his original "lower it to 60%" better than
   the ladder's 50), and post-load descents glide down the line as the average
   decays instead of stepping. Verified by the

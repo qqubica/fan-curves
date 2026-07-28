@@ -338,9 +338,12 @@ public class FanEngine : IDisposable
                         budget.ZeroSnapPercent = Profile.ZeroSnapEnabled ? Profile.ZeroSnapPercent : 0;
                         budget.PowerAveragingSeconds = Profile.PowerAveragingSeconds;
                         budget.RampLeadSeconds = Profile.RampLeadSeconds;
-                        budget.ReliefMaxWatts = Profile.ReliefMaxWatts;
-                        budget.PowerFloorPercentAt100W = Profile.PowerFloorPercentAt100W;
-                        budget.PowerFloorPercentAt200W = Profile.PowerFloorPercentAt200W;
+                        // Disabled features degrade to their natural "never fires" values:
+                        // a 0 W relief cap can never be undercut, and a 0/0 floor line is 0
+                        // everywhere. Either also clears an already-standing waiver/floor.
+                        budget.ReliefMaxWatts = Profile.ReliefEnabled ? Profile.ReliefMaxWatts : 0;
+                        budget.PowerFloorPercentAt100W = Profile.PowerFloorEnabled ? Profile.PowerFloorPercentAt100W : 0;
+                        budget.PowerFloorPercentAt200W = Profile.PowerFloorEnabled ? Profile.PowerFloorPercentAt200W : 0;
                         budget.OverrideTempC = Profile.OverrideTempC;
                         budget.CeilingMarginC = Profile.BudgetCeilingMarginC;
                         budget.SteadyTargetMarginC = Profile.SteadyTargetMarginC;

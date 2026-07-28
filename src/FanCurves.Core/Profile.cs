@@ -109,9 +109,14 @@ public class Profile
     public double PowerCurveHysteresisW { get; set; } = 10;
     /// <summary>Fans step up once the predicted time to exhaust the thermal buffer drops under this.</summary>
     public double RampLeadSeconds { get; set; } = 45;
+    /// <summary>When false, downward relief never probes below the staircase floor
+    /// (a standing waiver is withdrawn on the next tick).</summary>
+    public bool ReliefEnabled { get; set; } = true;
     /// <summary>Downward relief (probing below the staircase floor once the up-march is
     /// proven futile) only runs while the sustained draw is under this many watts.</summary>
     public double ReliefMaxWatts { get; set; } = 190;
+    /// <summary>When false the power floor line is not applied at all.</summary>
+    public bool PowerFloorEnabled { get; set; } = true;
     /// <summary>Power floor calibration: minimum fan % at 100 W and at 200 W sustained
     /// draw (linear through the two points, clamped outside; both 0 = off).</summary>
     public double PowerFloorPercentAt100W { get; set; } = 30;

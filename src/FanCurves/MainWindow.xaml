@@ -699,7 +699,8 @@
                                         <ColumnDefinition Width="*"/>
                                     </Grid.ColumnDefinitions>
                                     <StackPanel Grid.Column="0">
-                                        <TextBlock local:Tracked.Text="BEHAVIOUR" Style="{StaticResource MicroLabel}" Margin="0,0,0,12"/>
+                                        <TextBlock local:Tracked.Text="CHANNEL RESPONSE" Style="{StaticResource MicroLabel}" Margin="0,0,0,12"
+                                                   ToolTip="How the selected channel follows its curve: what temperature actually drives it and how fast steps are taken. Per channel — switch channels above the chart. Always active."/>
 
                                         <DockPanel>
                                             <TextBlock DockPanel.Dock="Right" x:Name="AvgValue" FontFamily="{StaticResource Mono}"
@@ -750,14 +751,16 @@
                                         <Slider x:Name="FloorSlider" Minimum="0" Maximum="60" TickFrequency="5"
                                                 IsSnapToTickEnabled="True" ValueChanged="OnParamChanged"/>
 
-                                        <CheckBox x:Name="IdleKickCheck"
-                                                  FontSize="11.5" Foreground="#8cffffff" Margin="0,10,0,0"
+                                        <!-- Feature groups: the checkbox IS the group header — one master
+                                             switch per feature. Sliders stay editable while a feature is
+                                             off (they only dim), so its tuning is always reachable. -->
+                                        <CheckBox x:Name="IdleKickCheck" Margin="0,10,0,2"
                                                   Checked="OnIdleKickCheckChanged" Unchecked="OnIdleKickCheckChanged"
-                                                  ToolTip="Periodically spin up fans that have fully stopped, then let them stop again.">
-                                            <TextBlock Text="Stopped-fan kick (all channels)" TextWrapping="Wrap"/>
+                                                  ToolTip="Periodically spin up fans that have fully stopped, then let them stop again. All channels.">
+                                            <TextBlock local:Tracked.Text="STOPPED-FAN KICK" Style="{StaticResource MicroLabel}"/>
                                         </CheckBox>
 
-                                        <StackPanel Margin="0,4,0,0">
+                                        <StackPanel x:Name="KickGroup" Margin="0,6,0,0">
                                             <DockPanel>
                                                 <TextBlock DockPanel.Dock="Right" x:Name="KickIdleValue" FontFamily="{StaticResource Mono}"
                                                            FontSize="12" Foreground="#f2f2f4"/>
@@ -783,14 +786,13 @@
                                                     IsSnapToTickEnabled="True" ValueChanged="OnKickParamChanged"/>
                                         </StackPanel>
 
-                                        <CheckBox x:Name="ZeroSnapCheck"
-                                                  FontSize="11.5" Foreground="#8cffffff" Margin="0,10,0,0"
+                                        <CheckBox x:Name="ZeroSnapCheck" Margin="0,10,0,2"
                                                   Checked="OnZeroSnapCheckChanged" Unchecked="OnZeroSnapCheckChanged"
-                                                  ToolTip="Any curve target below the threshold runs the fan at 0% instead — meaningful speed or fully stopped, never a slow crawl.">
-                                            <TextBlock Text="Stop fans instead of running slow (all channels)" TextWrapping="Wrap"/>
+                                                  ToolTip="Stop fans instead of running them slow: any curve target below the threshold runs the fan at 0% — meaningful speed or fully stopped, never a slow crawl. All channels.">
+                                            <TextBlock local:Tracked.Text="STOP INSTEAD OF SLOW" Style="{StaticResource MicroLabel}"/>
                                         </CheckBox>
 
-                                        <StackPanel Margin="0,4,0,0">
+                                        <StackPanel x:Name="ZeroSnapGroup" Margin="0,6,0,0">
                                             <DockPanel>
                                                 <TextBlock DockPanel.Dock="Right" x:Name="ZeroSnapValue" FontFamily="{StaticResource Mono}"
                                                            FontSize="12" Foreground="#f2f2f4"/>
@@ -800,14 +802,13 @@
                                                     IsSnapToTickEnabled="True" ValueChanged="OnZeroSnapParamChanged"/>
                                         </StackPanel>
 
-                                        <CheckBox x:Name="StopProbeCheck"
-                                                  FontSize="11.5" Foreground="#8cffffff" Margin="0,10,0,0"
+                                        <CheckBox x:Name="StopProbeCheck" Margin="0,10,0,2"
                                                   Checked="OnStopProbeCheckChanged" Unchecked="OnStopProbeCheckChanged"
-                                                  ToolTip="After a fan has run steadily with a stable temperature, stop it as a trial — if the temperature starts climbing, curve control resumes at once; if it stays flat or falls, the fan simply stays off.">
-                                            <TextBlock Text="Trial-stop fans when temps are stable (all channels)" TextWrapping="Wrap"/>
+                                                  ToolTip="After a fan has run steadily with a stable temperature, stop it as a trial — if the temperature starts climbing, curve control resumes at once; if it stays flat or falls, the fan simply stays off. All channels.">
+                                            <TextBlock local:Tracked.Text="TRIAL STOPS" Style="{StaticResource MicroLabel}"/>
                                         </CheckBox>
 
-                                        <StackPanel Margin="0,4,0,0">
+                                        <StackPanel x:Name="StopProbeGroup" Margin="0,6,0,0">
                                             <DockPanel>
                                                 <TextBlock DockPanel.Dock="Right" x:Name="ProbeRunValue" FontFamily="{StaticResource Mono}"
                                                            FontSize="12" Foreground="#f2f2f4"/>
@@ -856,7 +857,8 @@
                                             HorizontalAlignment="Center" Margin="0,3,0,0"/>
 
                                     <StackPanel Grid.Column="2">
-                                        <TextBlock local:Tracked.Text="POWER CONTROL" Style="{StaticResource MicroLabel}" Margin="0,0,0,8"/>
+                                        <TextBlock local:Tracked.Text="POWER CONTROL" Style="{StaticResource MicroLabel}" Margin="0,0,0,8"
+                                                   ToolTip="The power side's shared knobs — used whenever channels with a power sensor are driven by watts (Power, Auto and Curve modes)."/>
                                         <DockPanel>
                                             <TextBlock DockPanel.Dock="Right" x:Name="PowerAvgValue" FontFamily="{StaticResource Mono}"
                                                        FontSize="12" Foreground="#f2f2f4"/>
@@ -873,56 +875,91 @@
                                         <Slider x:Name="PowerHystSlider" Minimum="2" Maximum="50" TickFrequency="1"
                                                 IsSnapToTickEnabled="True" ValueChanged="OnPowerParamChanged"/>
 
-                                        <DockPanel>
+                                        <DockPanel ToolTip="Fans step up once the predicted headroom — the time left until the sink trend reaches the sustained aim — drops under this lead.">
                                             <TextBlock DockPanel.Dock="Right" x:Name="RampLeadValue" FontFamily="{StaticResource Mono}"
                                                        FontSize="12" Foreground="#f2f2f4"/>
-                                            <TextBlock Text="Ramp when headroom under" FontSize="12" Foreground="#99ffffff"/>
+                                            <TextBlock Text="Ramp lead" FontSize="12" Foreground="#99ffffff"/>
                                         </DockPanel>
                                         <Slider x:Name="RampLeadSlider" Minimum="15" Maximum="300" TickFrequency="5"
-                                                IsSnapToTickEnabled="True" ValueChanged="OnPowerParamChanged"/>
-
-                                        <DockPanel>
-                                            <TextBlock DockPanel.Dock="Right" x:Name="ReliefMaxValue" FontFamily="{StaticResource Mono}"
-                                                       FontSize="12" Foreground="#f2f2f4"/>
-                                            <TextBlock Text="Downward relief below draw" FontSize="12" Foreground="#99ffffff"
-                                                       ToolTip="Once more fan is measured futile, the output may probe below the staircase floor — but only while the sustained draw is under this."/>
-                                        </DockPanel>
-                                        <Slider x:Name="ReliefMaxSlider" Minimum="50" Maximum="400" TickFrequency="10"
-                                                IsSnapToTickEnabled="True" ValueChanged="OnPowerParamChanged"/>
-
-                                        <DockPanel>
-                                            <TextBlock DockPanel.Dock="Right" x:Name="PowerFloor100Value" FontFamily="{StaticResource Mono}"
-                                                       FontSize="12" Foreground="#f2f2f4"/>
-                                            <TextBlock Text="Power floor · fan at 100 W" FontSize="12" Foreground="#99ffffff"
-                                                       ToolTip="Minimum fan for a sustained 100 W draw. With the 200 W point it defines a line mapping sustained draw to a minimum fan — always binding, futility latch or not. Both at 0 = off."/>
-                                        </DockPanel>
-                                        <Slider x:Name="PowerFloor100Slider" Minimum="0" Maximum="100" TickFrequency="5"
-                                                IsSnapToTickEnabled="True" ValueChanged="OnPowerParamChanged"/>
-
-                                        <DockPanel>
-                                            <TextBlock DockPanel.Dock="Right" x:Name="PowerFloor200Value" FontFamily="{StaticResource Mono}"
-                                                       FontSize="12" Foreground="#f2f2f4"/>
-                                            <TextBlock Text="Power floor · fan at 200 W" FontSize="12" Foreground="#99ffffff"
-                                                       ToolTip="Minimum fan for a sustained 200 W draw (see the 100 W point)."/>
-                                        </DockPanel>
-                                        <Slider x:Name="PowerFloor200Slider" Minimum="0" Maximum="100" TickFrequency="5"
-                                                IsSnapToTickEnabled="True" ValueChanged="OnPowerParamChanged"/>
-
-                                        <DockPanel>
-                                            <TextBlock DockPanel.Dock="Right" x:Name="OverrideValue" FontFamily="{StaticResource Mono}"
-                                                       FontSize="12" Foreground="#f2f2f4"/>
-                                            <TextBlock Text="Hard override above" FontSize="12" Foreground="#99ffffff"/>
-                                        </DockPanel>
-                                        <Slider x:Name="OverrideSlider" Minimum="70" Maximum="100" TickFrequency="1"
                                                 IsSnapToTickEnabled="True" ValueChanged="OnPowerParamChanged"/>
 
                                         <TextBlock x:Name="PowerInfoText" FontFamily="{StaticResource Mono}" FontSize="10.5"
                                                    Foreground="#66ffffff" TextWrapping="Wrap" Margin="0,-4,0,0"/>
 
-                                        <!-- The budget's own geometry: where the ceiling sits, how the
-                                             trend/slope/draw windows are measured, how the fuse lets go. -->
+                                        <CheckBox x:Name="ReliefCheck" Margin="0,14,0,2"
+                                                  Checked="OnReliefCheckChanged" Unchecked="OnReliefCheckChanged"
+                                                  ToolTip="Once more fan is measured futile — a die-limited load reads the same temperature at every speed — the output may probe below the temperature staircase: less fan, never none. Power and Auto modes.">
+                                            <TextBlock local:Tracked.Text="DOWNWARD RELIEF" Style="{StaticResource MicroLabel}"/>
+                                        </CheckBox>
+                                        <StackPanel x:Name="ReliefGroup" Margin="0,6,0,0">
+                                            <DockPanel>
+                                                <TextBlock DockPanel.Dock="Right" x:Name="ReliefMaxValue" FontFamily="{StaticResource Mono}"
+                                                           FontSize="12" Foreground="#f2f2f4"/>
+                                                <TextBlock Text="Only below sustained draw" FontSize="12" Foreground="#99ffffff"
+                                                           ToolTip="Relief may only probe below the staircase floor while the sustained draw is under this."/>
+                                            </DockPanel>
+                                            <Slider x:Name="ReliefMaxSlider" Minimum="50" Maximum="400" TickFrequency="10"
+                                                    IsSnapToTickEnabled="True" ValueChanged="OnPowerParamChanged"/>
+                                        </StackPanel>
+
+                                        <CheckBox x:Name="PowerFloorCheck" Margin="0,10,0,2"
+                                                  Checked="OnPowerFloorCheckChanged" Unchecked="OnPowerFloorCheckChanged"
+                                                  ToolTip="A straight line through the two points maps sustained draw to a minimum fan — always binding while on, futility latch or not. Power and Auto modes.">
+                                            <TextBlock local:Tracked.Text="POWER FLOOR" Style="{StaticResource MicroLabel}"/>
+                                        </CheckBox>
+                                        <StackPanel x:Name="PowerFloorGroup" Margin="0,6,0,0">
+                                            <DockPanel>
+                                                <TextBlock DockPanel.Dock="Right" x:Name="PowerFloor100Value" FontFamily="{StaticResource Mono}"
+                                                           FontSize="12" Foreground="#f2f2f4"/>
+                                                <TextBlock Text="Fan at 100 W sustained" FontSize="12" Foreground="#99ffffff"
+                                                           ToolTip="Minimum fan for a sustained 100 W draw."/>
+                                            </DockPanel>
+                                            <Slider x:Name="PowerFloor100Slider" Minimum="0" Maximum="100" TickFrequency="5"
+                                                    IsSnapToTickEnabled="True" ValueChanged="OnPowerParamChanged"/>
+
+                                            <DockPanel>
+                                                <TextBlock DockPanel.Dock="Right" x:Name="PowerFloor200Value" FontFamily="{StaticResource Mono}"
+                                                           FontSize="12" Foreground="#f2f2f4"/>
+                                                <TextBlock Text="Fan at 200 W sustained" FontSize="12" Foreground="#99ffffff"
+                                                           ToolTip="Minimum fan for a sustained 200 W draw (the line through both points is extrapolated and clamped to 0–100%)."/>
+                                            </DockPanel>
+                                            <Slider x:Name="PowerFloor200Slider" Minimum="0" Maximum="100" TickFrequency="5"
+                                                    IsSnapToTickEnabled="True" ValueChanged="OnPowerParamChanged"/>
+                                        </StackPanel>
+
+                                        <!-- The safety fuse has no off switch on purpose: it is the last
+                                             line before the BIOS would have to save the die. -->
+                                        <TextBlock local:Tracked.Text="HARD OVERRIDE" Style="{StaticResource MicroLabel}" Margin="0,10,0,6"
+                                                   ToolTip="The safety fuse: at the trigger temperature the channel's temperature staircase is written instantly from the raw die temp, no slew. Always armed, in every control mode — no off switch."/>
+                                        <DockPanel>
+                                            <TextBlock DockPanel.Dock="Right" x:Name="OverrideValue" FontFamily="{StaticResource Mono}"
+                                                       FontSize="12" Foreground="#f2f2f4"/>
+                                            <TextBlock Text="Trigger above" FontSize="12" Foreground="#99ffffff"/>
+                                        </DockPanel>
+                                        <Slider x:Name="OverrideSlider" Minimum="70" Maximum="100" TickFrequency="1"
+                                                IsSnapToTickEnabled="True" ValueChanged="OnPowerParamChanged"/>
+
+                                        <DockPanel ToolTip="How far the die must fall below the override temperature before the fuse is allowed to let go.">
+                                            <TextBlock DockPanel.Dock="Right" x:Name="ReleaseDropValue" FontFamily="{StaticResource Mono}"
+                                                       FontSize="12" Foreground="#f2f2f4"/>
+                                            <TextBlock Text="Release drop" FontSize="12" Foreground="#99ffffff"/>
+                                        </DockPanel>
+                                        <Slider x:Name="ReleaseDropSlider" Minimum="0.5" Maximum="15" TickFrequency="0.5"
+                                                IsSnapToTickEnabled="True" ValueChanged="OnBudgetParamChanged"/>
+
+                                        <DockPanel ToolTip="…and how long it must stay down there. Until both hold, the temperature curve keeps driving the fan directly.">
+                                            <TextBlock DockPanel.Dock="Right" x:Name="ReleaseHoldValue" FontFamily="{StaticResource Mono}"
+                                                       FontSize="12" Foreground="#f2f2f4"/>
+                                            <TextBlock Text="Release hold" FontSize="12" Foreground="#99ffffff"/>
+                                        </DockPanel>
+                                        <Slider x:Name="ReleaseHoldSlider" Minimum="2" Maximum="120" TickFrequency="1"
+                                                IsSnapToTickEnabled="True" ValueChanged="OnBudgetParamChanged"/>
+
+                                        <!-- The budget's own geometry: where the ceiling sits and how the
+                                             trend/slope/draw windows are measured. -->
                                         <TextBlock local:Tracked.Text="BUDGET INTERNALS" Style="{StaticResource MicroLabel}"
-                                                   Margin="0,14,0,6"/>
+                                                   Margin="0,10,0,6"
+                                                   ToolTip="The predictive budget's geometry — where the ceiling and the sustained aim sit, and the measurement windows behind the headroom. Power and Auto modes."/>
 
                                         <DockPanel ToolTip="The credit E = mass × (ceiling − temp) is measured against this ceiling, which sits below the hard override — the buffer is never spent all the way into the fuse.">
                                             <TextBlock DockPanel.Dock="Right" x:Name="CeilingMarginValue" FontFamily="{StaticResource Mono}"
@@ -962,22 +999,6 @@
                                             <TextBlock Text="Live draw window" FontSize="12" Foreground="#99ffffff"/>
                                         </DockPanel>
                                         <Slider x:Name="PowerNowSlider" Minimum="2" Maximum="60" TickFrequency="1"
-                                                IsSnapToTickEnabled="True" ValueChanged="OnBudgetParamChanged"/>
-
-                                        <DockPanel ToolTip="How far the die must fall below the override temperature before the fuse is allowed to let go.">
-                                            <TextBlock DockPanel.Dock="Right" x:Name="ReleaseDropValue" FontFamily="{StaticResource Mono}"
-                                                       FontSize="12" Foreground="#f2f2f4"/>
-                                            <TextBlock Text="Override release drop" FontSize="12" Foreground="#99ffffff"/>
-                                        </DockPanel>
-                                        <Slider x:Name="ReleaseDropSlider" Minimum="0.5" Maximum="15" TickFrequency="0.5"
-                                                IsSnapToTickEnabled="True" ValueChanged="OnBudgetParamChanged"/>
-
-                                        <DockPanel ToolTip="…and how long it must stay down there. Until both hold, the temperature curve keeps driving the fan directly.">
-                                            <TextBlock DockPanel.Dock="Right" x:Name="ReleaseHoldValue" FontFamily="{StaticResource Mono}"
-                                                       FontSize="12" Foreground="#f2f2f4"/>
-                                            <TextBlock Text="Override release hold" FontSize="12" Foreground="#99ffffff"/>
-                                        </DockPanel>
-                                        <Slider x:Name="ReleaseHoldSlider" Minimum="2" Maximum="120" TickFrequency="1"
                                                 IsSnapToTickEnabled="True" ValueChanged="OnBudgetParamChanged"/>
 
                                         <TextBlock x:Name="BudgetInfoText" FontFamily="{StaticResource Mono}" FontSize="10.5"

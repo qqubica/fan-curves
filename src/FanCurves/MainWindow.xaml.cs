@@ -102,6 +102,8 @@ public partial class MainWindow : Window
         IdleKickCheck.IsChecked = profile.IdleKickEnabled;
         ZeroSnapCheck.IsChecked = profile.ZeroSnapEnabled;
         StopProbeCheck.IsChecked = profile.StopProbeEnabled;
+        ReliefCheck.IsChecked = profile.ReliefEnabled;
+        PowerFloorCheck.IsChecked = profile.PowerFloorEnabled;
         ModeSwitch.SelectedIndex = (int)profile.ControlMode;
         LearnCheck.IsChecked = profile.ThermalLearningEnabled;
         _loadingUi = true;
@@ -134,6 +136,7 @@ public partial class MainWindow : Window
         UpdateStopProbeLabels();
         UpdatePowerLabels();
         UpdateBudgetLabels();
+        UpdateFeatureGroupDim();
         SimTag.Visibility = hw.IsSimulated ? Visibility.Visible : Visibility.Collapsed;
 
         foreach (var ch in _profile.Channels)
@@ -729,10 +732,23 @@ public partial class MainWindow : Window
         _profile.Save();
     }
 
+    /// <summary>Feature groups dim while their master switch is off. The sliders stay
+    /// fully editable either way — settings must be reachable with the checkbox off
+    /// (Kuba, 2026-07-21) — the opacity only signals the group's state at a glance.</summary>
+    private void UpdateFeatureGroupDim()
+    {
+        KickGroup.Opacity = IdleKickCheck.IsChecked == true ? 1.0 : 0.45;
+        ZeroSnapGroup.Opacity = ZeroSnapCheck.IsChecked == true ? 1.0 : 0.45;
+        StopProbeGroup.Opacity = StopProbeCheck.IsChecked == true ? 1.0 : 0.45;
+        ReliefGroup.Opacity = ReliefCheck.IsChecked == true ? 1.0 : 0.45;
+        PowerFloorGroup.Opacity = PowerFloorCheck.IsChecked == true ? 1.0 : 0.45;
+    }
+
     private void OnIdleKickCheckChanged(object sender, RoutedEventArgs e)
     {
         _profile.IdleKickEnabled = IdleKickCheck.IsChecked == true;
         _profile.Save();
+        UpdateFeatureGroupDim();
     }
 
     private void OnKickParamChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -759,6 +775,7 @@ public partial class MainWindow : Window
         if (!IsLoaded) return; // constructor sets IsChecked from the profile
         _profile.ZeroSnapEnabled = ZeroSnapCheck.IsChecked == true;
         _profile.Save();
+        UpdateFeatureGroupDim();
     }
 
     private void OnZeroSnapParamChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -780,6 +797,23 @@ public partial class MainWindow : Window
         if (!IsLoaded) return; // constructor sets IsChecked from the profile
         _profile.StopProbeEnabled = StopProbeCheck.IsChecked == true;
         _profile.Save();
+        UpdateFeatureGroupDim();
+    }
+
+    private void OnReliefCheckChanged(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded) return; // constructor sets IsChecked from the profile
+        _profile.ReliefEnabled = ReliefCheck.IsChecked == true;
+        _profile.Save();
+        UpdateFeatureGroupDim();
+    }
+
+    private void OnPowerFloorCheckChanged(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded) return; // constructor sets IsChecked from the profile
+        _profile.PowerFloorEnabled = PowerFloorCheck.IsChecked == true;
+        _profile.Save();
+        UpdateFeatureGroupDim();
     }
 
     private void OnStopProbeParamChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
