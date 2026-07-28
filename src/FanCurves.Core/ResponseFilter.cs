@@ -8,9 +8,9 @@ namespace FanCurves.Core;
 ///    average lands in a higher band.
 /// 2. The temperature fed to the curve is the rolling AVERAGE over the last
 ///    AveragingSeconds (default 20 s) — short spikes barely move it.
-/// 3. Step-down hysteresis: a level is only left downward once even
-///    (average + HysteresisC) maps to a lower level AND that has held continuously
-///    for StepDownHoldSeconds — no flapping at a band edge.
+/// 3. Step-down hysteresis: the hold timer starts as soon as the average itself
+///    maps to a lower level, but the drop only fires once the time has been served
+///    AND even (average + HysteresisC) maps lower — no flapping at a band edge.
 /// 4. Slew limit: the output glides toward the target level at a bounded %/s.
 /// 5. Zero snap: target levels below ZeroSnapPercent collapse to 0 — the fan either
 ///    runs at a meaningful speed or stays fully stopped, never crawls.
@@ -49,7 +49,7 @@ public class ResponseFilter
     public double TargetLevel => double.IsNaN(_targetLevel) ? 0 : _targetLevel;
     /// <summary>The curve's level was above 0 but collapsed to 0 by the zero snap.</summary>
     public bool SnappedToZero { get; private set; }
-    /// <summary>Average maps to a lower level, but not yet HysteresisC clear of the band edge.</summary>
+    /// <summary>Hold time served, but the average is not yet HysteresisC clear of the band edge.</summary>
     public bool HysteresisHolding { get; private set; }
     /// <summary>Level a pending step-down will drop to (NaN when none is pending).</summary>
     public double PendingDownLevel { get; private set; } = double.NaN;
@@ -92,30 +92,33 @@ public class ResponseFilter
             _targetLevel = levelAtAvg; // up (possibly several steps) as soon as the average says so
             _downSince = double.NaN;
         }
-        else
+        else if (levelAtAvg < _targetLevel)
         {
-            // Down only when the average has fallen clearly below the band edge
-            // (temperature margin) AND stayed there for StepDownHoldSeconds (time margin).
+            // Down: the hold timer runs from the moment the average itself maps
+            // lower; the drop additionally needs (average + HysteresisC) to map
+            // lower at that moment — reaching the band starts the clock, clearing
+            // its edge by the margin permits the step.
+            if (double.IsNaN(_downSince)) _downSince = now;
             double levelWithMargin = Snap(curve.Evaluate(avg + HysteresisC));
-            if (levelWithMargin < _targetLevel)
+            bool held = now - _downSince >= StepDownHoldSeconds;
+            if (held && levelWithMargin < _targetLevel)
             {
-                if (double.IsNaN(_downSince)) _downSince = now;
-                if (now - _downSince >= StepDownHoldSeconds)
-                {
-                    _targetLevel = levelWithMargin;
-                    _downSince = double.NaN;
-                }
-                else
-                {
-                    PendingDownLevel = levelWithMargin;
-                    DownHoldRemaining = StepDownHoldSeconds - (now - _downSince);
-                }
+                _targetLevel = levelWithMargin;
+                _downSince = double.NaN;
+            }
+            else if (!held)
+            {
+                PendingDownLevel = levelWithMargin < _targetLevel ? levelWithMargin : levelAtAvg;
+                DownHoldRemaining = StepDownHoldSeconds - (now - _downSince);
             }
             else
             {
-                _downSince = double.NaN;
-                HysteresisHolding = levelAtAvg < _targetLevel;
+                HysteresisHolding = true; // time served, offset not yet cleared
             }
+        }
+        else
+        {
+            _downSince = double.NaN;
         }
 
         if (double.IsNaN(_output)) _output = _targetLevel;

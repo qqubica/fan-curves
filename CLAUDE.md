@@ -36,9 +36,12 @@ No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
   - `ResponseFilter` — **the MacBook feel lives here, not in the curve shape**:
     the curve is driven by the rolling AVERAGE temp over AveragingSeconds (default
     20 s — spikes barely move it), the target may jump multiple steps at once,
-    step-down needs (avg + HysteresisC) to map lower AND that condition to hold
-    continuously for StepDownHoldSeconds (default 10 s; timer resets if the average
-    pops back up) — no flapping at band edges,
+    step-down hold timer starts the moment the avg ITSELF maps lower (2026-07-29,
+    Kuba's ask — was: timer only ran once the offset was met, so the total wait
+    was offset + full hold); the drop fires once StepDownHoldSeconds (default
+    10 s) are served AND (avg + HysteresisC) maps lower at that moment (time
+    served but offset unmet shows the Hysteresis why-chip; timer resets if the
+    average pops back into the band) — no flapping at band edges,
     slew-rate limit (%/s, default 8 up and 8 down) for gradual audible ramps.
   - `PowerBudget.cs` — `ThermalModel` (learned C / R(fan%) / base, persisted per
     channel; `Reset()` returns it to the seeds, `Resistances` exposes the anchors
