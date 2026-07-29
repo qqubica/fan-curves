@@ -159,6 +159,7 @@ public class FanEngine : IDisposable
         N(p.ReliefEnabled ? p.ReliefMaxWatts : 0);
         N(p.PowerFloorEnabled ? p.PowerFloorPercentAt100W : 0);
         N(p.PowerFloorEnabled ? p.PowerFloorPercentAt200W : 0);
+        sb.Append(p.FutilityProbeEnabled ? 'F' : 'f').Append(p.FloorGuardEnabled ? 'G' : 'g');
         N(p.OverrideTempC); N(p.BudgetCeilingMarginC); N(p.SteadyTargetMarginC);
         N(p.PowerTrendSeconds); N(p.PowerSlopeSeconds); N(p.PowerNowSeconds);
         N(p.OverrideReleaseC); N(p.OverrideReleaseSeconds);
@@ -196,7 +197,7 @@ public class FanEngine : IDisposable
             // A changed fingerprint = a user edit landed since the last tick →
             // apply it on THIS tick, skipping holds and the slew glide.
             string sig = SettingsSignature();
-            if (_settingsSig != null && sig != _settingsSig)
+            if (_settingsSig != null && sig != _settingsSig && Profile.InstantApplyEnabled)
             {
                 foreach (var f in _filters.Values) f.ApplyNow();
                 foreach (var f in _powerFilters.Values) f.ApplyNow();
@@ -412,10 +413,11 @@ public class FanEngine : IDisposable
                         budget.OverrideReleaseC = Profile.OverrideReleaseC;
                         budget.OverrideReleaseSeconds = Profile.OverrideReleaseSeconds;
                         budget.LearningEnabled = Profile.ThermalLearningEnabled;
+                        budget.FutilityProbeEnabled = Profile.FutilityProbeEnabled;
                         // Auto mode: the temperature side's demand is a hard floor, and
                         // the staircase's next step is a line the buffer drains toward.
                         budget.FloorPercent = filter?.TargetLevel ?? 0;
-                        budget.GuardFloor = filter != null;
+                        budget.GuardFloor = filter != null && Profile.FloorGuardEnabled;
 
                         filtered = budget.Step(now, temp.Value, watts.Value, curve);
                         budget.Model.StoreTo(ch); // learned values ride along in the profile

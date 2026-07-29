@@ -223,6 +223,14 @@ public class PowerBudgetController
     public double OverrideReleaseSeconds { get; set; } = 10;
     /// <summary>When false the model stops refining itself (frozen at today's values).</summary>
     public bool LearningEnabled { get; set; } = true;
+    /// <summary>The futility probe: an up-step taken from a settled state is an experiment
+    /// that must pay for itself in degrees, and a failed one latches "nothing above this
+    /// buys anything here". When false no experiment is opened, no latch is set (a
+    /// standing one is dropped on the next Step) and the demand/ramp fall back to the
+    /// top of the ladder whenever no level holds the aim — i.e. a die-limited load is
+    /// marched to max fan again. Downward relief arms only behind a latch, so it is off
+    /// with this.</summary>
+    public bool FutilityProbeEnabled { get; set; } = true;
     /// <summary>Downward relief only runs while the sustained draw is under this many
     /// watts — above it the staircase floor rules unconditionally (Kuba's 190 W cap).</summary>
     public double ReliefMaxWatts { get; set; } = 190;
@@ -373,6 +381,17 @@ public class PowerBudgetController
 
         double dt = double.IsNaN(_lastTime) ? 1 : Math.Clamp(now - _lastTime, 0.05, 10);
         _lastTime = now;
+
+        // Probe switched off: drop everything it owns, or a latch/waiver taken while it
+        // was on would stand forever (nothing else clears them).
+        if (!FutilityProbeEnabled)
+        {
+            _expFrom = double.NaN;
+            _futileAbove = double.NaN;
+            _reliefLevel = double.NaN;
+            _reliefBad = double.NaN;
+            _descFrom = double.NaN;
+        }
 
         // Settings just changed (ApplyNow): whatever transition the new settings imply
         // must happen on THIS tick — pending holds count as already served, the
@@ -755,7 +774,7 @@ public class PowerBudgetController
                 if (l <= _target + 0.01) continue;
                 if (Eq(l, PowerNow) <= steadyTarget) { up = l; holdsAim = true; break; }
             }
-            if (!holdsAim)
+            if (!holdsAim && FutilityProbeEnabled)
             {
                 // Aim unreachable at any higher speed — die-limited territory. Step only
                 // to the futility edge (lowest level within HysteresisC of the ladder's
@@ -785,7 +804,7 @@ public class PowerBudgetController
                 {
                     _failedLevel = _target;
                     _failedPowerAvg = PowerAvg;
-                    if (Math.Abs(slope) < 0.005)
+                    if (FutilityProbeEnabled && Math.Abs(slope) < 0.005)
                     {
                         _expFrom = _target;
                         _expTrend = trendTemp;
@@ -821,7 +840,7 @@ public class PowerBudgetController
             {
                 _failedLevel = _target;      // measured: this level cannot hold the aim
                 _failedPowerAvg = PowerAvg;  // at this sustained draw
-                if (Math.Abs(slope) < 0.005)
+                if (FutilityProbeEnabled && Math.Abs(slope) < 0.005)
                 {
                     _expFrom = _target;      // futility experiment: settled state left
                     _expTrend = trendTemp;
@@ -965,6 +984,7 @@ public class PowerBudgetController
     {
         foreach (var l in ladder)
             if (Eq(l, watts) <= aim) return l;
+        if (!FutilityProbeEnabled) return ladder[^1]; // probe off: ask for everything
         double best = Eq(ladder[^1], watts);
         foreach (var l in ladder)
             if (Eq(l, watts) <= best + HysteresisC) return l;

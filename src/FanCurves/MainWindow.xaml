@@ -859,6 +859,12 @@
                                                     IsSnapToTickEnabled="True" ValueChanged="OnStopProbeParamChanged"/>
                                         </StackPanel>
 
+                                        <CheckBox x:Name="InstantApplyCheck" Margin="0,10,0,2"
+                                                  Checked="OnInstantApplyCheckChanged" Unchecked="OnInstantApplyCheckChanged"
+                                                  ToolTip="A setting you change here — a slider, a curve point, a preset, the control mode — is adopted on the very next tick: no step-down hold to wait out, no slew glide, the fan jumps to what the new setting asks for. Off = the edit is read at once but only felt after the normal holds and ramps. All channels.">
+                                            <TextBlock local:Tracked.Text="INSTANT APPLY" Style="{StaticResource MicroLabel}"/>
+                                        </CheckBox>
+
                                     </StackPanel>
 
                                     <Border Grid.Column="1" Width="1" Background="#14ffffff"
@@ -894,7 +900,21 @@
                                         <TextBlock x:Name="PowerInfoText" FontFamily="{StaticResource Mono}" FontSize="10.5"
                                                    Foreground="#66ffffff" TextWrapping="Wrap" Margin="0,-4,0,0"/>
 
-                                        <CheckBox x:Name="ReliefCheck" Margin="0,14,0,2"
+                                        <!-- Checkbox-only groups: the feature has no knobs of
+                                             its own, so the master switch is the whole group. -->
+                                        <CheckBox x:Name="FloorGuardCheck" Margin="0,14,0,2"
+                                                  Checked="OnFloorGuardCheckChanged" Unchecked="OnFloorGuardCheckChanged"
+                                                  ToolTip="Auto mode only: the power side also watches the heat buffer draining toward the temperature curve's next step, so it can glide in ahead of the staircase instead of being overtaken by it — and a curve step that out-ranks the power side is taken as measurement (the fan then holds steadily instead of following the curve back down). Off = the pre-guard Auto behaviour.">
+                                            <TextBlock local:Tracked.Text="AUTO FLOOR GUARD" Style="{StaticResource MicroLabel}"/>
+                                        </CheckBox>
+
+                                        <CheckBox x:Name="FutilityCheck" Margin="0,10,0,2"
+                                                  Checked="OnFutilityCheckChanged" Unchecked="OnFutilityCheckChanged"
+                                                  ToolTip="A step up taken from a settled state must pay for itself in degrees: if the temperature is unchanged a hold later, the step is taken back and further steps are latched off — a die-limited load (same temperature at every fan speed) is not marched to 100% for fractions of a degree. Downward relief only arms behind this latch, so it needs this on. Power and Auto modes.">
+                                            <TextBlock local:Tracked.Text="FUTILITY PROBE" Style="{StaticResource MicroLabel}"/>
+                                        </CheckBox>
+
+                                        <CheckBox x:Name="ReliefCheck" Margin="0,10,0,2"
                                                   Checked="OnReliefCheckChanged" Unchecked="OnReliefCheckChanged"
                                                   ToolTip="Once more fan is measured futile — a die-limited load reads the same temperature at every speed — the output may probe below the temperature staircase: less fan, never none. Power and Auto modes.">
                                             <TextBlock local:Tracked.Text="DOWNWARD RELIEF" Style="{StaticResource MicroLabel}"/>
@@ -1018,15 +1038,14 @@
                                                    Foreground="#66ffffff" TextWrapping="Wrap" Margin="0,4,0,0"
                                                    ToolTip="The sliders the headroom prediction reads: 'Ramp when headroom under' = the lead (fans step up when the predicted time to the sustained aim drops under it); the channel's 'Step-down hysteresis' = the ± dead band around the aim (accusations need the equilibrium past aim+band, step-downs need the lower level to hold aim−band); 'Power averaging' = the sustained draw behind the predicted equilibrium; sink trend + trend slope windows sum to the quiet gate — headroom only counts down once the draw has been steady for that long, so short spikes never move it."/>
 
-                                        <!-- What the controller has worked out about this cooler. -->
-                                        <TextBlock local:Tracked.Text="LEARNED MODEL" Style="{StaticResource MicroLabel}"
-                                                   Margin="0,14,0,6"/>
-
-                                        <CheckBox x:Name="LearnCheck"
-                                                  FontSize="11.5" Foreground="#8cffffff"
+                                        <!-- What the controller has worked out about this cooler.
+                                             The master checkbox is the group header, like the
+                                             other features; the readout below stays readable
+                                             (dimmed) with learning frozen. -->
+                                        <CheckBox x:Name="LearnCheck" Margin="0,14,0,2"
                                                   Checked="OnLearnCheckChanged" Unchecked="OnLearnCheckChanged"
                                                   ToolTip="The controller refines the thermal mass, the cooling resistance at each fan speed and the idle baseline from what it observes. Uncheck to freeze the model at today's values.">
-                                            <TextBlock Text="Keep learning this cooler (mass, resistance, baseline)" TextWrapping="Wrap"/>
+                                            <TextBlock local:Tracked.Text="LEARNED MODEL" Style="{StaticResource MicroLabel}"/>
                                         </CheckBox>
 
                                         <TextBlock x:Name="ModelInfoText" FontFamily="{StaticResource Mono}" FontSize="10.5"
@@ -1049,6 +1068,17 @@
                                 <ItemsControl x:Name="ControlChecks" Margin="0,6,0,12"/>
 
                                 <Border Height="1" Background="#14ffffff" Margin="0,4,0,16"/>
+                                <CheckBox x:Name="TelemetryCheck" Margin="0,0,0,8"
+                                          Checked="OnTelemetryCheckChanged" Unchecked="OnTelemetryCheckChanged"
+                                          ToolTip="The review log under logs\: one CSV row per channel per tick (every controller input and output, daily file, 7 days kept) plus behavior.txt, which records only the changes — fan on/off, target steps, reason transitions and a full settings line whenever a knob moves. Off writes nothing.">
+                                    <TextBlock local:Tracked.Text="REVIEW LOGGING" Style="{StaticResource MicroLabel}"/>
+                                </CheckBox>
+                                <CheckBox x:Name="HighPriorityCheck" Margin="0,0,0,16"
+                                          Checked="OnHighPriorityCheckChanged" Unchecked="OnHighPriorityCheckChanged"
+                                          ToolTip="Run the process at High priority so a fully loaded CPU cannot starve the engine tick or the window (a 32-core load once made Windows ghost the UI). Takes effect immediately; costs a few % of one core.">
+                                    <TextBlock local:Tracked.Text="HIGH PROCESS PRIORITY" Style="{StaticResource MicroLabel}"/>
+                                </CheckBox>
+
                                 <TextBlock local:Tracked.Text="BACKEND" Style="{StaticResource MicroLabel}" Margin="0,0,0,8"/>
                                 <TextBlock x:Name="BackendText" FontFamily="{StaticResource Mono}" FontSize="10.5"
                                            Foreground="#66ffffff" TextWrapping="Wrap"/>

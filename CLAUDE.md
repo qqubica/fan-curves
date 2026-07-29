@@ -158,10 +158,11 @@ No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
     (2026-07-29 — the floor slider moved out of CHANNEL RESPONSE into its own
     group, relabelled "Never below"; see the behaviour contract) /
     STOPPED-FAN KICK / STOP INSTEAD OF SLOW (zero snap) / TRIAL STOPS (stop
-    probe). Right column:
+    probe) / INSTANT APPLY. Right column:
     POWER CONTROL (power averaging, power-curve hysteresis, ramp lead — that label
     shortened from "Ramp when headroom under", which had collided with its
-    "1 min 30 s" value) then DOWNWARD RELIEF / POWER FLOOR / HARD OVERRIDE (the
+    "1 min 30 s" value) then AUTO FLOOR GUARD / FUTILITY PROBE /
+    DOWNWARD RELIEF / POWER FLOOR / HARD OVERRIDE (the
     fuse's trigger + release drop/hold, gathered from POWER CONTROL and BUDGET
     INTERNALS; deliberately **no off switch** — the fuse is the last line before
     the BIOS would have to save the die) / BUDGET INTERNALS (ceiling/aim margins +
@@ -174,6 +175,19 @@ No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
     `PowerBudgetController` needed no changes. A group whose switch is off **dims
     to 45 % opacity but stays editable** (the 2026-07-21 reachability rule);
     the behavior log's settings line prints `relief off` / `pfloor off`.
+    **Switch inventory completed 2026-07-29** (Kuba: "are there any more functions
+    missing the on/off switch?"): every remaining feature got one — the futility
+    probe, the Auto floor guard, instant apply, review logging and High process
+    priority (see the behaviour contract for each), and `LEARNED MODEL`'s existing
+    checkbox became the group header like the rest. Groups whose feature has no
+    knobs of its own are a bare header checkbox (AUTO FLOOR GUARD, FUTILITY PROBE,
+    INSTANT APPLY, REVIEW LOGGING, HIGH PROCESS PRIORITY — the last two full-width
+    above BACKEND, since they are app plumbing rather than control). Exactly two
+    things still have no switch, both on purpose: **HARD OVERRIDE** (the fuse — the
+    last line before the BIOS would have to save the die) and **CHANNEL RESPONSE**
+    (following the curve at all; its knobs can be flattened individually).
+    DOWNWARD RELIEF's body dims when the futility probe is off as well as its own
+    switch — relief can only arm behind the latch.
     Curve editing (drag points, double-click
     add, right-click remove; edits snap to whole °C / whole %, bands stay ≥1 °C wide,
     max 12 points per channel; Ctrl+Z / Ctrl+Y — also Ctrl+Shift+Z — undo/redo point
@@ -546,6 +560,15 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   step, proves it futile, and holds — a boost-clamped CPU converting fan into
   watts at constant temp (draw rose ~7 W per step all session) counts as futile by
   design; a clearly grown draw (>10%) re-baselines instead.
+  Switchable since 2026-07-29: `Profile.FutilityProbeEnabled` →
+  `PowerBudgetController.FutilityProbeEnabled` (default true, app-level, dev-panel
+  group FUTILITY PROBE). Off: no experiment is opened, no latch set (a standing
+  one — and any relief waiver behind it — is dropped on the next `Step`), and both
+  `UsefulLevel` and the ramp branch fall back to `ladder[^1]` when no level holds
+  the aim, i.e. the pre-2026-07-27 march to max fan. **Downward relief arms only
+  behind the latch, so it is off with this too.** Settings line logs
+  `futility on/off`; harness check: clamped die at 85.3°/180 W peaks at 90% and
+  settles back to 81% with the probe on, marches to 100% with it off.
   **Downward relief (same night, Kuba: "try lowering the speed; if the parameters
   stay the same lower it, if they start rising raise the RPM" + "only if the
   sustained load is below 190 W, add a slider" + "step-down hold applies to the
@@ -692,7 +715,12 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   level as its own target, so after the floor recedes the budget holds the fan
   steadily (why-chip: BudgetRamp "curve asks 0%") instead of following it back down
   into the cycle; the hold unwinds through normal brand forgiveness once the
-  sustained draw genuinely drops. Sixth scratchpad harness (plant tuned to the
+  sustained draw genuinely drops. Switchable since 2026-07-29:
+  `Profile.FloorGuardEnabled` (default true, app-level, dev-panel group AUTO FLOOR
+  GUARD) — the engine feeds `budget.GuardFloor = filter != null &&
+  Profile.FloorGuardEnabled`, so off returns Auto to its pre-guard behaviour and
+  Power mode is unaffected either way; settings line logs `floorGuard on/off`.
+  Sixth scratchpad harness (plant tuned to the
   telemetry: passive die eq ≈ 60° at 38 W): old Auto 9 ON/OFF cycles per hour →
   guarded Auto one ON then steady 20 %, die 54.9°; true idle 26 W stays silent;
   draw-drop to 27 W stops the fan for good; sparse 150 W spikes never move it; 90 W
@@ -717,7 +745,15 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   level, correctly). Verified by a scratchpad harness (15 checks): filter snap
   down/up mid-hold and mid-slew, budget snap with output jump, fingerprint
   stability against per-tick learned-value writes.
-- **Process priority High (2026-07-29)**: set best-effort in `App.OnStartup`. A
+  Switchable since 2026-07-29: `Profile.InstantApplyEnabled` (default true,
+  app-level) — off, the fingerprint is still tracked but no `ApplyNow()` is sent,
+  so an edit is read within a tick and *felt* after the normal hold + ramp (the
+  pre-2026-07-29 behaviour). Dev-panel group INSTANT APPLY (bare header checkbox);
+  settings line logs `instantApply on/off`.
+- **Process priority High (2026-07-29)**: set best-effort in `App.OnStartup` (via
+  `App.ApplyProcessPriority`, now called right after the profile loads so the
+  `Profile.HighPriorityEnabled` switch — dev panel HIGH PROCESS PRIORITY, default
+  true — is honoured; toggling it applies High/Normal immediately). A
   32-core chess run starved the normal-priority UI thread until Windows ghosted
   the window (blank → reappear), which read as "the app closed and opened again";
   the process never actually restarted (same PID across the session — events.txt
@@ -820,7 +856,11 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   UTF-8 **with BOM** — Windows PowerShell 5.1 reads BOM-less UTF-8 as ANSI and
   mangles °/·/∞. Writers buffer (CSV flushed every 5 s, behavior per event);
   first failed write disables logging for the session — it must never take the
-  engine down.
+  engine down. Switchable since 2026-07-29: `Profile.TelemetryLoggingEnabled`
+  (default true, dev-panel REVIEW LOGGING above BACKEND) gates the `engine.Ticked`
+  hook in `App`; the toggle writes a `·· review logging on/off` marker and calls
+  the new `TelemetryLog.Flush()` when switching off, so the ≤5 s of buffered CSV
+  rows are not stranded until process exit.
 - **Installed & verified on real hardware 2026-07-23** (the X870 Steel Legend /
   9950X3D build): v0.1.0 exe at `%LOCALAPPDATA%\Programs\FanCurves\FanCurves.exe`,
   autostart task registered, PawnIO 2.2.0 installed (silent flags are

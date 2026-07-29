@@ -63,6 +63,14 @@ public class Profile
     public bool AutostartEnabled { get; set; } = true;
     /// <summary>When true the close button hides to the tray instead of exiting.</summary>
     public bool MinimizeToTrayOnClose { get; set; } = true;
+    /// <summary>When false a settings edit is only felt after the normal holds/slew
+    /// instead of being adopted on the tick it lands (see FanEngine.SettingsSignature).</summary>
+    public bool InstantApplyEnabled { get; set; } = true;
+    /// <summary>When false nothing is written to logs\ (per-tick CSV + behavior.txt).</summary>
+    public bool TelemetryLoggingEnabled { get; set; } = true;
+    /// <summary>When false the process runs at normal priority instead of High — High
+    /// keeps the engine tick and the UI scheduled under a fully loaded CPU.</summary>
+    public bool HighPriorityEnabled { get; set; } = true;
     /// <summary>When false, fans sitting at 0% are never periodically spun up.</summary>
     public bool IdleKickEnabled { get; set; } = false;
     /// <summary>Seconds a driven fan must sit at 0% before a kick fires.</summary>
@@ -113,6 +121,16 @@ public class Profile
     /// all the way to a stop wherever the curve/budget asks for less than the floor.
     /// App-level like the other feature switches; the per-channel value itself is kept.</summary>
     public bool SafetyFloorEnabled { get; set; } = true;
+    /// <summary>When false the futility probe never runs: no up-step is taken back, no
+    /// futility latch is set, and demand/ramp fall back to "the top of the ladder" when
+    /// no level can hold the aim. Downward relief needs the latch, so it never arms
+    /// either. On is the 2026-07-27 behaviour (a die-limited load is not marched to
+    /// 100% for fractions of a degree).</summary>
+    public bool FutilityProbeEnabled { get; set; } = true;
+    /// <summary>Auto mode only: when false the budget stops watching the buffer drain
+    /// toward the temperature staircase's next step, and a floor step that out-ranks its
+    /// target is no longer treated as measurement (pre-2026-07-27 Auto).</summary>
+    public bool FloorGuardEnabled { get; set; } = true;
     /// <summary>When false, downward relief never probes below the staircase floor
     /// (a standing waiver is withdrawn on the next tick).</summary>
     public bool ReliefEnabled { get; set; } = true;

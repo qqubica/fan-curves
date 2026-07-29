@@ -64,6 +64,13 @@ public class TelemetryLog : IDisposable
         });
     }
 
+    /// <summary>Push the buffered CSV rows to disk now — the per-tick writer only flushes
+    /// every 5 s, so switching logging off would otherwise strand the last few rows.</summary>
+    public void Flush()
+    {
+        lock (_lock) Guarded(() => { _csv?.Flush(); _behavior?.Flush(); });
+    }
+
     /// <summary>Called once per engine tick, on the engine's timer thread.</summary>
     public void Record(Profile profile, IReadOnlyList<ChannelStatus> statuses)
     {
@@ -185,6 +192,9 @@ public class TelemetryLog : IDisposable
             ? Inv($" · probe {p.StopProbeRunSeconds:0}s/{p.StopProbeSeconds:0}s/{p.StopProbeStableRangeC:0.#}°/{p.StopProbeRetrySeconds:0}s/<{p.StopProbeMaxTempC:0}°")
             : " · probe off");
         sb.Append(Inv($" · pwrAvg {p.PowerAveragingSeconds:0}s · pwrHyst {p.PowerCurveHysteresisW:0}W · lead {p.RampLeadSeconds:0}s"));
+        sb.Append($" · futility {(p.FutilityProbeEnabled ? "on" : "off")}");
+        sb.Append($" · floorGuard {(p.FloorGuardEnabled ? "on" : "off")}");
+        sb.Append($" · instantApply {(p.InstantApplyEnabled ? "on" : "off")}");
         sb.Append(p.ReliefEnabled ? Inv($" · relief <{p.ReliefMaxWatts:0}W") : " · relief off");
         sb.Append(p.PowerFloorEnabled
             ? Inv($" · pfloor {p.PowerFloorPercentAt100W:0}%@100W/{p.PowerFloorPercentAt200W:0}%@200W")

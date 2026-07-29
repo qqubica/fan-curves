@@ -35,6 +35,20 @@ public partial class App : Application
     /// <summary>Per-tick data + behavior-change review log (see TelemetryLog).</summary>
     public static TelemetryLog? Telemetry { get; private set; }
 
+    /// <summary>High while fan control must outrun a saturated CPU; Normal when the user
+    /// turns the switch off. Best-effort — a refused priority change is not worth a crash.</summary>
+    public static void ApplyProcessPriority(bool high)
+    {
+        try
+        {
+            using var self = System.Diagnostics.Process.GetCurrentProcess();
+            self.PriorityClass = high
+                ? System.Diagnostics.ProcessPriorityClass.High
+                : System.Diagnostics.ProcessPriorityClass.Normal;
+        }
+        catch { /* best-effort */ }
+    }
+
     /// <summary>Lifecycle/crash log → %AppData%\FanCurves\events.txt (best-effort).</summary>
     public static void Log(string message)
     {
@@ -63,17 +77,6 @@ public partial class App : Application
 
         Log($"startup (args: {string.Join(" ", e.Args)}, elevated: {IsElevated})");
 
-        // A saturated CPU must not starve fan control: with a 32-core chess engine
-        // running, the normal-priority UI thread waited seconds for time slices and
-        // Windows ghosted the window (it blanks and reappears — looks like the app
-        // restarting, 2026-07-29), and the engine tick + PWM writes ride on the same
-        // process. High priority costs nothing here — the app uses a few % of one core.
-        try
-        {
-            using var self = System.Diagnostics.Process.GetCurrentProcess();
-            self.PriorityClass = System.Diagnostics.ProcessPriorityClass.High;
-        }
-        catch { /* best-effort */ }
         AppDomain.CurrentDomain.UnhandledException += (_, ex) =>
             Log($"CRASH (AppDomain): {ex.ExceptionObject}");
         DispatcherUnhandledException += (_, ex) =>
@@ -113,6 +116,13 @@ public partial class App : Application
 
         var profile = Profile.LoadOrDefault();
 
+        // A saturated CPU must not starve fan control: with a 32-core chess engine
+        // running, the normal-priority UI thread waited seconds for time slices and
+        // Windows ghosted the window (it blanks and reappears — looks like the app
+        // restarting, 2026-07-29), and the engine tick + PWM writes ride on the same
+        // process. High priority costs nothing here — the app uses a few % of one core.
+        ApplyProcessPriority(profile.HighPriorityEnabled);
+
         // Register start-with-Windows, except in dev flows (--sim / --screenshot)
         // or when the user opted out in the close dialog.
         if (!forceSim && screenshotPath == null && profile.AutostartEnabled) Autostart.Ensure();
@@ -126,7 +136,10 @@ public partial class App : Application
         // Review log: per-tick CSV + behavior transitions → %AppData%\FanCurves\logs\.
         // Hooked on the engine's own thread so it keeps recording even if the UI faults.
         Telemetry = new TelemetryLog(Profile.ConfigDir, simulated: Profile.ReadOnly);
-        engine.Ticked += statuses => Telemetry?.Record(engine.Profile, statuses);
+        engine.Ticked += statuses =>
+        {
+            if (engine.Profile.TelemetryLoggingEnabled) Telemetry?.Record(engine.Profile, statuses);
+        };
         AppDomain.CurrentDomain.ProcessExit += (_, _) => Telemetry?.Dispose();
 
         var win = new MainWindow(hw, engine, profile, devMode);

@@ -103,6 +103,11 @@ public partial class MainWindow : Window
         ZeroSnapCheck.IsChecked = profile.ZeroSnapEnabled;
         StopProbeCheck.IsChecked = profile.StopProbeEnabled;
         SafetyFloorCheck.IsChecked = profile.SafetyFloorEnabled;
+        InstantApplyCheck.IsChecked = profile.InstantApplyEnabled;
+        FloorGuardCheck.IsChecked = profile.FloorGuardEnabled;
+        FutilityCheck.IsChecked = profile.FutilityProbeEnabled;
+        TelemetryCheck.IsChecked = profile.TelemetryLoggingEnabled;
+        HighPriorityCheck.IsChecked = profile.HighPriorityEnabled;
         ReliefCheck.IsChecked = profile.ReliefEnabled;
         PowerFloorCheck.IsChecked = profile.PowerFloorEnabled;
         ModeSwitch.SelectedIndex = (int)profile.ControlMode;
@@ -742,7 +747,10 @@ public partial class MainWindow : Window
         ZeroSnapGroup.Opacity = ZeroSnapCheck.IsChecked == true ? 1.0 : 0.45;
         StopProbeGroup.Opacity = StopProbeCheck.IsChecked == true ? 1.0 : 0.45;
         SafetyFloorGroup.Opacity = SafetyFloorCheck.IsChecked == true ? 1.0 : 0.45;
-        ReliefGroup.Opacity = ReliefCheck.IsChecked == true ? 1.0 : 0.45;
+        // Relief can only arm behind the futility latch, so the probe being off makes it
+        // inactive too — show that rather than leaving a live-looking slider.
+        ReliefGroup.Opacity = ReliefCheck.IsChecked == true && FutilityCheck.IsChecked == true
+            ? 1.0 : 0.45;
         PowerFloorGroup.Opacity = PowerFloorCheck.IsChecked == true ? 1.0 : 0.45;
     }
 
@@ -808,6 +816,48 @@ public partial class MainWindow : Window
         _profile.SafetyFloorEnabled = SafetyFloorCheck.IsChecked == true;
         _profile.Save();
         UpdateFeatureGroupDim();
+    }
+
+    private void OnInstantApplyCheckChanged(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded) return; // constructor sets IsChecked from the profile
+        _profile.InstantApplyEnabled = InstantApplyCheck.IsChecked == true;
+        _profile.Save();
+    }
+
+    private void OnFloorGuardCheckChanged(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded) return; // constructor sets IsChecked from the profile
+        _profile.FloorGuardEnabled = FloorGuardCheck.IsChecked == true;
+        _profile.Save();
+    }
+
+    private void OnFutilityCheckChanged(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded) return; // constructor sets IsChecked from the profile
+        _profile.FutilityProbeEnabled = FutilityCheck.IsChecked == true;
+        _profile.Save();
+        UpdateFeatureGroupDim(); // relief only arms behind the latch — show it dimmed
+    }
+
+    private void OnTelemetryCheckChanged(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded) return; // constructor sets IsChecked from the profile
+        bool on = TelemetryCheck.IsChecked == true;
+        _profile.TelemetryLoggingEnabled = on;
+        _profile.Save();
+        // Mark the seam in the log itself, and push the buffered rows out before the
+        // per-tick writer goes quiet (it only flushes every 5 s).
+        App.Telemetry?.Event(on ? "review logging on" : "review logging off");
+        if (!on) App.Telemetry?.Flush();
+    }
+
+    private void OnHighPriorityCheckChanged(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded) return; // constructor sets IsChecked from the profile
+        _profile.HighPriorityEnabled = HighPriorityCheck.IsChecked == true;
+        _profile.Save();
+        App.ApplyProcessPriority(_profile.HighPriorityEnabled);
     }
 
     private void OnReliefCheckChanged(object sender, RoutedEventArgs e)
