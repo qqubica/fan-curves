@@ -37,6 +37,11 @@ public class SimulatedBackend : IHardwareBackend
         new("sim/fan/case", "CHA_FAN1 (P14 Pro ×4)"),
     };
 
+    // No library behind this backend keeps value history — the setting is a no-op,
+    // but the sensor count keeps the dev panel's RAM estimate honest in --sim.
+    public int InternalSensorCount => Sensors.Count;
+    public void SetSensorHistoryWindow(TimeSpan window) { }
+
     public void Update()
     {
         _t += 1.0;

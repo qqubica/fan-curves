@@ -41,6 +41,8 @@ public class LhmBackend : IHardwareBackend
     {
         void Walk(IHardware hw)
         {
+            // Late-appearing sensors must inherit the configured history window too.
+            hw.SensorAdded += s => s.ValuesTimeWindow = _historyWindow;
             // GPU fans belong to the GPU driver/firmware, never to this app — only
             // motherboard (Super I/O) headers are offered as controls. GPU temps are
             // still exposed as sensors (case-fan curves key off them).
@@ -98,6 +100,35 @@ public class LhmBackend : IHardwareBackend
 
     public double? ReadControlRpm(string controlId) =>
         _rpmForControl.TryGetValue(controlId, out var s) ? s?.Value : null;
+
+    // LHM's own default: every sensor keeps a rolling 1-day List<SensorValue>,
+    // appended ~every 4th Update(). This app never reads it — at a ~1 s tick and
+    // 150+ internal sensors it is tens of MB of pure ballast, so the engine
+    // overrides it with Profile.SensorHistoryHours on the first tick.
+    private TimeSpan _historyWindow = TimeSpan.FromDays(1);
+
+    public int InternalSensorCount
+    {
+        get { int n = 0; ForEachSensor(_ => n++); return n; }
+    }
+
+    public void SetSensorHistoryWindow(TimeSpan window)
+    {
+        _historyWindow = window;
+        // Zero clears the list and stops future appends (Sensor.Value setter skips
+        // history entirely at TimeSpan.Zero); live Value reads are unaffected.
+        ForEachSensor(s => s.ValuesTimeWindow = window);
+    }
+
+    private void ForEachSensor(Action<ISensor> act)
+    {
+        void Walk(IHardware hw)
+        {
+            foreach (var s in hw.Sensors) act(s);
+            foreach (var sub in hw.SubHardware) Walk(sub);
+        }
+        foreach (var hw in _computer.Hardware) Walk(hw);
+    }
 
     public void Dispose()
     {

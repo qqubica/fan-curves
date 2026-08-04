@@ -74,6 +74,7 @@ public class FanEngine : IDisposable
     private readonly object _lock = new();
     private Timer? _timer;
     private string? _settingsSig;
+    private double _sensorHistoryHours = double.NaN; // NaN → applied on the first tick
 
     public Profile Profile { get; private set; }
     public bool Applying { get; private set; }
@@ -214,6 +215,14 @@ public class FanEngine : IDisposable
 
     private void TickCore()
     {
+        // Applied here, before Update(), so it runs on the same thread that appends
+        // to the library's per-sensor history lists (a UI-thread set would race the
+        // append) and so a launch with 0 h never accumulates a single entry.
+        if (_sensorHistoryHours != Profile.SensorHistoryHours)
+        {
+            _sensorHistoryHours = Profile.SensorHistoryHours;
+            _hw.SetSensorHistoryWindow(TimeSpan.FromHours(Math.Clamp(_sensorHistoryHours, 0, 24)));
+        }
         _hw.Update();
         double now = _clock.Elapsed.TotalSeconds;
         var statuses = new List<ChannelStatus>();

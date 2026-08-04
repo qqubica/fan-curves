@@ -98,6 +98,10 @@ public class Profile
     /// <summary>When false the process runs at normal priority instead of High — High
     /// keeps the engine tick and the UI scheduled under a fully loaded CPU.</summary>
     public bool HighPriorityEnabled { get; set; } = true;
+    /// <summary>How long the hardware library keeps per-sensor value history (LHM
+    /// defaults to 1 day for EVERY internal sensor — ~150+ on this machine, tens of
+    /// MB of RAM the app never reads). 0 = none; the engine applies it on tick.</summary>
+    public double SensorHistoryHours { get; set; } = 0;
     /// <summary>When false, fans sitting at 0% are never periodically spun up.</summary>
     public bool IdleKickEnabled { get; set; } = false;
     /// <summary>Seconds a driven fan must sit at 0% before a kick fires.</summary>

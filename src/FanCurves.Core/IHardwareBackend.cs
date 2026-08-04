@@ -25,4 +25,14 @@ public interface IHardwareBackend : IDisposable
 
     /// <summary>Fan RPM sensor associated with a control, if the backend knows it.</summary>
     double? ReadControlRpm(string controlId);
+
+    /// <summary>Every sensor the backend's library tracks internally — not just the
+    /// temp/rpm/power ones exposed in <see cref="Sensors"/> (LHM also records clocks,
+    /// loads, voltages…). Feeds the dev panel's history RAM estimate.</summary>
+    int InternalSensorCount { get; }
+
+    /// <summary>How long the backend's own library may keep per-sensor value history.
+    /// Zero = none. Call from the same thread as <see cref="Update"/> — the setter
+    /// mutates the same per-sensor lists the update appends to.</summary>
+    void SetSensorHistoryWindow(TimeSpan window);
 }

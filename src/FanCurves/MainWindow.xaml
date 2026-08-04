@@ -1102,6 +1102,16 @@
                                     <TextBlock local:Tracked.Text="HIGH PROCESS PRIORITY" Style="{StaticResource MicroLabel}"/>
                                 </CheckBox>
 
+                                <TextBlock local:Tracked.Text="SENSOR HISTORY" Style="{StaticResource MicroLabel}" Margin="0,0,0,6"
+                                           ToolTip="The hardware library keeps a rolling history of every value it reads, for every sensor it tracks internally (all clocks, loads and voltages — not just the ones listed under SOURCES), roughly one entry per 4 s. This app never reads that history; it only costs RAM, estimated next to the slider from the machine's real sensor count. Off (the default) clears it and stops the growth."/>
+                                <DockPanel>
+                                    <TextBlock DockPanel.Dock="Right" x:Name="SensorHistoryValue" FontFamily="{StaticResource Mono}"
+                                               FontSize="12" Foreground="#f2f2f4"/>
+                                    <TextBlock Text="Keep sensor readings for" FontSize="12" Foreground="#99ffffff"/>
+                                </DockPanel>
+                                <Slider x:Name="SensorHistorySlider" Minimum="0" Maximum="10" TickFrequency="1"
+                                        IsSnapToTickEnabled="True" ValueChanged="OnSensorHistoryChanged" Margin="0,0,0,16"/>
+
                                 <TextBlock local:Tracked.Text="BACKEND" Style="{StaticResource MicroLabel}" Margin="0,0,0,8"/>
                                 <TextBlock x:Name="BackendText" FontFamily="{StaticResource Mono}" FontSize="10.5"
                                            Foreground="#66ffffff" TextWrapping="Wrap"/>

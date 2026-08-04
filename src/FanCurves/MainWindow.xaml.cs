@@ -74,6 +74,20 @@ public partial class MainWindow : Window
     private static double AvgSecondsToNotch(double seconds) =>
         seconds <= 120 ? Math.Round(seconds / 5) : Math.Min(30, 24 + Math.Round((seconds - 120) / 30));
 
+    // SensorHistorySlider is notched over useful windows, not linear hours.
+    private static readonly double[] SensorHistoryNotchMinutes =
+        { 0, 5, 10, 15, 30, 60, 120, 240, 480, 720, 1440 };
+
+    private static int SensorHistoryHoursToNotch(double hours)
+    {
+        double minutes = hours * 60;
+        int best = 0;
+        for (int i = 1; i < SensorHistoryNotchMinutes.Length; i++)
+            if (Math.Abs(SensorHistoryNotchMinutes[i] - minutes) <
+                Math.Abs(SensorHistoryNotchMinutes[best] - minutes)) best = i;
+        return best;
+    }
+
     private static string FormatAvg(double s) =>
         s < 60 ? Inv($"{s:0} s")
         : s % 60 == 0 ? Inv($"{s / 60:0} min")
@@ -141,7 +155,9 @@ public partial class MainWindow : Window
         PowerNowSlider.Value = profile.PowerNowSeconds;
         ReleaseDropSlider.Value = profile.OverrideReleaseC;
         ReleaseHoldSlider.Value = profile.OverrideReleaseSeconds;
+        SensorHistorySlider.Value = SensorHistoryHoursToNotch(profile.SensorHistoryHours);
         _loadingUi = false;
+        UpdateSensorHistoryLabel();
         UpdateKickLabels();
         UpdateZeroSnapLabel();
         UpdateStopProbeLabels();
@@ -951,6 +967,26 @@ public partial class MainWindow : Window
         // per-tick writer goes quiet (it only flushes every 5 s).
         App.Telemetry?.Event(on ? "review logging on" : "review logging off");
         if (!on) App.Telemetry?.Flush();
+    }
+
+    private void OnSensorHistoryChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_loadingUi || SensorHistoryValue == null) return;
+        _profile.SensorHistoryHours = SensorHistoryNotchMinutes[(int)SensorHistorySlider.Value] / 60.0;
+        UpdateSensorHistoryLabel();
+        _profile.Save();
+        // The engine applies the window on its next tick (same thread as Update()).
+    }
+
+    private void UpdateSensorHistoryLabel()
+    {
+        double minutes = SensorHistoryNotchMinutes[(int)SensorHistorySlider.Value];
+        if (minutes <= 0) { SensorHistoryValue.Text = "off"; return; }
+        // LHM appends one 16-byte SensorValue per sensor every 4th update (~1 s tick),
+        // for every sensor it tracks internally, until entries age past the window.
+        double mb = _hw.InternalSensorCount * (minutes * 60 / 4.0) * 16 / (1024.0 * 1024.0);
+        string dur = minutes < 60 ? Inv($"{minutes:0} min") : Inv($"{minutes / 60:0} h");
+        SensorHistoryValue.Text = mb < 1 ? dur + " ≈ <1 MB" : Inv($"{dur} ≈ {mb:0} MB");
     }
 
     private void OnHighPriorityCheckChanged(object sender, RoutedEventArgs e)

@@ -625,6 +625,21 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   window); the app uses a few % of one core. Note: the 2026-07-28 Kernel-Power 41
   reboot was an OS-level hard crash, not the app — watch for recurrence, it may
   be platform instability under load on the new build.
+- **Sensor-history cap (RAM)**: LibreHardwareMonitor keeps a rolling
+  `List<SensorValue>` history for EVERY sensor it tracks internally (~150+ on this
+  machine — all clocks, loads, voltages, not just the ~57 the app exposes), default
+  window 1 day, appended ~every 4th `Update()` — tens of MB the app never reads
+  (the 2026-08-05 "why is this 120+ MB" finding: 280 MB private bytes after 26 h).
+  `Profile.SensorHistoryHours` (app-level, default **0 = off**) → the engine applies
+  `IHardwareBackend.SetSensorHistoryWindow` at the top of `TickCore`, BEFORE
+  `Update()` and on the tick thread — the setter mutates the same per-sensor lists
+  the update appends to, so a UI-thread set would race. Dev-panel SENSOR HISTORY
+  slider (plumbing area above BACKEND), notches off · 5/10/15/30 min · 1/2/4/8/12/24 h,
+  value label shows the estimated RAM from the backend's real
+  `InternalSensorCount` (sensors × windowSec/4 × 16 B). `LhmBackend` walks all
+  hardware incl. SubHardware and hooks `SensorAdded` so late-appearing sensors
+  inherit the window; `SimulatedBackend` is a no-op (nothing behind it keeps
+  history).
 - Changing ChannelConfig field names breaks saved `%AppData%\FanCurves\profile.json`
   (old fields silently ignored, defaults kick in) — delete it after schema changes.
 - Sensor/control IDs are backend-specific; `AutoAssign` prunes IDs the current backend
@@ -694,6 +709,17 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
 - Config: `%AppData%\FanCurves\profile.json` (auto-saved on every edit).
 
 ## Status / open items (2026-07-21)
+
+- **BLOCKER 2026-08-05: Windows Smart App Control flipped from evaluation to ON
+  overnight** (`HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy\
+  VerifiedAndReputablePolicyState = 1`; CodeIntegrity 3033/3077 events from 01:11)
+  and blocks EVERY unsigned locally built binary — the bin\Debug exe and DLLs, the
+  installed `%LOCALAPPDATA%\Programs\FanCurves\FanCurves.exe`, `--sim` runs, all of
+  it; SAC has no per-file exclusions by design. The dev loop and the app itself
+  cannot run until SAC is turned off (Windows Security → App & browser control →
+  Smart App Control — user-only GUI action, NOT re-enableable without an OS
+  reinstall). Caught mid-deploy, so the app is DOWN and fans are on BIOS control
+  until then; restart with `schtasks /Run /TN FanCurves` once SAC is off.
 
 - **Defaults track Kuba's hand-tuned profile** ("make the current settings the
   default ones", 2026-07-21 and again 2026-07-22): his profile.json values are the
