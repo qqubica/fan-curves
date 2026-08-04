@@ -221,6 +221,15 @@ public partial class App : Application
         var knownControls = hw.Controls.Select(c => c.Id).ToHashSet();
         bool changed = false;
 
+        // A header can only obey one PWM value. If two channels claim the same one,
+        // FanEngine.Tick writes both in Profile.Channels order and the LAST silently
+        // wins every tick — which reads as "that fan won't turn on" with nothing in
+        // the UI to explain it. The UI now blocks the double-tick; this heals
+        // profiles that already carry one. First channel listed keeps it.
+        var claimed = new HashSet<string>();
+        foreach (var ch in profile.Channels)
+            changed |= ch.ControlIds.RemoveAll(id => !claimed.Add(id)) > 0;
+
         foreach (var ch in profile.Channels)
         {
             // Drop sensors this backend doesn't know or that read garbage right now

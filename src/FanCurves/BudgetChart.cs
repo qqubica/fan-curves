@@ -4,7 +4,8 @@ using System.Windows.Media;
 namespace FanCurves;
 
 /// <summary>
-/// Second rolling strip (developer mode, under the history strip): the last 10 minutes of
+/// Second rolling strip (developer mode, under the history strip): a 10-minute window —
+/// live or scrolled back through the day, in step with the history strip — of
 /// the thermal-budget controller's own signals — the channel's power draw and its sustained
 /// average (left scale, watts) against the predicted headroom before the guarded line (the
 /// sustained aim, or the ceiling once the trend is past the aim; right scale, seconds) and
@@ -14,6 +15,12 @@ namespace FanCurves;
 /// </summary>
 public class BudgetChart : StripChart
 {
+    // Frozen paints (see Paint); the shared vocabulary pens live in StripChart.
+    private static readonly Pen HeadroomPen = Paint.WhitePen(0x59, 1.5, rounded: true);
+    private static readonly Brush FuseFill = Paint.White(0x14);
+    private static readonly Pen FuseEdgePen = Paint.WhitePen(0x33, 1);
+    private static readonly Brush FuseLabelBrush = Paint.White(0x8c);
+
     /// <summary>Ramp lead in force (Profile.RampLeadSeconds) — the trigger line.</summary>
     public double LeadSeconds { get; set; } = 45;
 
@@ -60,21 +67,16 @@ public class BudgetChart : StripChart
         // Transparent fill keeps hit-testing (hover) alive across the whole strip.
         dc.DrawRectangle(Brushes.Transparent, null, new Rect(0, 0, ActualWidth, ActualHeight));
         var r = Plot;
-
-        var gridPen = new Pen(new SolidColorBrush(Color.FromArgb(0x0d, 0xff, 0xff, 0xff)), 1);
-        var axisPen = new Pen(new SolidColorBrush(Color.FromArgb(0x1a, 0xff, 0xff, 0xff)), 1);
-        var refBrush = new SolidColorBrush(Color.FromArgb(0x33, 0xff, 0xff, 0xff));
+        TakeSnapshot();
 
         DrawFrame(dc, "THERMAL BUDGET");
         DrawLegend(dc,
-            ("headroom", new Pen(new SolidColorBrush(Color.FromArgb(0x59, 0xff, 0xff, 0xff)), 1.5)),
-            ("draw", new Pen(new SolidColorBrush(Color.FromArgb(0x66, 0xff, 0xff, 0xff)), 1)
-                { DashStyle = new DashStyle(new double[] { 3, 3 }, 0) }),
-            ("avg power", new Pen(new SolidColorBrush(Color.FromArgb(0xf0, 0xff, 0xff, 0xff)), 2)
-                { StartLineCap = PenLineCap.Round, EndLineCap = PenLineCap.Round }));
+            ("headroom", HeadroomPen),
+            ("draw", LegendDashPen),
+            ("avg power", BrightPen));
 
-        var h = History;
-        int count = h?.Count ?? 0;
+        var h = Win;
+        int count = WinCount;
 
         // Watts scale follows the window's own peak — an idle channel would otherwise
         // draw a flat line along the bottom of a 300 W axis.
@@ -82,7 +84,7 @@ public class BudgetChart : StripChart
         bool anyPower = false;
         for (int i = 0; i < count; i++)
         {
-            if (h![i].Watts is double w) { peak = Math.Max(peak, w); anyPower = true; }
+            if (h[i].Watts is double w) { peak = Math.Max(peak, w); anyPower = true; }
             if (h[i].WattsAvg is double a) peak = Math.Max(peak, a);
         }
         _wattsMax = NiceWatts(Math.Max(25, peak));
@@ -91,11 +93,10 @@ public class BudgetChart : StripChart
         // reading numbers into an empty strip.
         if (count == 0 || !anyPower)
         {
-            var note = Label(count == 0 ? "waiting for the first tick…" : NoPowerNote,
-                new SolidColorBrush(Color.FromArgb(0x59, 0xff, 0xff, 0xff)));
+            var note = Label(count == 0 ? "waiting for the first tick…" : NoPowerNote);
             dc.DrawText(note, new Point(r.Left + (r.Width - note.Width) / 2,
                 r.Top + (r.Height - note.Height) / 2));
-            dc.DrawLine(axisPen, new Point(r.Left, r.Bottom), new Point(r.Right, r.Bottom));
+            dc.DrawLine(AxisPen, new Point(r.Left, r.Bottom), new Point(r.Right, r.Bottom));
             return;
         }
 
@@ -103,7 +104,7 @@ public class BudgetChart : StripChart
         foreach (double w in new[] { 0, _wattsMax / 2, _wattsMax })
         {
             double y = YForWatts(w);
-            dc.DrawLine(w == 0 ? axisPen : gridPen, new Point(r.Left, y), new Point(r.Right, y));
+            dc.DrawLine(w == 0 ? AxisPen : GridPen, new Point(r.Left, y), new Point(r.Right, y));
             var t = Label(w == _wattsMax ? Inv($"{w:0}W") : Inv($"{w:0}"));
             dc.DrawText(t, new Point(r.Left - t.Width - 10, y - t.Height / 2));
         }
@@ -113,37 +114,33 @@ public class BudgetChart : StripChart
         // legend (30 min IS the top, so it gets no mark; the chip prints ∞ up there).
         foreach (double s in new[] { 60.0, 600.0 })
         {
-            var t = Label(Headroom(s), refBrush, 9.5);
+            var t = Label(Headroom(s), RefLabelBrush, 9.5);
             dc.DrawText(t, new Point(r.Right - t.Width - 4, YForSeconds(s) - t.Height / 2));
         }
 
         // The trigger: the fan steps up when the headroom trace crosses below this.
         double leadY = YForSeconds(LeadSeconds);
-        dc.DrawLine(new Pen(new SolidColorBrush(Color.FromArgb(0x2e, 0xff, 0xff, 0xff)), 1)
-            { DashStyle = new DashStyle(new double[] { 1, 4 }, 0) },
-            new Point(r.Left, leadY), new Point(r.Right, leadY));
+        dc.DrawLine(DottedRefPen, new Point(r.Left, leadY), new Point(r.Right, leadY));
         // Its label goes on last, over the traces — the spiky draw trace crosses it here.
 
         // Fuse spans: the die was at/over the override temp and the raw temp curve had
         // the fan, budget ignored. Shaded under everything so the traces stay readable.
-        var fuseFill = new SolidColorBrush(Color.FromArgb(0x14, 0xff, 0xff, 0xff));
         bool fuseLabelled = false;
         for (int i = 0; i < count; i++)
         {
-            if (!h![i].Override) continue;
+            if (!h[i].Override) continue;
             int start = i;
             while (i + 1 < count && h[i + 1].Override) i++;
             double x1 = XForIndex(start, count), x2 = XForIndex(i, count);
-            dc.DrawRectangle(fuseFill, null,
+            dc.DrawRectangle(FuseFill, null,
                 new Rect(x1, r.Top, Math.Max(1.5, x2 - x1), r.Height));
             // Hairline edges so the span reads as a marked period, not as another fill.
-            var edgePen = new Pen(new SolidColorBrush(Color.FromArgb(0x33, 0xff, 0xff, 0xff)), 1);
-            dc.DrawLine(edgePen, new Point(x1, r.Top), new Point(x1, r.Bottom));
-            dc.DrawLine(edgePen, new Point(x2, r.Top), new Point(x2, r.Bottom));
+            dc.DrawLine(FuseEdgePen, new Point(x1, r.Top), new Point(x1, r.Bottom));
+            dc.DrawLine(FuseEdgePen, new Point(x2, r.Top), new Point(x2, r.Bottom));
             if (!fuseLabelled)
             {
                 // Bottom of the span: the top row belongs to the legend and the hover chip.
-                var t = Label("fuse", new SolidColorBrush(Color.FromArgb(0x8c, 0xff, 0xff, 0xff)), 9.5);
+                var t = Label("fuse", FuseLabelBrush, 9.5);
                 dc.DrawText(t, new Point(Math.Min(x1 + 3, r.Right - t.Width), r.Bottom - t.Height - 1));
                 fuseLabelled = true;
             }
@@ -151,34 +148,31 @@ public class BudgetChart : StripChart
 
         // Headroom: a quiet line only. No under-fill — a healthy buffer pins the trace to
         // the top of the scale, and filling under it would flood the whole strip.
-        DrawTrace(dc, count, i => YForSeconds(h![i].TauSeconds),
-            new Pen(new SolidColorBrush(Color.FromArgb(0x59, 0xff, 0xff, 0xff)), 1.5)
-            { LineJoin = PenLineJoin.Round });
+        DrawTrace(dc, count, i => YForSeconds(h[i].TauSeconds), HeadroomPen);
 
         // Instantaneous draw: faint dashed reference under the average, like "now temp".
-        DrawTrace(dc, count, i => h![i].Watts is double w ? YForWatts(w) : double.NaN,
-            new Pen(new SolidColorBrush(Color.FromArgb(0x40, 0xff, 0xff, 0xff)), 1)
-            { DashStyle = new DashStyle(new double[] { 3, 3 }, 0) });
+        DrawTrace(dc, count, i => h[i].Watts is double w ? YForWatts(w) : double.NaN,
+            FaintDashPen);
 
         // Sustained power average: the bright trace — this is the demand the fans answer.
         // Its under-fill gives the strip the same weighted baseline the fan % has above.
-        DrawUnderFill(dc, count, i => h![i].WattsAvg is double a ? YForWatts(a) : double.NaN,
-            new LinearGradientBrush(
-                Color.FromArgb(0x12, 0xff, 0xff, 0xff), Color.FromArgb(0x02, 0xff, 0xff, 0xff),
-                new Point(0, 0), new Point(0, 1)));
-        DrawTrace(dc, count, i => h![i].WattsAvg is double a ? YForWatts(a) : double.NaN,
-            new Pen(new SolidColorBrush(Color.FromArgb(0xf0, 0xff, 0xff, 0xff)), 2)
-            { LineJoin = PenLineJoin.Round, StartLineCap = PenLineCap.Round, EndLineCap = PenLineCap.Round });
+        DrawUnderFill(dc, count, i => h[i].WattsAvg is double a ? YForWatts(a) : double.NaN,
+            TraceFill);
+        DrawTrace(dc, count, i => h[i].WattsAvg is double a ? YForWatts(a) : double.NaN,
+            BrightPen);
 
-        var leadLabel = Label(Inv($"ramp lead {Headroom(LeadSeconds)}"), refBrush, 9.5);
+        var leadLabel = Label(Inv($"ramp lead {Headroom(LeadSeconds)}"), RefLabelBrush, 9.5);
         DrawSeatedText(dc, leadLabel, new Point(r.Left + 4, leadY - leadLabel.Height - 1));
 
         // Live values — the one place amber is allowed here, as on the other plots.
-        var newest = h![count - 1];
-        double nx = XForIndex(count - 1, count);
-        var amber = new SolidColorBrush(Amber);
-        if (newest.WattsAvg is double na) dc.DrawEllipse(amber, null, new Point(nx, YForWatts(na)), 2.6, 2.6);
-        dc.DrawEllipse(amber, null, new Point(nx, YForSeconds(newest.TauSeconds)), 2.2, 2.2);
+        // Scrolled into the past nothing is live, so the dots go away with the scroll.
+        if (IsLive)
+        {
+            var newest = h[count - 1];
+            double nx = XForIndex(count - 1, count);
+            if (newest.WattsAvg is double na) dc.DrawEllipse(AmberBrush, null, new Point(nx, YForWatts(na)), 2.6, 2.6);
+            dc.DrawEllipse(AmberBrush, null, new Point(nx, YForSeconds(newest.TauSeconds)), 2.2, 2.2);
+        }
 
         if (HoverIndex(count) is int idx)
         {
@@ -193,8 +187,8 @@ public class BudgetChart : StripChart
             // Same vocabulary as the dev panel's power readout: buffer / headroom / needs.
             string budget = Inv($"buffer {s.BudgetJoules / 1000:0.0} kJ · headroom {Headroom(s.TauSeconds)} · needs {s.DemandLevel:0}%");
             DrawChip(dc, x,
-                Inv($"{Ago(idx, count)} · {draw} · avg {avg} · {budget}"),
-                Inv($"{Ago(idx, count)} · {draw} · avg {avg}\n{budget}"));
+                Inv($"{ClockText(idx)} · {AgoText(idx)} · {draw} · avg {avg} · {budget}"),
+                Inv($"{ClockText(idx)} · {AgoText(idx)} · {draw} · avg {avg}\n{budget}"));
         }
     }
 }

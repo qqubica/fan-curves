@@ -6,6 +6,8 @@ ramp only under sustained load (class-level default slew 8 %/s both directions; 
 (ASRock X870 Steel Legend WiFi + 9950X3D + NH-D15 + Arctic P14 Pro chain in a
 Phanteks P600S), but hardware-agnostic.
 
+Development history and harness logs live in `docs/history.md`.
+
 ## Repo / releases
 
 **Public GitHub repo `qqubica/fan-curves`** (MIT) since 2026-07-22 — nested repo
@@ -60,159 +62,152 @@ No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
   - `LhmBackend` — real hardware via LibreHardwareMonitorLib (needs admin for the
     kernel driver / Super I/O access). `SimulatedBackend` — fake AM5-ish CPU with
     spikes + load phases, used automatically when not elevated or nothing controllable.
-- `src/FanCurves` — WPF UI, **two modes**. Under the curve chart sits a **history
-  strip** (`HistoryChart.cs`, added 2026-07-22; **Developer mode only** since later
-  that day — collapsed in simple mode, the curve chart takes the freed space): the
-  last 10 min of the selected channel's rolling-average temp (bright trace), raw
-  "now" temp (faint dashed trace) and commanded fan % (dim trace + under-fill), one
-  sample per engine tick in a per-channel ring buffer (`ChannelHistory`, fed from
-  `MainWindow.OnEngineTicked` in both modes so history is already populated when
-  dev mode opens; not persisted). Right edge = now (amber live dots — the only
-  amber there); hover shows a crosshair with a `time · avg · now · %` readout chip.
-  Fan turn-ON events (commanded % leaves 0) get a baseline tick, turn-OFF events a
-  dimmer one, and the m:ss stopped time (turn-OFF → next turn-ON; was start-to-start
-  until Kuba's correction later that day) is written on a dim span between the ticks
-  (label seats on the card background so narrow gaps stay readable; a label is
-  skipped only when it would overlap the previous span's label — an earlier
-  gap-width guard silently dropped stops under ~1 min at dev-mode width, fixed
-  after Kuba's report later that day; an ongoing stop draws a live span counting
-  up to "now"; no span when the stop predates the 10-min window) — added
-  2026-07-22 to make the idle-kick / zero-snap cycling cadence readable.
-  Since 2026-07-25 it also draws the **budget ceiling** as a dotted reference on the
-  temp scale (power-controlled channels only), and since 2026-07-27 the **sustained
-  aim** as a dimmer dotted line — the aim label seats BELOW its line (the ceiling's
-  sits above) so the two never collide when the margins put them a few pixels apart.
-  Left/right padding matches `CurveEditor` so the two plots align.
-  **Budget strip** (`BudgetChart.cs`, 2026-07-25, dev mode only, sits under the history
-  strip): the same 10-min window seen from the thermal-budget controller's side —
-  instantaneous power draw (faint dashed) and its sustained average (bright trace +
-  under-fill) on a **watts** scale that auto-ranges to the window's own peak
-  (`NiceWatts` ladder), against the predicted headroom `TauSeconds` (quiet line, right
-  scale in **seconds**) and a dotted `ramp lead` line = the threshold that triggers a
-  step up. Since 2026-07-27 the headroom is measured to the sustained aim (behaviour
-  contract): it drains under a sustained fans-off load and recovers only on a fan
-  step or load end, instead of pinning at ∞ near any under-ceiling equilibrium.
-  The headroom axis is **logarithmic, 10 s → 30 min** (2026-07-26, after
-  Kuba's "headroom is not decreasing while the avg temp rises": the old linear axis
-  capped at 3× the lead drew "3 hours", "20 min and falling" and "∞" as the same flat
-  line at the top — a slow warm-up's drain from hours to minutes was invisible).
-  Top of scale = ≥30 min/∞ (the chip prints ∞ there), refs at 1:00 and 10:00, the
-  trigger line sits in the lower third so a genuine dive is a long visible descent. Hard-override spans are shaded with a "fuse" label; hover chip reads
-  `time · draw · avg · buffer kJ · headroom · needs %` (same vocabulary as the dev
-  panel readout). No under-fill under the headroom trace — a healthy buffer pins it to
-  the top of the scale and a fill would flood the strip (tried it, looked like a solid
-  block). Channels without power sensors get a centred "no power sensor on this
-  channel" note instead of empty axes. Both strips share `StripChart.cs` (padding,
-  title, legend, time axis, hover crosshair/chip, trace + under-fill helpers) and both
-  read the same per-channel `ChannelHistory` ring, whose `HistorySample` carries the
-  budget telemetry (watts, avg, credit, tau, demand, ceiling, aim, override flag).
-  Dev mode's fixed window is **1568×830** (grew from 1010×660 first to 1320×830 for
-  the second strip, then to 1568 on 2026-07-27 for the two-column dev panel);
-  `EnterFixed` clamps both dimensions to the work area on small screens.
-  A **CLEAR text-button** (2026-07-27, Kuba's ask) sits right of the history strip's
-  HISTORY title, styled like it (dev mode only): wipes the 10-min `ChannelHistory`
-  ring on EVERY channel so both strips restart from the right edge — it's a XAML
-  overlay in the chart-card grid row (the strips are OnRender-only and can't host
-  children), position tuned to seat beside the title the strip draws itself. Hover chips take several wordings and draw the widest that fits the
-  plot (`DrawChip(dc, x, wide, narrow)`), so quarter-screen windows get a two-line chip
-  instead of one running off the edge — `FormattedText` honours `\n`. Reference labels
-  (ceiling, ramp lead) are drawn last and seated on the card colour, otherwise the
-  spiky draw trace runs straight through them.
-  Verified by a scratchpad WPF harness that renders the strips to PNG from scripted
-  histories (fuse span, hover chip, empty state, 420 px-wide window) — it pokes
-  `StripChart._hoverX` by reflection, because `SetCursorPos` cannot hover a window that
-  another window covers, and a 4 s `--sim` capture never reaches those states.
-  **Render robustness (2026-07-27, from Kuba's resize crash)**: a mid-resize arrange
-  pass handed `CurveEditor` a near-zero size and its axis-chip `Math.Clamp` threw on
-  an inverted range (min 16 > max 13.8 — ArgumentException), killing the process —
-  which left the Super I/O frozen at the last written PWM with nothing watching the
-  die while a load pushed it through 80°. Now every chart render bails out below a
-  minimum plot size (`StripChart.TooSmallToRender` / CurveEditor's inline check),
+- `src/FanCurves` — WPF UI, **two modes**. Under the curve chart sit two
+  dev-mode strips. **History strip** (`HistoryChart.cs`, Developer mode only —
+  collapsed in simple mode, the curve chart takes the freed space): a 10-min
+  window of the selected channel's rolling-average temp (bright trace), raw
+  "now" temp (faint dashed) and commanded fan % (dim trace + under-fill), one
+  sample per engine tick. **Storage is two-tier** (2026-08-04, "scrollable, don't
+  keep everything in memory"): `ChannelHistory` keeps only the last 600 samples
+  in a RAM ring (the live window, fed from `MainWindow.OnEngineTicked` in both
+  modes so history is already populated when dev mode opens) and appends every
+  sample to a per-channel binary spill file in `%TEMP%\FanCurves\`
+  (fixed 26-byte QUANTIZED records — tenths int16 for temps/watts/percent,
+  whole-second uint16 tau with 0xFFFF = ∞, whole-second uint32 time — the ring
+  keeps exact doubles, only the disk is lossy, below display resolution;
+  `FileOptions.DeleteOnClose` so it vanishes with the
+  process even on a crash, ~24 h ≈ 2.2 MB/channel retention via a once-a-day
+  compaction at 2×; any file error silently degrades to the RAM-only ring). `HistorySample`
+  carries the wall-clock `Time` of the measurement since the same change.
+  **Both strips scroll back** through the spill as ONE timeline via a shared
+  `HistoryViewport` (in StripChart.cs, owned by MainWindow): wheel ≈1 min/notch
+  (Shift 10×), drag pans, double-click or the **LIVE text-button** (appears next
+  to CLEAR only while scrolled) returns to the live edge; scrolled reads go
+  through a one-window cache so hover redraws don't touch the disk, reaching
+  "now" snaps back to following live, channel switch resets to live, and a
+  scrolled window is anchored to absolute sample indices so incoming ticks
+  don't move it. The time axis prints wall-clock `HH:mm` labels at 5-minute
+  boundaries with "now" (live) or the window-end `HH:mm:ss` (scrolled) at the
+  right edge. Right edge = now when live (amber live dots — the only amber
+  there; they and the live counting-up stopped-span vanish while scrolled);
+  hover crosshair with a `clock · ago · avg · now · %` chip. Fan turn-ON
+  events get a baseline tick, turn-OFF a dimmer one, with the m:ss stopped time
+  (turn-OFF → next turn-ON) on a dim span between them (label seats on the card
+  background; skipped only when it would overlap the previous span's label; an
+  ongoing stop counts up live; no span when the stop predates the window). Also
+  drawn on the temp scale: the **budget ceiling** (dotted, power-controlled
+  channels only) and the **sustained aim** (dimmer dotted; the aim label seats
+  BELOW its line, the ceiling's above, so they never collide). Left/right
+  padding matches `CurveEditor` so the plots align.
+  **Budget strip** (`BudgetChart.cs`, dev mode only, underneath): the same
+  window from the thermal-budget controller's side — instantaneous draw (faint
+  dashed) and sustained average (bright trace + under-fill) on a **watts** scale
+  auto-ranged to the window's own peak (`NiceWatts` ladder), against the
+  predicted headroom `TauSeconds` (quiet line, right scale in **seconds**,
+  **logarithmic 10 s → 30 min**: top = ≥30 min/∞, the chip prints ∞ there, refs
+  at 1:00 and 10:00) and a dotted `ramp lead` line = the step-up trigger, seated
+  in the lower third so a genuine dive is a long visible descent. Headroom is
+  measured to the sustained aim (behaviour contract): it drains under a
+  sustained fans-off load and recovers only on a fan step or load end.
+  Hard-override spans are shaded with a "fuse" label; hover chip reads
+  `clock · ago · draw · avg · buffer kJ · headroom · needs %` (dev-panel vocabulary).
+  No under-fill under the headroom trace — a healthy buffer pins it to the top
+  and a fill would flood the strip. Channels without power sensors get a centred
+  "no power sensor on this channel" note. Both strips share `StripChart.cs`
+  (padding, title, legend, wall-clock time axis, scroll/drag handling, hover
+  crosshair/chip, trace + under-fill helpers) and render the window the shared
+  `HistoryViewport` serves (`TakeSnapshot()` at the top of each `OnRender`
+  fills the protected `Win`/`WinCount`/`IsLive`); `HistorySample`
+  carries the budget telemetry (watts, avg, credit, tau, demand, ceiling, aim,
+  override flag). Dev mode's fixed window is **1568×830**; `EnterFixed` clamps
+  both dimensions to the work area on small screens. A **CLEAR text-button**
+  right of the HISTORY title (dev mode only) wipes ring + spill file on EVERY
+  channel so both strips restart from the right edge — a XAML overlay in the
+  chart-card grid row (the strips are OnRender-only and can't host children),
+  position tuned to seat beside the drawn title; the LIVE button is the same
+  pattern one seat further right. Hover chips take several wordings and
+  draw the widest that fits the plot (`DrawChip(dc, x, wide, narrow)`;
+  `FormattedText` honours `\n`) so quarter-screen windows get a two-line chip.
+  Reference labels (ceiling, ramp lead) are drawn LAST and seated on the card
+  colour, otherwise the spiky draw trace runs straight through them.
+  **Render robustness**: every chart render bails out below a minimum plot size
+  (`StripChart.TooSmallToRender` / CurveEditor's inline check),
   every computed-range label clamp uses the `Math.Max(lo, hi)` guard, and
   `App.DispatcherUnhandledException` logs (throttled to one entry / 5 s) and
   **swallows** UI faults instead of dying — fan control must outlive the UI.
-  **Why-chip (2026-07-22)**: notification-style chip in the curve chart's top-left
+  **Render/tick performance rules** (2026-08-04, "very lightweight and fast"):
+  (1) every chart pen/brush/typeface is a FROZEN static (`Paint.cs` builders;
+  per-chart `static readonly` fields) — never allocate a Freezable inside
+  OnRender, the charts repaint every tick and on every hover move; (2) while the
+  window is hidden in the tray or minimized, `OnEngineTicked` only feeds the
+  histories, the tray tooltip (deduped — Shell_NotifyIcon is called only when
+  the whole-degree text changed) and the ~5-min model save — ALL painting lives
+  in `RefreshLiveUi()`, run per tick when visible and once from
+  `IsVisibleChanged`/`StateChanged` to catch up on reopen/restore; (3) the
+  title-bar fan spin (the app's one perpetual animation) is capped at 20 fps
+  via `Timeline.SetDesiredFrameRate` — at the default 60 it forces a
+  composition pass per frame the whole time the window shows.
+  **Why-chip**: notification-style chip in the curve chart's top-left
   corner (`WhyChip` in MainWindow.xaml, both modes) explaining why the commanded %
   differs from the curve's configured level; hidden when they match. The engine
   classifies every tick (`OutputReason` in `FanEngine.cs`, most-specific-wins chain
-  fed by diagnostics `ResponseFilter` now exposes — CurveLevel/TargetLevel/
+  fed by diagnostics `ResponseFilter` exposes — CurveLevel/TargetLevel/
   PendingDownLevel/DownHoldRemaining/HysteresisHolding/SnappedToZero): slew ramp
   up/down (with target %), step-down hold (pending level + countdown), hysteresis,
   zero snap (names the sub-threshold curve %), safety floor, idle kick, stop probe.
-  Classification verified by a scratchpad console harness (ramp/hold/hysteresis/
-  snap/floor scenarios) on 2026-07-22.
   - Simple (default): two preset buttons (`Quiet · MacBook-like` — default,
     `Performance`), the two fan channels, read-only curve illustration with live
     overlay, Apply/Stop. No settings visible.
-  - Developer (top-bar toggle, or `--dev`): **the panel is two columns since
-    2026-07-27 (Kuba's ask), 520 px wide** — the CONTROL MODE switch leads at the
-    top (full panel width, the headline choice), hairline seam between the columns,
-    SOURCES/BACKEND full-width underneath; each column is exactly as wide as the
-    old single-column panel, so the ~31-mono-char readout line breaks still hold.
-    **Settings regrouped into feature groups 2026-07-28 (Kuba: "grouped in more
-    clear way. Add checkboxes to enable/disable all the features")**: every
-    toggleable feature is a titled group whose **master checkbox IS the group
-    header** (MicroLabel-styled content inside the checkbox; explanation moved to
-    tooltips). Left column: CHANNEL RESPONSE (renamed from BEHAVIOUR — the
-    per-channel filter knobs, always active, no checkbox) then SAFETY FLOOR
-    (2026-07-29 — the floor slider moved out of CHANNEL RESPONSE into its own
-    group, relabelled "Never below"; see the behaviour contract) /
-    STOPPED-FAN KICK / STOP INSTEAD OF SLOW (zero snap) / TRIAL STOPS (stop
-    probe) / INSTANT APPLY. Right column:
-    POWER CONTROL (power averaging, power-curve hysteresis, ramp lead — that label
-    shortened from "Ramp when headroom under", which had collided with its
-    "1 min 30 s" value) then AUTO FLOOR GUARD / FUTILITY PROBE /
-    DOWNWARD RELIEF / POWER FLOOR / HARD OVERRIDE (the
-    fuse's trigger + release drop/hold, gathered from POWER CONTROL and BUDGET
-    INTERNALS; deliberately **no off switch** — the fuse is the last line before
-    the BIOS would have to save the die) / BUDGET INTERNALS (ceiling/aim margins +
-    the three windows) / LEARNED MODEL. Relief and the power floor got their
-    first enable switches: **`Profile.ReliefEnabled` / `Profile.PowerFloorEnabled`**
-    (both default true, app-level like the other feature toggles); off is
-    implemented in `FanEngine` by feeding the controller its natural "never
-    fires" values (relief cap 0 W — never undercut, and an active waiver dies on
-    the next tick; floor anchors 0/0 — the line is 0 everywhere), so
-    `PowerBudgetController` needed no changes. A group whose switch is off **dims
-    to 45 % opacity but stays editable** (the 2026-07-21 reachability rule);
-    the behavior log's settings line prints `relief off` / `pfloor off`.
-    **Switch inventory completed 2026-07-29** (Kuba: "are there any more functions
-    missing the on/off switch?"): every remaining feature got one — the futility
-    probe, the Auto floor guard, instant apply, review logging and High process
-    priority (see the behaviour contract for each), and `LEARNED MODEL`'s existing
-    checkbox became the group header like the rest. Groups whose feature has no
-    knobs of its own are a bare header checkbox (AUTO FLOOR GUARD, FUTILITY PROBE,
-    INSTANT APPLY, REVIEW LOGGING, HIGH PROCESS PRIORITY — the last two full-width
-    above BACKEND, since they are app plumbing rather than control). Exactly two
-    things still have no switch, both on purpose: **HARD OVERRIDE** (the fuse — the
-    last line before the BIOS would have to save the die) and **CHANNEL RESPONSE**
-    (following the curve at all; its knobs can be flattened individually).
-    DOWNWARD RELIEF's body dims when the futility probe is off as well as its own
-    switch — relief can only arm behind the latch.
-    Curve editing (drag points, double-click
-    add, right-click remove; edits snap to whole °C / whole %, bands stay ≥1 °C wide,
-    max 12 points per channel; Ctrl+Z / Ctrl+Y — also Ctrl+Shift+Z — undo/redo point
-    edits, history in MainWindow via before/after snapshots, cleared on preset
-    adoption), behaviour sliders (averaging window covers 0–5 min on a
-    non-linear slider — its Value is a notch index: 5 s steps up to 2 min, 30 s steps
-    beyond; mapping in `MainWindow.AvgNotchToSeconds`), sensor/header assignment (since
-    2026-07-24 each sensor row leads with its live temp and each fan-header row with its
-    live rpm — value column left-aligned so the reading hugs the checkbox
-    (was right-aligned through 2026-07-24; Kuba wanted the checkbox-to-value gap
-    smaller), refreshed per engine tick via
-    `RefreshSourceReadouts`, "—" when unreadable; the whole row — value and name —
-    renders in Cascadia Mono 11.5 after Kuba's "use uniform font" the same day; since
-    later that day long names **wrap** onto extra lines so the full name is always
-    visible — the lists' horizontal scrollers are gone, and the shared CheckBox
-    template's root is a Grid with a star content column because its old horizontal
-    StackPanel measured content at infinite width and silently disabled wrapping), backend + config-path info. Any manual tweak marks the profile "Custom" (preset highlight
-    clears). Presets overwrite tuning but keep sensor/header assignments
-    (`Profile.AdoptTuning`).
+  - Developer (top-bar toggle, or `--dev`): **two-column panel, 520 px wide** —
+    the CONTROL MODE switch leads at the top (full panel width, the headline
+    choice), hairline seam between the columns, SOURCES/BACKEND full-width
+    underneath; each column is as wide as the old single-column panel, so the
+    ~31-mono-char readout line breaks still hold. Every toggleable feature is a
+    titled group whose **master checkbox IS the group header** (MicroLabel-styled
+    content inside the checkbox; explanations in tooltips). Left column: CHANNEL
+    RESPONSE (per-channel filter knobs, always active, no checkbox), SAFETY
+    FLOOR ("Never below" slider; see the behaviour contract), STOPPED-FAN KICK,
+    STOP INSTEAD OF SLOW (zero snap), TRIAL STOPS (stop probe), INSTANT APPLY.
+    Right column: POWER CONTROL (power averaging, power-curve hysteresis, ramp
+    lead), AUTO FLOOR GUARD, FUTILITY PROBE, DOWNWARD RELIEF, POWER FLOOR, HARD
+    OVERRIDE (fuse trigger + release drop/hold), BUDGET INTERNALS (ceiling/aim
+    margins + the three windows), LEARNED MODEL. Knob-less groups are a bare
+    header checkbox (AUTO FLOOR GUARD, FUTILITY PROBE, INSTANT APPLY, REVIEW
+    LOGGING, HIGH PROCESS PRIORITY — the last two full-width above BACKEND: app
+    plumbing, not control). Exactly two things have no switch, both on purpose:
+    **HARD OVERRIDE** (the fuse — the last line before the BIOS would have to
+    save the die) and **CHANNEL RESPONSE** (following the curve at all; its
+    knobs can be flattened individually). A group whose switch is off **dims to
+    45 % opacity but stays editable** (settings must be reachable with the
+    checkbox off); DOWNWARD RELIEF's body also dims when the futility probe is
+    off — relief can only arm behind the latch. Relief/power-floor "off"
+    (`Profile.ReliefEnabled` / `Profile.PowerFloorEnabled`, both default true,
+    app-level) is implemented in `FanEngine` by feeding the controller natural
+    "never fires" values (relief cap 0 W — an active waiver dies on the next
+    tick; floor anchors 0/0), so `PowerBudgetController` needed no changes; the
+    behavior log's settings line prints `relief off` / `pfloor off`.
+    Curve editing: drag points, double-click add, right-click remove; edits snap
+    to whole °C / whole %, bands stay ≥1 °C wide, max 12 points per channel;
+    Ctrl+Z / Ctrl+Y (also Ctrl+Shift+Z) undo/redo — see the undo entry in the
+    behaviour contract.
+    Behaviour sliders: the averaging window covers 0–5 min on a non-linear
+    slider — its Value is a notch index (5 s steps up to 2 min, 30 s beyond;
+    mapping in `MainWindow.AvgNotchToSeconds`). Sensor/header assignment: each
+    sensor row leads with its live temp and each header row with its live rpm
+    (value column left-aligned so the reading hugs the checkbox, refreshed per
+    engine tick via `RefreshSourceReadouts`, "—" when unreadable); the whole
+    row renders in Cascadia Mono 11.5; long names **wrap** so the full name is
+    always visible — no horizontal scrollers, and the shared CheckBox template's
+    root is a Grid with a star content column because a horizontal StackPanel
+    measures content at infinite width and silently disables wrapping. Backend +
+    config-path info. Any manual tweak marks the profile "Custom" (preset
+    highlight clears). Presets overwrite tuning but keep sensor/header
+    assignments (`Profile.AdoptTuning`).
   Dark theme, code-behind (no MVVM framework).
-  **Design language = "precision instrument"** (2026-07-20 redesign; grew out of the
-  speed-pill lookbook after "looks like 2012" feedback): borderless window with custom
+  **Design language = "precision instrument"**: borderless window with custom
   chrome (`WindowChrome`, DWM rounded corners + dark frame via `Chrome.Apply` in
   `Ui.cs`, custom caption buttons, title-bar fan glyph that spins while applying).
-  **Exactly three window sizes** (Kuba's choice 2026-07-20): the fixed floating window
+  **Exactly three window sizes**: the fixed floating window
   (1010×660, 1568×830 in dev mode), quarter-of-screen (half work-area width × height, snapped to the nearest
   screen corner), and maximized — cycled in that order by the maximize caption button
   (its glyph previews the next size); drag-resize disabled
@@ -221,10 +216,9 @@ No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
   taskbar). Further elements: layered near-black surfaces (canvas `#0a0a0d`, cards `#111116` with light-from-above
   gradient hairline + drop shadow), monochrome white at graded opacities, and ONE
   accent — warm amber `#FF9E5E` — reserved strictly for live thermal state (chart
-  operating dot + crosshair with axis readout chips, status-chip dot, and since
-  2026-07-27 the dev-mode raw-temp dashed line + its "now …°" label — Kuba asked to
-  colour-differentiate the temp and wattage reference lines, so temperature is the
-  amber quantity and the power lines stay monochrome). Hero = large
+  operating dot + crosshair with axis readout chips, status-chip dot, and the
+  dev-mode raw-temp dashed line + its "now …°" label — temperature is the amber
+  quantity and the power reference lines stay monochrome). Hero = large
   Segoe UI Variable Display Light numeral of the selected channel's rolling average;
   micro-labels letter-spaced via `Tracked.Text` (hair spaces, `Ui.cs`); numerals in
   Cascadia Mono with invariant "." decimals. Channels switch via a segmented control
@@ -236,7 +230,7 @@ No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
 ## Build / run
 
 ```
-dotnet build                                # .NET 8 SDK (installed via winget 2026-07-20)
+dotnet build                                # needs the .NET 8 SDK
 dotnet run --project src/FanCurves          # real hardware if elevated, else simulation
 dotnet run --project src/FanCurves -- --sim # force simulation
 dotnet run --project src/FanCurves -- --sim --screenshot out.png      # UI verify aid (4 s, then exits)
@@ -256,12 +250,15 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
 - **Admin-only**: `app.manifest` sets `requireAdministrator` (Super I/O access needs
   the kernel driver). Dev runs from a non-elevated shell trigger a UAC prompt.
 - Default profile `Quiet (MacBook-like)` (**Kuba's hand-tuned settings promoted to
-  default — first 2026-07-21, re-promoted from his live profile 2026-07-22**):
+  default**):
   **all fans fully stopped at idle** (0% floor, 0% bottom step): CPU cooler 0%
-  through <57°C avg, then 20/40/50/65/81/90/100% at 57/62/70/76/84/88/92°C, with
-  a **90 s averaging window**, 1.5°C hysteresis, 25 s step-down hold, slew 9 %/s
-  up / 8 down; case fans 0% below 58°C avg, then 25/40/55/70%, 25 s averaging,
-  slew 7 %/s — Arctic P14 Pro stops below 5% PWM.
+  through <50°C avg, then 10/20/40/50% at 50/55/62/84°C (the temp staircase caps
+  at 50% — sustained-load speed comes from the power side in Auto; synced to
+  Kuba's live curve 2026-08-03), with a **90 s averaging window**, 1.5°C
+  hysteresis, 25 s step-down hold, slew 9 %/s up / 8 down; case fans 0% below
+  40°C avg, then 5/10/20/40/60/82/100% at 40/42/60/70/75/82/86°C, 25 s
+  averaging, 4°C hysteresis, slew 7 %/s (whisper bands are fine on the NF-A14s,
+  which start at any duty >0%).
 - **Stopped-fan kick**: any channel the engine is actually driving that has sat at
   0% output for `IdleKickStoppedSeconds` gets spun to `IdleKickPercent` for
   `IdleKickSeconds`, then stops again (repeats after each stillness period). Curve
@@ -270,18 +267,16 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   filter); not active while paused/BIOS-controlled. Configurable in the dev panel
   (all global/app-level like the tray/autostart toggles — don't mark the profile
   "Custom", presets don't touch them): the STOPPED-FAN KICK group's master checkbox
-  (`Profile.IdleKickEnabled`, **default false since 2026-07-22** — Kuba runs with
-  the kick off; was default-on at 60 s/20%/20 s through 2026-07-21) plus three
-  sliders — idle time before
+  (`Profile.IdleKickEnabled`, **default false** — Kuba runs with the kick off)
+  plus three sliders — idle time before
   kick (`IdleKickStoppedSeconds`, 10–300 s, default 10), kick speed
   (`IdleKickPercent`, 5–100 %, default 5), kick duration (`IdleKickSeconds`,
   5–60 s, default 5); engine pushes them into
   each `IdleKick` every tick. Sliders stay editable while the kick is disabled
-  (Kuba 2026-07-21: settings must be reachable with the checkbox off). Gotcha: slider `ValueChanged` fires mid-XAML-parse
+  (settings must be reachable with the checkbox off). Gotcha: slider `ValueChanged` fires mid-XAML-parse
   (setting `Minimum`), so `OnKickParamChanged` bails while `KickTimeValue == null` —
   removing that guard crashes the app at startup.
-- **Safety floor switch (2026-07-29, Kuba's ask — "the same way other features have
-  the turn on turn off option")**: `Profile.SafetyFloorEnabled` (default true,
+- **Safety floor switch**: `Profile.SafetyFloorEnabled` (default true,
   app-level like the other feature toggles — doesn't mark "Custom", presets don't
   touch it) is the master switch of the per-channel `MinPercent`. Implemented in
   `FanEngine.Tick` as ONE gated local — `double minPct = Profile.SafetyFloorEnabled
@@ -293,13 +288,9 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   separate rule); the per-channel value itself is kept, so switching back restores
   it. Dev-panel group SAFETY FLOOR (master checkbox) + the "Never below" slider
   (0–60%, per channel, still marks the profile "Custom"); the behavior log's
-  settings line prints `min off` in place of `min NN%`. Verified by a scratchpad
-  harness driving the real engine against a fake backend (floor holds 30% cool →
-  off stops the fan → curve's own 60% unaffected → back on restores → probe gated
-  on/off with the switch).
-- **Zero snap (stop instead of running slow, added 2026-07-22)**: any filter target
-  above 0% but strictly below the threshold (default 20% since later that day;
-  was 30%) runs the fan at 0% —
+  settings line prints `min off` in place of `min NN%`.
+- **Zero snap (stop instead of running slow)**: any filter target
+  above 0% but strictly below the threshold (default 20%) runs the fan at 0% —
   meaningful speed or fully stopped, never a slow crawl. Implemented in
   `ResponseFilter` (`ZeroSnapPercent`, snap applied to BOTH curve evaluations so
   hysteresis/step-down hold reason about the snapped level; slew still glides
@@ -311,20 +302,18 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   touch it): `Profile.ZeroSnapEnabled` (default true) + `Profile.ZeroSnapPercent`
   (default 20), dev-panel group STOP INSTEAD OF SLOW (master checkbox) + "Stop
   below" slider (1–50%). With the 20% threshold and the
-  2026-07-22 default curves, no band is snapped (the snap is strictly-below, so
+  default curves, no band is snapped (the snap is strictly-below, so
   the CPU's 20% band runs at 20%) — the feature only bites when a curve/threshold
   edit puts a band under the threshold.
-- **Stop probe (trial-stop steadily running fans, added 2026-07-22)**: once a driven
+- **Stop probe (trial-stop steadily running fans)**: once a driven
   channel has run continuously for `StopProbeRunSeconds` (default 30) with its RAW
-  temp inside a `StopProbeStableRangeC` band (default 3.5°C since 2026-07-22's
-  defaults re-promotion; was 2°C), the fan is stopped as a trial. While stopped, the 5 s-average temp is compared to the pre-stop baseline
-  every tick (a superset of Kuba's "recheck every 30 s" ask — continuous is safer):
+  temp inside a `StopProbeStableRangeC` band (default 3.5°C), the fan is stopped
+  as a trial. While stopped, the 5 s-average temp is compared to the pre-stop
+  baseline every tick (continuous is safer than a periodic recheck):
   rise beyond the band, or curve demand above the level at stop → immediate resume.
   A stop that dies within `ProbeSeconds + RunSeconds` (~60 s at the defaults —
-  trial length `StopProbeSeconds` default 30 s since the re-promotion, was 10)
-  counts as FAILED and
-  arms a `StopProbeRetrySeconds` backoff (default 60 s since the re-promotion,
-  was 300) so a loaded fan never
+  trial length `StopProbeSeconds` default 30 s) counts as FAILED and
+  arms a `StopProbeRetrySeconds` backoff (default 60 s) so a loaded fan never
   settles into an on/off cycle; a later rise resumes without backoff. `StopProbe`
   in Core (per-channel state in `FanEngine.Tick`, runs BEFORE the idle kick →
   probe-stopped counts as stopped for the kick, same choice as zero snap); channels
@@ -335,209 +324,140 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   group TRIAL STOPS (master checkbox) + sliders
   "Steady running before trial" (10–300 s), "Trial stop length" (5–60 s), "Stable
   band · rise to resume" (0.5–5°C), "Retry after failed trial" (60–900 s), "No
-  trials above" (`StopProbeMaxTempC`, 50–90°C, default 78 — Kuba's ask 2026-07-27:
+  trials above" (`StopProbeMaxTempC`, 50–90°C, default 78 —
   no trial starts while any raw-temp sample in the stability window is above it,
   and a running trial resumes the moment the 5 s average crosses it even inside
-  the stable band, arming the failed-trial backoff as usual; verified by a
-  scratchpad harness the same day).
-  State-machine scenarios verified by a scratchpad console harness on 2026-07-22
-  (probe timing, in-trial rise + backoff, late rise without backoff, unstable
-  temps never probe).
-  **Demand gate (2026-07-27, from Kuba's chess-engine report)**: a budget-driven
+  the stable band, arming the failed-trial backoff as usual).
+  **Demand gate**: a budget-driven
   channel is never trial-stopped while `DemandLevel > 0` — the probe's stability
   test is blind to a die-limited load (a CPU clamping its own temperature reads
-  perfectly "stable" at 180 W, and because the clamped die can never "rise", an
-  ungated trial held the fan at 0% at 178 W indefinitely while the CPU throttled;
-  harness C6 documents the latch). Temp-only channels are unaffected (their
-  demandLevel is always 0).
-- **Thermal-budget control ("control with power, not temperature", added 2026-07-24)**:
-  channels with assigned power sensors (`ChannelConfig.PowerSensorIds`, watts summed;
-  AutoAssign wires CPU package power to the CPU channel, CPU+GPU to the case channel)
-  are driven by `PowerBudgetController` in `PowerBudget.cs` instead of `ResponseFilter`.
-  Philosophy: the 60 s power average is the real dissipation demand; the heatsink's
-  thermal mass is credit — `E = C·(ceiling − trendTemp)` (trend = 30 s avg, filters the
-  die's instant jump). Fan steps UP only when the predicted **headroom** drops under
-  `Profile.RampLeadSeconds` (default 45; Kuba runs 90), directly to the lowest
-  curve-ladder level whose predicted equilibrium (`base + R(level)·PowerNow`) holds
-  the **sustained aim**. **Headroom redefined 2026-07-27** (Kuba: "headroom is almost
-  always at 100% no matter what the temperature or the fan speed; it should almost
-  only go down — up without fans only when hot with no load"): `TauSeconds` = predicted
-  seconds until the sink trend crosses the **guarded line — the sustained aim while
-  below it, the ceiling once past it** — min of a model prong (exact first-order time
-  `R·C·ln((eq−T)/(eq−line))`, finite whenever the equilibrium `base+R(output)·PowerAvg`
-  clears the line by ≥ HysteresisC) and a measured prong (`(line−trend)/slope`). The
-  old pair (`E/surplus` + slope-to-CEILING) read ∞ at any equilibrium under the
-  ceiling — on this cooler, nearly every real state — and even recovered to ∞
-  mid-warm-up as the climb decelerated toward a hotter-than-wanted equilibrium with
-  the fans still parked; now headroom recovers only when the fans step up or the load
-  ends. **Prong gating (redesigned later on 2026-07-27 after Kuba's "temperature
-  rising and rising through 80° and the fans not kicking in")**: the MODEL prong
-  runs UNGATED — it reads only sustained quantities (PowerAvg, trend) and its
-  aim-clearance margin (equilibrium must clear the line by ≥ HysteresisC) absorbs
-  power-window aliasing. (One veto since later that day: a trend measurably
-  FALLING — slope < −0.01 — contradicts the prong's first-order-approach premise
-  outright; the still-hot minute-average of a just-ended load otherwise computed
-  "seconds to the aim" while the die plunged 1°/s through it and fired a
-  pointless ramp mid-decay — harness C7. The settled StepUpHold arm got the same
-  treatment: its slope condition now gates BOTH disjuncts, so a stale demand
-  cannot step up while the trend is clearly falling.) The first cut gated BOTH prongs on burst-quietness, which
-  silenced the whole predictive layer under a real game: a live draw never stops
-  fluctuating (peak−avg ≈ 55 W for the entire session), the gate never opened,
-  headroom sat pinned at ∞ and only reactive StepUpHold caught the climb — late,
-  above the aim (harness S7 reproduces this with a realistic swinging load). The
-  SLOPE prong keeps the strict peak gate (no burst above `max(10 W, 25%)` over
-  PowerAvg within the last SlopeWindow+TrendAvg seconds) — its contamination is
-  physical: an 8 s spike's die jump reads as a rush toward the aim for as long as
-  the fit can see it (harness S3). LEARNING gets the longest quiet horizon
-  (slope+trend+power windows ≈ 115 s at defaults): the 250 W spike train poisoned
-  R(0) to ~0.78 through 30 s-"stable" windows by pairing the still-elevated trend
-  with trough power, and a poisoned R is what turns the ungated model prong into a
-  false accuser — with honest learning, the margin alone keeps spike trains silent
-  (150 W and 250 W verified: fans never move, min tau 632 s). The wall-jump cost
-  stays: a 188 W step is spike-indistinguishable early on, fires at ~68° trend and
-  peaks 80° die — the fuse stays the hard stop. **One ramp step per slope
-  window (2026-07-26, from Kuba's "fans ramped instantly to 100%")**: the measured
-  slope keeping tau low is backward-looking and knows nothing of the step just taken,
-  so re-firing every tick used to climb the whole ladder in seconds; within the
-  settle window a further step needs the chosen level to have become objectively
-  insufficient (draw rose; its predicted equilibrium no longer holds the aim). A ramp
-  step taken with the gate open **brands** the level it left exactly like a
-  StepUpHold step (an optimistically-wrong model otherwise argues the fan straight
-  back down after every predictive step — slow on/off hunt, harness S5); gate-closed
-  (model-only) fires don't brand — no measured corroboration yet.
-  Steps DOWN after ONE
+  perfectly "stable" at full draw, and because the clamped die can never "rise",
+  an ungated trial can latch the fan at 0% under load while the CPU throttles).
+  Temp-only channels are unaffected (their demandLevel is always 0).
+- **Thermal-budget control ("control with power, not temperature")**: channels
+  with assigned power sensors (`ChannelConfig.PowerSensorIds`, watts summed;
+  AutoAssign wires CPU package power to the CPU channel, CPU+GPU to the case
+  channel) are driven by `PowerBudgetController` in `PowerBudget.cs` instead of
+  `ResponseFilter`. Philosophy: the 60 s power average is the real dissipation
+  demand; the heatsink's thermal mass is credit — `E = C·(ceiling − trendTemp)`
+  (trend = 30 s avg, filters the die's instant jump). Fan steps UP only when the
+  predicted **headroom** drops under `Profile.RampLeadSeconds` (default 45; Kuba
+  runs 90), directly to the lowest curve-ladder level whose predicted
+  equilibrium (`base + R(level)·PowerNow`) holds the **sustained aim**.
+  **Headroom**: `TauSeconds` = predicted seconds until the sink trend crosses
+  the guarded line — the sustained aim while below it, the ceiling once past
+  it — min of a model prong (exact first-order time `R·C·ln((eq−T)/(eq−line))`,
+  finite whenever the equilibrium `base+R(output)·PowerAvg` clears the line by
+  ≥ HysteresisC) and a measured prong (`(line−trend)/slope`); headroom recovers
+  only on a fan step or load end. **Prong gating**: the MODEL prong runs UNGATED
+  (it reads only sustained quantities; its aim-clearance margin absorbs
+  power-window aliasing), with one veto — a measurably FALLING trend
+  (slope < −0.01) contradicts its first-order-approach premise (else a
+  just-ended load's still-hot minute-average fires a pointless ramp mid-decay);
+  the settled StepUpHold arm's slope condition gates BOTH its disjuncts for the
+  same reason. The SLOPE prong keeps a strict peak gate (no burst above
+  `max(10 W, 25%)` over PowerAvg within the last SlopeWindow+TrendAvg seconds) —
+  a spike's die jump reads as a rush toward the aim for as long as the fit can
+  see it. LEARNING gets the longest quiet horizon (slope+trend+power windows
+  ≈ 115 s at defaults) — a poisoned R turns the ungated model prong into a false
+  accuser; with honest learning, the margin alone keeps spike trains silent. A
+  sudden wall-jump load is spike-indistinguishable early on — the fuse stays the
+  hard stop. **One ramp step per slope window**: the measured slope is
+  backward-looking and knows nothing of the step just taken; within the settle
+  window a further step needs the chosen level to have become objectively
+  insufficient (draw rose; its predicted equilibrium no longer holds the aim). A
+  gate-open ramp step **brands** the level it left exactly like a StepUpHold
+  step (else an optimistically-wrong model argues the fan straight back down
+  after every predictive step — a slow on/off hunt); gate-closed (model-only)
+  fires don't brand — no measured corroboration yet. Steps DOWN after ONE
   StepDownHoldSeconds hold once the power average no longer needs the current
   level — **snapping straight to the lowest ladder level that holds the aim at
-  5/4 of today's sustained draw** (Kuba later on 2026-07-27: "after a step-down
-  timer, snap to the fan curve"; the old one-level-per-hold walk kept the fans
-  dawdling ABOVE the staircase for a hold per level after a load ended — in Auto
-  the floor IS the curve, so the visible descent now hands straight back to the
-  hand-tuned staircase; harness C10: 90→0 in one snap, no intermediate levels,
-  never below a branded level, slew still glides the output). After a load ends
-  this reacts minutes before the cooling temp average would. The 5/4 margin is
-  hysteresis in the DRAW dimension, where the swings actually live. A ±HysteresisC temperature band alone is worth ~4 W at a 20% fan level —
-  a constant load equilibrating exactly AT the aim hunted 20↔40% across it, and a
-  game's minute-scale swells re-crossed it constantly (harness S7). Deliberately
-  NOT stacked with the temperature band: the double margin blocked the final step
-  to silence at warm idle (harness S5b). `ChannelConfig.HysteresisC` still feeds
-  the controller — as the model prong's aim-clearance margin.
-  **The sustained aim is also enforced UPWARD (2026-07-26, from Kuba's report
-  "headroom dips briefly, recovers to max, fans never kick in")**: even the
-  aim-referenced tau goes blind at a settled equilibrium that a frozen or unlearned
-  model believes is under the aim (model prong claims sustainable, slope reads 0) —
-  which used to park a 90 W game at ~84° die with fans stopped forever, and a 188 W
-  load at 86.1°, above its own ceiling, showing "buffer 0.0 kJ · headroom ∞". So: trend
-  past the steady aim AND (power average demands a higher ladder level OR the temp
-  has settled there, slope > −0.002 — the model-free prong catches frozen/unlearned
-  models) → one ladder step up per StepDownHoldSeconds (why-chip reason
-  `StepUpHold`). Each step up brands the level it left as measured-insufficient at
-  that PowerAvg — DemandLevel is clamped above the branded level so the model can't
-  argue the fan straight back down into a slow on/off limit cycle; the brand lifts
-  once the sustained draw has stayed max(5 W, 10%) below the draw that failed for a
-  full StepDownHold (sustained forgiveness since 2026-07-27 — instant forgiveness
-  re-armed the descent on every lull of a fluctuating load, harness S7). A spent
-  budget (trend ≥ ceiling) with the trend not falling reads `TauSeconds = 0`, not ∞,
-  which also routes it into the ramp branch.
-  `ThermalModel` (per channel, persisted in profile.json as `LearnedThermalMassJPerC` /
-  `LearnedBaseTempC` / `LearnedResistances`, UI saves every ~5 min) learns online:
-  C from surplus-watts vs temp slope, R anchors (0/20/…/100%) + base from quasi-steady
-  points; seeds are NH-D15-class (C 450 J/°C). **Learning guardrails (2026-07-26)**:
-  base (the ZERO-watt baseline, ambient + case air) is clamped to ≤45° and R samples
-  to a fan-speed-sliding floor (0.20 °C/W at 0% → 0.05 at 100%; `MinR()`), and
-  `LoadFrom` rejects out-of-bounds saved values as unlearned. Without them the
-  (base, R) pair is unidentifiable from single-operating-point data (fans parked at
-  0% all day = one point) and drifts along a ridge — base eats the steady temp level,
-  R collapses, and the more-fan-never-cools-worse clamp used to flatten the whole
-  anchor ladder to the collapsed value (now it also respects the per-anchor floors).
-  Found on Kuba's machine 2026-07-26 as base 52°/R flat ~0.08–0.10 on BOTH channels
-  (model claimed ~200 W dissipation at 44 W draw → every energy-side prediction
-  blind; partly legacy of the pre-2026-07-25 bug where `--sim` runs saved sim-learned
-  models into the real profile). His profile was healed in place (learned values
-  zeroed; backup `profile.json.bak-2026-07-26`) and — his preference, stated twice:
-  ~70° die should mean fans — **his machine runs `SteadyTargetMarginC` 20 (sustained
-  aim 70°) and `RampLeadSeconds` 90 ("fans should kick in much earlier")**; preset
-  defaults stay 10/45 — revert via the dev-panel sliders. **Fuse**: raw temp ≥ `Profile.OverrideTempC`
-  (default 90) → the channel's own staircase evaluated on the RAW temp is written
-  instantly, no slew, output never decays while latched (release: 3° below for 10 s);
-  stop probe + idle kick are bypassed during override. Under a load that pins Tctl at
-  the fuse this degrades into exactly the hand-tuned temp staircase. The curve stays
-  meaningful in power mode: ladder of allowed levels + fuse fallback + why-chip
-  comparison. App-level settings (don't mark "Custom"): `ControlMode`
-  (Temp/Power/Auto — see the control-mode entry below; default Auto since
-  2026-07-27, was Power for its first day),
+  5/4 of today's sustained draw** (in Auto the floor IS the curve, so the
+  descent hands straight back to the hand-tuned staircase; one snap, never below
+  a branded level, slew still glides the output) — reacting minutes before the
+  cooling temp average would. The 5/4 margin is hysteresis in the DRAW
+  dimension, where the swings actually live (a ±HysteresisC temp band alone is
+  worth only ~4 W at a 20% fan level and hunts across it); deliberately NOT
+  stacked with the temperature band (the double margin blocked the final step to
+  silence at warm idle). `ChannelConfig.HysteresisC` still feeds the
+  controller — as the model prong's aim-clearance margin.
+  **The sustained aim is also enforced UPWARD** (the aim-referenced tau goes
+  blind at a settled equilibrium a frozen/unlearned model believes is under the
+  aim): trend past the steady aim AND (power average demands a higher ladder
+  level OR the temp has settled there, slope > −0.002 — the model-free prong
+  catches frozen/unlearned models) → one ladder step up per StepDownHoldSeconds
+  (why-chip reason `StepUpHold`). Each step up brands the level it left as
+  measured-insufficient at that PowerAvg — DemandLevel is clamped above the
+  branded level so the model can't argue the fan back down into a slow on/off
+  limit cycle; the brand lifts once the sustained draw has stayed max(5 W, 10%)
+  below the failing draw for a full StepDownHold (sustained forgiveness —
+  instant forgiveness re-armed the descent on every lull of a fluctuating load).
+  A spent budget (trend ≥ ceiling, trend not falling) reads `TauSeconds = 0`,
+  not ∞ — also routed into the ramp branch.
+  `ThermalModel` (per channel, persisted in profile.json as
+  `LearnedThermalMassJPerC` / `LearnedBaseTempC` / `LearnedResistances`, UI
+  saves every ~5 min) learns online: C from surplus-watts vs temp slope, R
+  anchors (0/20/…/100%) + base from quasi-steady points; seeds are NH-D15-class
+  (C 450 J/°C). **Learning guardrails**: base (the ZERO-watt baseline, ambient +
+  case air) is clamped to ≤45°, R samples to a fan-speed-sliding floor
+  (0.20 °C/W at 0% → 0.05 at 100%; `MinR()`), and `LoadFrom` rejects
+  out-of-bounds saved values as unlearned — without them the (base, R) pair is
+  unidentifiable from single-operating-point data (fans parked at 0% all day =
+  one point) and drifts along a ridge: base eats the steady temp level, R
+  collapses, and the more-fan-never-cools-worse clamp flattens the whole anchor
+  ladder to the collapsed value (it also respects the per-anchor floors).
+  Kuba's machine (his preference, stated twice: ~70° die should mean fans) runs
+  **`SteadyTargetMarginC` 20 (sustained aim 70°) and `RampLeadSeconds` 90
+  ("fans should kick in much earlier")**; preset defaults stay 10/45 — revert
+  via the dev-panel sliders. **Fuse**: raw temp ≥ `Profile.OverrideTempC`
+  (default 90) → the channel's own staircase evaluated on the RAW temp is
+  written instantly, no slew, output never decays while latched (release: 3°
+  below for 10 s); stop probe + idle kick are bypassed during override. Under a
+  load that pins Tctl at the fuse this degrades into exactly the hand-tuned temp
+  staircase. The curve stays meaningful in power mode: ladder of allowed levels
+  + fuse fallback + why-chip comparison. App-level settings (don't mark
+  "Custom"): `ControlMode` (Temp/Power/Auto — see below; default Auto),
   `PowerAveragingSeconds` (60), `RampLeadSeconds`, `ReliefMaxWatts` (190),
   `OverrideTempC` — dev-panel CONTROL MODE switch + four sliders + live
-  `draw · avg` / `buffer · needs` /
-  `headroom` readout (that line renamed from `lead` 2026-07-27);
-  channels without power sensors keep the temp filter. Why-chip reasons: BudgetHold /
-  BudgetRamp / HardOverride.
-  **Every remaining knob is exposed too (2026-07-25, "add all the new parameters to
-  be shown in developer mode")** — what used to be `private const` in
-  `PowerBudgetController` are now app-level profile settings with dev-panel sliders
+  `draw · avg` / `buffer · needs` / `headroom` readout; channels without power
+  sensors keep the temp filter. Why-chip reasons: BudgetHold / BudgetRamp /
+  HardOverride.
+  **Every internal knob is exposed too** — former `private const` values in
+  `PowerBudgetController` are app-level profile settings with dev-panel sliders
   under a `BUDGET INTERNALS` sub-header: `BudgetCeilingMarginC` (4, ceiling =
-  override − this), `SteadyTargetMarginC` (10, sustained aim; clamped in `Step` so it
-  can never sit above the ceiling), `PowerTrendSeconds` (30), `PowerSlopeSeconds`
-  (25), `PowerNowSeconds` (10), `OverrideReleaseC` (3) and `OverrideReleaseSeconds`
-  (10), plus a live `ceiling · aim` / `trend · °C/s` readout — and under it (Kuba's
-  ask 2026-07-27, "add separate line with slider options that are used in new
-  algorithm") a `headroom: lead · ±band` / `avg · quiet gate` line gathering every
-  knob the aim-referenced headroom reads (lead, the channel's HysteresisC dead band,
-  power averaging, trend+slope = the quiet-gate span), since those sliders live in
-  three different panel sections; tooltip maps each value back to its slider. A `LEARNED MODEL`
-  sub-header follows: `ThermalLearningEnabled` (default true — unchecking freezes the
-  model where it stands), a readout of mass / base / R-at-the-current-speed / the six
-  R anchors (read straight off `ChannelConfig`, which the engine rewrites every tick),
-  and a **Reset learned model** button (`FanEngine.ResetThermalModels()` — clears the
-  live models and the persisted values without touching control state, so the fans
-  don't jump). Dev-panel readout lines are hand-broken with `\n`: the panel fits
-  ~31 mono characters, and past that WPF wraps mid-token (`°C/W` → `°` + `C/W`).
-  Each readout must be ONE interpolated string: `Inv($"…" + $"…")` does not compile —
+  override − this), `SteadyTargetMarginC` (10, sustained aim; clamped in `Step`
+  so it can never sit above the ceiling), `PowerTrendSeconds` (30),
+  `PowerSlopeSeconds` (25), `PowerNowSeconds` (10), `OverrideReleaseC` (3),
+  `OverrideReleaseSeconds` (10), plus a live `ceiling · aim` / `trend · °C/s`
+  readout — and under it a `headroom: lead · ±band` / `avg · quiet gate` line
+  gathering every knob the aim-referenced headroom reads (lead, the channel's
+  HysteresisC dead band, power averaging, trend+slope = the quiet-gate span; the
+  sliders live in three different panel sections; tooltip maps each value back
+  to its slider). A `LEARNED MODEL` sub-header follows: `ThermalLearningEnabled`
+  (default true — unchecking freezes the model where it stands), a readout of
+  mass / base / R-at-the-current-speed / the six R anchors (read off
+  `ChannelConfig`, which the engine rewrites every tick), and a **Reset learned
+  model** button (`FanEngine.ResetThermalModels()` — clears the live models and
+  the persisted values without touching control state, so the fans don't jump).
+  Dev-panel readout lines are hand-broken with `\n`: the panel fits ~31 mono
+  characters, past that WPF wraps mid-token (`°C/W` → `°` + `C/W`). Each readout
+  must be ONE interpolated string: `Inv($"…" + $"…")` does not compile —
   concatenated interpolated strings lose the FormattableString conversion. The
-  headroom line was committed that way on 2026-07-27 and the tip didn't build until
-  the control-mode commit folded it back into a single `$"…\n…"`.
-  The four long setting checkboxes now hold a wrapping `TextBlock` instead of a
-  string `Content` — a plain string clips at the panel edge. `SimulatedBackend` is now a real plant (sink 420 J/°C
-  behind fan-dependent resistance, die rides ~0.055 °C/W above sink, power sensors
-  `sim/cpu-pwr`/`sim/gpu-pwr`) so `--sim` exercises the controller honestly. All
-  scenarios (burst immunity, predictive ramp, fuse with corrupt model, power step-down,
-  C/R learning convergence) verified by a scratchpad console harness on 2026-07-24.
-  The upward enforcement was verified by a third harness on 2026-07-26 (sim plant
-  replica, deterministic): 90 W sustained now steps 0→20% ~8 min in and settles at
-  ~71° die (was: parked at 84.2° with fans off forever); 188 W converges to 100%
-  holding ~79.7° (the aim); 8 s/150 W spikes still never move the fans; learning-off
-  behaves the same as learning-on thanks to the model-free prong + the brand; after
-  the load ends the brand is forgiven and the fan winds back to 0.
-  **Fourth harness 2026-07-27 (the aim-referenced headroom; 10 scenarios by the end
-  of the day)**, deterministic sim-plant replica, Kuba's margins (aim 70 / ceiling
-  86 / lead 90) plus a preset-defaults scenario: settled idle 44 W reads ∞ with fans
-  off; a constant 90 W step gets fans at +70 s (trend 64°) and settles 65° at 40%
-  with tau recovering ONLY on the fan steps; a 44→90 W creep over 8 min shows a
-  242 s visible countdown before firing at 66°; 150 W and 250 W spike trains never
-  move the fans (min tau 632 s, never near the trigger); 188 W reaches 100% in
-  ~1 min peaking 80.1° die, no fuse; a frozen optimistic-corner model still gets
-  fans via the measured prong and holds a stable 40% thanks to the ramp brand;
-  preset defaults fire at 78.9° and settle 70.7°; **S7, the report repro** — a
-  realistic game (95 W mean swinging 111↔167 W, bursts to ~155, Kuba's learned
-  values, model reset mid-rise) — fires predictively at +58 s / trend 67° and then
-  holds one steady 50% for ten minutes straight through the swings; S5b (90 W onto
-  a warm 63° idle) fires at +56 s / 68.2° and the warm idle itself unwinds to
-  fully-stopped fans.
-  Gotcha: don't lower `OverrideTempC` much below 90 on the 9950X3D — the ceiling is
-  `Override − 4` and the steady target `Override − 10`, so 85 forces near-100% fan for
-  loads Kuba's Quiet curve holds at 81% (found in harness scenario 2). Second harness
-  (2026-07-25, the newly exposed knobs): a bigger ceiling margin ramps earlier and
-  peaks cooler (first fan at 156/131/87 s for 4/10/20 °C), a tighter aim settles
-  higher (81/90/100 %), inverted margins clamp instead of misbehaving, extreme windows
-  stay finite — but **long trend/slope windows are the risky end**: at 120 s/120 s the
-  ramp waits until 205 s and the die reaches 89.9 °, i.e. it only just stays under the
-  fuse.
-- **Futility edge + experiment latch (2026-07-27, Kuba's chess-engine report: fans
-  at 100% "and I don't think it is doing that much because the radiator is barely
-  hot")**: a die-limited load — conduction gradient under the die dwarfs what
-  airflow can touch, so the die self-clamps at the same temperature at every fan
-  speed (his 9950X3D read 85.3° at 81, 90, 100% AND fans-off alike at ~180 W;
-  nearly all of the learned 0.29 °C/W is inside the package) — used to read as
-  demand = max: no ladder level held the 70° aim, so `DemandLevel` fell through to
+  four long setting checkboxes hold a wrapping `TextBlock`, not a string
+  `Content` (a plain string clips at the panel edge). `SimulatedBackend` is a
+  real plant (sink 420 J/°C behind fan-dependent resistance, die ~0.055 °C/W
+  above sink, power sensors `sim/cpu-pwr`/`sim/gpu-pwr`) so `--sim` exercises
+  the controller honestly. Gotcha: don't lower `OverrideTempC` much below 90 on
+  the 9950X3D — the ceiling is `Override − 4` and the steady target
+  `Override − 10`, so 85 forces near-100% fan for loads Kuba's Quiet curve holds
+  at 81%. Gotcha: **long trend/slope windows are the risky end** — at
+  120 s/120 s the ramp waits until 205 s and the die reaches 89.9 °, only just
+  under the fuse.
+- **Futility edge + experiment latch**: a die-limited load — the conduction
+  gradient under the die dwarfs what airflow can touch, so the die self-clamps at
+  the same temperature at every fan speed (nearly all of the learned 0.29 °C/W is
+  inside the package) — used to read as
+  demand = max: no ladder level held the aim, so `DemandLevel` fell through to
   `ladder[^1]` and the settled StepUpHold arm marched one step per 25 s to 100%,
   buying <1° total. Two mechanisms in `PowerBudgetController`, both HysteresisC-
   scaled: (1) **model band** (`UsefulLevel`) — when no level's predicted equilibrium
@@ -546,8 +466,8 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   blind `ladder[^1]` fallback got the same treatment); (2) **experiment latch** —
   the band alone loses to online learning (LearnSteady teaches the visited anchor
   the measured R while unvisited anchors stay stale-optimistic, so the model
-  perpetually claims the NEXT step buys degrees — harness C1 caught the march
-  resuming at 81→90 exactly this way), so every model-driven up-step from a settled
+  perpetually claims the NEXT step buys degrees), so every model-driven up-step
+  from a settled
   state (|slope| < 0.005, draw settled) records (level, trend, draw); once the
   trend is flat again at unchanged draw (±max(5 W, 10%)) without having dropped
   HysteresisC, the step is taken back, the brand it set is cleared (the level
@@ -556,26 +476,22 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   (trend release is symmetric ±HysteresisC, so a wrong verdict self-heals as the
   temp climbs). Floor-adopt/fuse/step-down clear an in-flight experiment (the jump
   confounds it). Net effect in Auto: the hand-tuned staircase floor is what rules a
-  clamped load (81% at avg 85.3° on his curve), the budget adds ONE ~25 s probe
+  clamped load, the budget adds ONE ~25 s probe
   step, proves it futile, and holds — a boost-clamped CPU converting fan into
-  watts at constant temp (draw rose ~7 W per step all session) counts as futile by
+  watts at constant temp counts as futile by
   design; a clearly grown draw (>10%) re-baselines instead.
-  Switchable since 2026-07-29: `Profile.FutilityProbeEnabled` →
+  Switchable: `Profile.FutilityProbeEnabled` →
   `PowerBudgetController.FutilityProbeEnabled` (default true, app-level, dev-panel
   group FUTILITY PROBE). Off: no experiment is opened, no latch set (a standing
   one — and any relief waiver behind it — is dropped on the next `Step`), and both
   `UsefulLevel` and the ramp branch fall back to `ladder[^1]` when no level holds
-  the aim, i.e. the pre-2026-07-27 march to max fan. **Downward relief arms only
+  the aim, i.e. a march to max fan. **Downward relief arms only
   behind the latch, so it is off with this too.** Settings line logs
-  `futility on/off`; harness check: clamped die at 85.3°/180 W peaks at 90% and
-  settles back to 81% with the probe on, marches to 100% with it off.
-  **Downward relief (same night, Kuba: "try lowering the speed; if the parameters
-  stay the same lower it, if they start rising raise the RPM" + "only if the
-  sustained load is below 190 W, add a slider" + "step-down hold applies to the
-  first step only, then instantly snap")**: while the latch stands, the draw is
-  settled+under `Profile.ReliefMaxWatts` (default 190, DOWNWARD RELIEF group
-  slider 50–400 W; the group's `Profile.ReliefEnabled` master checkbox —
-  2026-07-28 — turns the whole probe off) and the trend flat above the aim, the controller probes BELOW the
+  `futility on/off`.
+- **Downward relief**: while the latch stands, the draw is settled + under
+  `Profile.ReliefMaxWatts` (default 190, DOWNWARD RELIEF group
+  slider 50–400 W; the group's `Profile.ReliefEnabled` master checkbox
+  turns the whole probe off) and the trend flat above the aim, the controller probes BELOW the
   running level — **the only case where measured evidence may waive the Auto
   floor** (`EffectiveFloor` in the controller; `_reliefLevel` is a standing
   waiver). First step down one ladder level, judged for a StepDownHold like the
@@ -590,8 +506,8 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   keeps the waiver standing so the stale floor (90 s average, hot for another
   minute) cannot pull the fans UP right as the heat goes away — it clears
   quietly once the floor falls to it.
-  **Power floor (later that night, Kuba: "200 sustained draw requires 80% fan,
-  100 requires 30%")**: his calibration is a first-class mapping the die-referenced
+- **Power floor**: Kuba's calibration (200 W sustained draw → 80% fan,
+  100 W → 30%) is a first-class mapping the die-referenced
   model cannot express (at 200 W the die clamps at every fan speed, so no
   die-temperature aim reproduces "80% is right") — a continuous line through
   (100 W → `PowerFloorPercentAt100W`, default 30) and (200 W →
@@ -602,32 +518,16 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   waives the temperature staircase), and rides under the fuse too. At idle draws
   the line falls below the zero-snap threshold, so fans still stop; both sliders
   at 0 = off. Two POWER FLOOR group sliders (0–100%) behind the group's
-  `Profile.PowerFloorEnabled` master checkbox (2026-07-28), app-level like the
-  rest; settings line logs `pfloor 30%@100W/80%@200W` (or `pfloor off`). Chess repro now bottoms out ON
-  the line (~64% at 168 W — matching his original "lower it to 60%" better than
-  the ladder's 50), and post-load descents glide down the line as the average
-  decays instead of stepping. Verified by the
-  **seventh scratchpad harness** (2026-07-27): C1 chess repro from his actual
-  learned model + margins in Auto (floor climb → one probe 81→90 → back, 25 s
-  above 81%, then relief settles ON the power-floor line at 64%, line never
-  undercut); C2 90 W on a fan-effective plant
-  still fires and settles 40%/64°; C3 188 W from seeds on a plant where 81%
-  genuinely can't hold the preset aim still climbs to 90% (a helping step's
-  verdict clears — trend falls); C4 spike train silent; C5 floor-guard 40 W creep
-  still one-steady-ON; C6 the ungated stop probe latching 0% at full load below
-  the 78° probe ceiling (why the demand gate exists); C7 load-end during relief —
-  no fan bump, unwinds to silence; C8 clamp shifting 85.3→88 mid-relief — floor
-  restored in 17 s, no fuse; C9 draw over the relief cap — floor never undercut;
-  C10 post-load descent = one target snap + power-floor glide, monotonic 90→0,
-  fans off 94 s after load end.
-- **Power curve — Curve control mode (2026-07-27, Kuba: "can we create a curve for
-  power consumption?", direct-driver variant chosen via AskUserQuestion)**: each
+  `Profile.PowerFloorEnabled` master checkbox, app-level like the
+  rest; settings line logs `pfloor 30%@100W/80%@200W` (or `pfloor off`).
+  Post-load descents glide down the line as the average decays instead of stepping.
+- **Power curve — Curve control mode**: each
   channel carries a second staircase `ChannelConfig.PowerPoints`
   (`PowerPoint(Watts, Percent)` in FanCurve.cs) — the watts twin of `Points`. In
-  the new 4th control mode **Curve** (`ControlMode.PowerCurve`), channels with a
+  the 4th control mode **Curve** (`ControlMode.PowerCurve`), channels with a
   power sensor are driven by it DIRECTLY: a second `ResponseFilter` instance runs
   in the watts dimension (input = instantaneous draw, averaging =
-  `PowerAveragingSeconds`, hysteresis = `Profile.PowerCurveHysteresisW` — new
+  `PowerAveragingSeconds`, hysteresis = `Profile.PowerCurveHysteresisW` —
   app-level setting, default 10 W, POWER CONTROL slider 2–50 W; hold/slew/zero-snap
   from the channel), so the whole MacBook feel — spike immunity, step-down hold,
   slew — applies to watts, deterministically, with the predictive budget layer off
@@ -637,13 +537,13 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   staircase on the RAW temp instantly, output never decays while latched, release
   −`OverrideReleaseC` for `OverrideReleaseSeconds`) stays armed. The watts-side
   target also feeds `DemandLevel`, which keeps the stop-probe demand gate working
-  (a die-limited load would otherwise trial-stop at full draw — the C6 trap).
+  (a die-limited load would otherwise trial-stop at full draw).
   `FanCurve` got axis bounds (`axisMin/axisMax` ctor args; `FromPower` builds the
   watts staircase — without this, Normalize used to clamp watts into 15–100!).
   Empty `PowerPoints` = pure temp behaviour; `LoadOrDefault` seeds missing power
   curves from the Quiet preset (both presets ship defaults sized for a ~200 W CPU /
   CPU+GPU case sum; `AdoptTuning` copies them; editor never leaves <2 points, so
-  empty means "never had one"). **UI**: `CurveEditor` is axis-generic now
+  empty means "never had one"). **UI**: `CurveEditor` is axis-generic
   (`PowerAxis` property; °C snaps whole degrees/1° min gap, W snaps 5 W/5 W gap;
   power axis top = max(300, top point + headroom) rounded to 50) — a `CURVE °C/W`
   toggle button in the chart-card header (dev mode only, resets to °C on leaving
@@ -654,81 +554,50 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   power edit flips the chart to the power axis so the restore is visible. Why-chip
   reason `PowerCurve` ("power curve: avg NNN W → X% · temp curve asks Y%") when the
   watts side out-asks the temp floor; behavior log describes it and the settings
-  line carries `pwrHyst` + per-channel `pwrCurve W:%…`. Verified by a scratchpad
-  console harness (eighth): constant 180 W settles 65% steady; ±7 W swing across a
-  step edge never flaps; 8 s/250 W spike train at idle stays silent; fuse latches
-  instantly at raw 90° and releases clean; hot-but-low-draw lets the temp floor
-  win; empty power curve is tick-identical to the pure temp path; load-end winds
-  down to stopped in ~69 s. Editor render verified by a WPF harness PNG on both axes.
-- **Control-mode switch (2026-07-27, Kuba: "switch between temperature-based and
-  power-based mode" + "automatic option that considers both outputs")**: dev-panel
-  `CONTROL MODE` segmented switch (Temp · Power · Auto · Curve; at the TOP of the panel
-  since the same-day two-column rework — Kuba's placement) → `Profile.ControlMode`
-  (string-serialized enum; app-level like the rest — no "Custom", presets don't touch
-  it). The old bool `PowerControlEnabled` stays as a JSON bridge property declared
-  BEFORE the enum, so pre-change profiles map false→Temperature on load while a
+  line carries `pwrHyst` + per-channel `pwrCurve W:%…`.
+- **Control-mode switch**: dev-panel `CONTROL MODE` segmented switch
+  (Temp · Power · Auto · Curve, at the TOP of the panel) → `Profile.ControlMode`
+  (string-serialized enum; app-level — no "Custom", presets don't touch it). The
+  old bool `PowerControlEnabled` stays as a JSON bridge property declared BEFORE
+  the enum, so pre-change profiles map false→Temperature on load while a
   new-format file's `ControlMode`, deserialized after it, always wins (a legacy
-  true leaves the mode at the default — now Auto). **Default Auto** (Kuba's call
-  2026-07-27; was Power for its first day): the staircase is a guaranteed floor
-  and the power side may ramp earlier/higher. Temperature forces every channel
-  onto `ResponseFilter` — with the temp-path files untouched since main's
-  pre-switch state, Temperature mode IS the old temperature-only behaviour
-  (power sensors unread; budget strip note + power readout say "temperature mode —
-  power side off"). **Auto runs both sides every tick and the higher demand wins**,
-  implemented INSIDE the controller as `PowerBudgetController.FloorPercent`: the
-  engine steps the ResponseFilter first and feeds its snapped `TargetLevel` in as a
-  floor which the budget's published target and slewed output never drop below. The
-  floor lives inside the controller — not as a max() in the engine — so the budget's
-  physical output is what its physics read: surplus, the model prong's equilibrium
-  and `LearnSteady` all see the fan that actually spins. The outside-max design
-  poisons the model (LearnSteady pairs 50 %-cooled temps with the budget's parked 0 %
-  and teaches R(0) 0.55→0.35 — harness A2's floor-blind control shows it). No new
-  why-chip reasons needed: floor binding ⇒ output = the curve's level ⇒ chip hidden.
-  Verified by a fifth scratchpad harness, 2026-07-27 (A1 constant 90 W in Auto: budget
-  target never below the floor, predictive fire still at +69 s; A2 learning honesty +
-  the poisoned control; A3a sparse 150 W spikes: nothing moves; A3b dense spike train
-  whose 90 s average legitimately crosses the 57° step: the staircase's own 20 % runs,
-  power side silent at ∞ headroom — pure Temperature mode would do the same; A4
-  `FloorPercent = 0` is tick-identical to the pre-change controller, so Power mode is
-  untouched) plus a WPF reflection harness that clicks the switch (profile follows,
-  segments render; the --screenshot flow can't scroll the dev panel that far down).
-  **Floor guard (later on 2026-07-27, Kuba: "the power mode should take into
-  consideration that the heat buffer is being drove down by the temperature — add this
-  calculation to auto mode")**: in Auto the buffer is also draining toward the
-  staircase floor's NEXT step (the lowest curve temp commanding more than the current
-  level, zero-snap respected — `NextFloorStep`), where the floor fires on the 90 s
-  average whatever the model thinks. His telemetry that night showed the resulting
-  limit cycle: ~37 W of desktop draw settles the die at 57–58°, exactly on the 57°
-  first step, so the floor cycled the fans on/off every 2–4 min all evening while the
-  budget read "headroom ∞ · demand 0" (model equilibrium 51° — optimistic, and
-  aim-referenced headroom only watches 70°). Two mechanisms, both `GuardFloor`-gated
-  (engine sets it in Auto only, so Power mode stays tick-identical): (1) the
-  MEASURED headroom prong also watches the trend drain toward the floor line —
-  settled-draw-gated slope only; the model arm was tried and cut the same day
-  because near an unvisited operating point the learned R is at its least
-  trustworthy (one transient of ridge-inflated R(0)≈1.0 turned the 57° line's small
-  clearance into a false fire during a spike, and a model-eq floor term in
-  demand/step-down LATCHED a pessimistic model's fan on at true idle — harness F4);
-  (2) **a floor step that out-ranks the budget's target is treated as measurement**:
-  the budget brands the level it beat (same brand as StepUpHold, no draw-settled
-  gate — the 90 s average crossing IS sustained evidence) and adopts the floor's
-  level as its own target, so after the floor recedes the budget holds the fan
-  steadily (why-chip: BudgetRamp "curve asks 0%") instead of following it back down
-  into the cycle; the hold unwinds through normal brand forgiveness once the
-  sustained draw genuinely drops. Switchable since 2026-07-29:
-  `Profile.FloorGuardEnabled` (default true, app-level, dev-panel group AUTO FLOOR
-  GUARD) — the engine feeds `budget.GuardFloor = filter != null &&
-  Profile.FloorGuardEnabled`, so off returns Auto to its pre-guard behaviour and
-  Power mode is unaffected either way; settings line logs `floorGuard on/off`.
-  Sixth scratchpad harness (plant tuned to the
-  telemetry: passive die eq ≈ 60° at 38 W): old Auto 9 ON/OFF cycles per hour →
-  guarded Auto one ON then steady 20 %, die 54.9°; true idle 26 W stays silent;
-  draw-drop to 27 W stops the fan for good; sparse 150 W spikes never move it; 90 W
-  load parity with A1; a settled 40 W creep fires the measured prong at +33 s so the
-  budget glides in before the floor ever rises (model-free — works from unlearned
-  seeds); pure Power mode still tolerates the same creep (58° < the 70° aim).
-- **Instant apply on settings change (2026-07-29, Kuba: "after a change is done in
-  the developer settings, apply it instantly")**: the engine fingerprints every
+  true leaves the mode at the default — Auto). **Default Auto**: the staircase
+  is a guaranteed floor and the power side may ramp earlier/higher. Temperature
+  forces every channel onto `ResponseFilter` — Temperature mode IS the old
+  temperature-only behaviour (power sensors unread; budget strip note + power
+  readout say "temperature mode — power side off"). **Auto runs both sides every
+  tick and the higher demand wins**, implemented INSIDE the controller as
+  `PowerBudgetController.FloorPercent`: the engine steps the ResponseFilter
+  first and feeds its snapped `TargetLevel` in as a floor which the budget's
+  published target and slewed output never drop below. The floor lives inside
+  the controller — not as a max() in the engine — so the budget's physical
+  output is what its physics read: surplus, the model prong's equilibrium and
+  `LearnSteady` all see the fan that actually spins (an outside max() poisons
+  the model — LearnSteady pairs floor-cooled temps with the budget's parked
+  0 %). No new why-chip reasons: floor binding ⇒ output = the curve's level ⇒
+  chip hidden. **Floor guard**: in Auto the buffer is also draining toward the
+  staircase floor's NEXT step (the lowest curve temp commanding more than the
+  current level, zero-snap respected — `NextFloorStep`), where the floor fires
+  on the 90 s average whatever the model thinks — ungated, this produced a real
+  limit cycle (a ~37 W desktop draw settling exactly on the curve's 57° first
+  step cycled the fans on/off every 2–4 min while the budget read "headroom ∞ ·
+  demand 0"). Two mechanisms, both `GuardFloor`-gated (engine sets it in Auto
+  only, so Power mode stays tick-identical): (1) the MEASURED headroom prong
+  also watches the trend drain toward the floor line — settled-draw-gated slope
+  only (a model arm was tried and cut: near an unvisited operating point the
+  learned R is at its least trustworthy); (2) **a floor step that out-ranks the
+  budget's target is treated as measurement**: the budget brands the level it
+  beat (same brand as StepUpHold, no draw-settled gate — the 90 s average
+  crossing IS sustained evidence) and adopts the floor's level as its own
+  target, so after the floor recedes the budget holds the fan steadily
+  (why-chip: BudgetRamp "curve asks 0%") instead of following it back down into
+  the cycle; the hold unwinds through normal brand forgiveness once the
+  sustained draw genuinely drops. Switchable: `Profile.FloorGuardEnabled`
+  (default true, app-level, dev-panel group AUTO FLOOR GUARD) — the engine feeds
+  `budget.GuardFloor = filter != null && Profile.FloorGuardEnabled`, so off
+  returns Auto to its pre-guard behaviour; Power mode is unaffected either way;
+  settings line logs `floorGuard on/off`.
+- **Instant apply on settings change**: the engine fingerprints every
   control-shaping setting each tick (`FanEngine.SettingsSignature` — mode, zero
   snap, power knobs, per-channel tuning, both curves, sensor assignments; learned
   model values and kick/probe params deliberately excluded — a false positive
@@ -737,31 +606,25 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   `PowerBudgetController` gets a one-shot `ApplyNow()`: on that tick the new
   settings' verdict is adopted immediately — no step-down hold, no hysteresis
   carry-over, no slew glide, pending budget holds count as served and the
-  one-step-per-window ramp brake lifts. Before this an edit was read within ~1 s
-  but *felt* only after the 25 s hold + ramp (Kuba's 01:21–01:28 curve-editing
-  session: target followed a curve edit 27 s late). Measurement state — averaging
+  one-step-per-window ramp brake lifts (before this an edit was read within ~1 s
+  but *felt* only after the 25 s hold + ramp). Measurement state — averaging
   windows, brands, futility latch, relief, learned model — is untouched: it
-  encodes evidence, not settings (harness C3: the snap stopped at a still-branded
-  level, correctly). Verified by a scratchpad harness (15 checks): filter snap
-  down/up mid-hold and mid-slew, budget snap with output jump, fingerprint
-  stability against per-tick learned-value writes.
-  Switchable since 2026-07-29: `Profile.InstantApplyEnabled` (default true,
+  encodes evidence, not settings (the snap correctly stops at a still-branded
+  level).
+  Switchable: `Profile.InstantApplyEnabled` (default true,
   app-level) — off, the fingerprint is still tracked but no `ApplyNow()` is sent,
-  so an edit is read within a tick and *felt* after the normal hold + ramp (the
-  pre-2026-07-29 behaviour). Dev-panel group INSTANT APPLY (bare header checkbox);
+  so an edit is read within a tick and *felt* after the normal hold + ramp.
+  Dev-panel group INSTANT APPLY (bare header checkbox);
   settings line logs `instantApply on/off`.
-- **Process priority High (2026-07-29)**: set best-effort in `App.OnStartup` (via
-  `App.ApplyProcessPriority`, now called right after the profile loads so the
+- **Process priority High**: set best-effort in `App.OnStartup` (via
+  `App.ApplyProcessPriority`, called right after the profile loads so the
   `Profile.HighPriorityEnabled` switch — dev panel HIGH PROCESS PRIORITY, default
-  true — is honoured; toggling it applies High/Normal immediately). A
-  32-core chess run starved the normal-priority UI thread until Windows ghosted
-  the window (blank → reappear), which read as "the app closed and opened again";
-  the process never actually restarted (same PID across the session — events.txt
-  showed no startup line). High priority keeps both the UI and the engine tick
-  scheduled under full load; the app uses a few % of one core. (Separate finding
-  from that night's logs: the 2026-07-28 14:10 reboot was an OS-level hard crash —
-  Kernel-Power 41, "restarted without clean shutdown" — not the app; watch for
-  recurrence, it may be platform instability under load on the new build.)
+  true — is honoured; toggling it applies High/Normal immediately). High priority
+  keeps both the UI and the engine tick scheduled under full load (a 32-core load
+  can otherwise starve the normal-priority UI thread until Windows ghosts the
+  window); the app uses a few % of one core. Note: the 2026-07-28 Kernel-Power 41
+  reboot was an OS-level hard crash, not the app — watch for recurrence, it may
+  be platform instability under load on the new build.
 - Changing ChannelConfig field names breaks saved `%AppData%\FanCurves\profile.json`
   (old fields silently ignored, defaults kick in) — delete it after schema changes.
 - Sensor/control IDs are backend-specific; `AutoAssign` prunes IDs the current backend
@@ -769,19 +632,17 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   works on real hardware and vice versa).
 - **Dev flows never write the config** (`Profile.ReadOnly`, set from `--sim` /
   `--screenshot` in `App.OnStartup`): `Save()` is a no-op and the sensor dump goes to
-  `sensors.sim.txt` instead of overwriting `sensors.txt`. Before this (bug found
-  2026-07-25) every `--sim` run rewrote the real `profile.json`: AutoAssign pruned the
-  hardware IDs the sim backend doesn't know and saved `sim/*` in their place. Auto-
-  assignable headers heal on the next real launch, but **manual assignments do not** —
-  Kuba's Pump Fan header (never auto-assigned by design) was silently lost that way.
+  `sensors.sim.txt` instead of overwriting `sensors.txt` — a saving `--sim` run
+  would let AutoAssign prune the hardware IDs the sim backend doesn't know and
+  write `sim/*` in their place; auto-assignable headers heal on the next real
+  launch, but **manual assignments (like Kuba's Pump Fan header) do not**.
   Keyed off the flags, not `hw.IsSimulated`, so an elevated launch that falls back to
   simulation because the kernel driver failed still saves the user's edits.
 - Temperature display: simple mode shows only the rolling average (the thing that
   actually drives the steps) — hero numeral + segment readouts; Developer mode adds
   the raw "now" temp (amber dashed line on the chart, "now …°" in the card header)
-  and, since 2026-07-27 (Kuba's ask; first cut was a corner chip, he wanted "a line
-  like the temperature, opposite direction"), **power draw as horizontal reference
-  lines in the curve chart** — the mirror of the vertical raw-temp line: dashed
+  and **power draw as horizontal reference lines in the curve chart** — the mirror
+  of the vertical raw-temp line: dashed
   faint = instantaneous draw, solid brighter = sustained average (the budget
   strip's trace vocabulary), read against a right-hand watts scale (0 W at the
   bottom, `BudgetChart.NiceWatts` ladder top — made internal for this — printed as
@@ -793,6 +654,27 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   drawn LAST on the card colour; the raw-temp "now …°" label dodges the scale chip.
   Hidden when the channel has no power sensor or the mode is Temperature (Watts is
   null).
+- **Undo/redo covers preset switches, not just curve points** (2026-07-30, Kuba's
+  ask — a preset click used to be unrecoverable: it overwrites every curve AND every
+  behaviour knob, and it cleared the undo stack on the way through). One stack in
+  MainWindow (`Edit`, Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z) now carries two entry kinds:
+  `CurveEdit` (per-channel point lists, as before) and `TuningEdit`, a pair of
+  whole-profile `TuningSnapshot`s. The snapshot type lives in Core next to
+  `Profile.CaptureTuning()` / `ApplyTuning()`, and `AdoptTuning(preset)` is now
+  `ApplyTuning(preset.CaptureTuning())` — so what a preset overwrites and what an
+  undo restores are one list that cannot drift apart. It carries curve + power curve
+  + averaging/hysteresis/hold/slew/floor per channel and the profile name; sensor and
+  header assignments (the machine) and the learned thermal model (measured on it) are
+  deliberately outside it. Notes: record equality compares the point Lists by
+  reference, so `TuningSnapshot.Matches` does the value comparison — re-clicking the
+  preset you are already on must not push an entry; the stacks are no longer cleared
+  on preset adoption (undo is LIFO, so a curve edit below a `TuningEdit` is only
+  reached once that entry has put its state back); and stepping a `TuningEdit`
+  re-captures the live tuning as the opposite stack's snapshot, so behaviour-slider
+  edits made after the switch survive the round trip instead of being silently
+  reverted (the sliders themselves are still not undoable). Restoring runs
+  `OnChannelSelected` so the dev-panel sliders follow, and the engine picks the
+  restored values up through the instant-apply fingerprint like any other edit.
 - **Curves apply automatically from launch**; preset switches and point edits take
   effect within one engine tick (the engine reads the live Profile objects).
   **Pause (BIOS control)** hands headers back to the BIOS; app exit does too.
@@ -800,8 +682,7 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   default true since 2026-07-21 — matches Kuba's setting); unchecking the sidebar
   checkbox "Keep running in tray on close" makes X exit (fans back to BIOS). Sidebar checkbox "Start with Windows"
   (persisted `Profile.AutostartEnabled`, default true) registers/removes the Task
-  Scheduler task immediately on toggle. Tray tooltip shows live temps→%. (NotifyIcon is WinForms —
-  csproj removes the WinForms global usings to avoid Point/Application ambiguity.)
+  Scheduler task immediately on toggle. Tray tooltip shows live temps→%.
 - **Restart cycle without UAC** (Claude can do this for the user): create
   `%AppData%\FanCurves\exit.signal` → the running elevated instance exits cleanly
   within ~1 s (fans to BIOS); `dotnet build`; `schtasks /Run /TN FanCurves` starts
@@ -832,9 +713,148 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
 - **Pump headers are never auto-assigned** (a case curve once slewed a live pump
   toward 0%); the case channel only auto-takes System/Case/Chassis/CHA-named
   headers. Manual dev-mode assignment can still pick anything.
+- **A fan header belongs to exactly ONE channel** (2026-07-29). A header obeys a
+  single PWM value, so with the same id on two channels `FanEngine.Tick` writes
+  both in `Profile.Channels` order and the LAST one silently wins every tick —
+  the symptom is a fan that will not turn on, with no why-chip and nothing in the
+  UI to explain it (Kuba's Pump Fan header ended up on Case fans too, whose curve
+  was flat 0%, so the second NH-D15 fan sat at 0 rpm while the CPU pinned at
+  85.3°). Enforced in two places: the dev-panel header checkbox's `Checked`
+  handler removes the id from every OTHER channel first (`RebuildSourceChecks` in
+  MainWindow — it must NOT rebuild the lists from inside that handler, the panel
+  only shows the selected channel and clearing `ControlChecks.Items` there is
+  re-entrant), and `AutoAssign` de-duplicates across channels on every launch
+  (first channel listed keeps the header) so an existing bad profile heals.
+  Sensors are deliberately NOT exclusive — two channels may read one temp.
 - Kuba's current test PC: the second CPU fan sits on the board's "Pump Fan"
   header — manually assigned to the CPU cooler channel (lives in profile.json,
   survives because pruning only drops IDs the backend doesn't know).
+- **Two low-duty header faults (2026-07-29) — RESOLVED 2026-07-30: BIOS
+  per-header drive mode, not the board, not the fans, not LHM.** The Pump Fan
+  header dropped its fan at the curve's 20% step (0 ↔ ~370 rpm) and
+  `System Fan #1` was dead below ~40% duty; both reproduced under BIOS control
+  (never an app bug — full diagnosis journal in `docs/history.md`: swap test,
+  per-hour dropout stats, sustain-vs-startup analysis, DC-mode sweep). Root
+  cause: headers left on ASRock's **Auto** drive mode, which re-probes
+  3-pin vs 4-pin at each boot and can guess DC — in DC mode "20%" is ~2.4 V,
+  below the fans' stall voltage, while PWM pulses full 12 V. Fix applied in the
+  BIOS that night: **every header set explicitly to PWM, never Auto** (the
+  water-pump header has its own menu entry — easy to miss in a "set everything
+  to PWM" pass). Verified over the following morning's telemetry: Pump header
+  0% dropouts in 28 336 samples at 20% duty (was 64–98% the previous
+  afternoon), all four chassis headers statistically identical at every duty.
+  Enduring rules: (a) if a low-duty fault reappears, suspect a header reverted
+  to Auto/DC first — falsifiable check: at 27% from a stop all four case fans
+  break away to ~350 rpm within ~15 s; only if one refuses while its siblings
+  run suspect the board. (b) From a dead stop the P14s need ~27% duty and up
+  to ~15 s to break away, but once spinning they sustain down to ~5% — a curve
+  whose bottom band is below break-away only keeps fans turning if they were
+  already turning. (c) If the chassis headers ever run DC again: slowest
+  sustainable point ~28% (~600 rpm; enforce with zero snap 28–30), and
+  `rpm_per_header` reads garbage (>2500 rpm) below break-away. (d)
+  Cross-session `rpm_per_header` comparisons: LHM's `System Fan #N` numbering
+  does NOT map onto ASRock's CHA_FAN labels, and the `ControlIds` order (= the
+  column order) changes when AutoAssign re-assigns — split analysis per app
+  session.
+- **OPEN (2026-07-30 afternoon): chassis-group kill events + the low-duty
+  break-away trap.** Distinct from the resolved sustain fault. With a test
+  curve holding the case fans at 5–10% duty, every ~30–45 min ALL FOUR chassis
+  headers cut out within one tick (~475 rpm → 0 with no coast-down; garbage
+  tach reads — 907, 10 810 — exactly at the transition) at CONSTANT commanded
+  duty. Kills observed 12:47:42, 13:19:42, 13:47:39, 14:31:05, 15:04:34. The
+  CPU headers on the same NCT6686D, written identically every tick, show zero
+  anomalies in 96k samples over the same hours; behavior.txt and the Windows
+  System log are silent at those instants; no other monitoring software
+  running. The same signature exists in the 2026-07-29 telemetry (pre-PWM-fix),
+  including one kill at 53% duty that self-healed within seconds — so the kill
+  pulses likely fire at every duty and only become visible outages below
+  break-away (~27%), where a stalled P14 needs stochastic minutes to restart
+  (measured at 10%: 2–7.5 min; at 5%: never). Emergent limit cycle follows:
+  kill → stall → case temp climbs → curve steps 5→10% → break-away minutes
+  later → cools → back to 5% → next kill ("once working, once not"). Prime
+  suspect: the ASRock EC periodically re-asserting its own chassis-group fan
+  config — a re-assert on the CPU group would command ≈ the app's own duty and
+  stay invisible, which explains the group asymmetry. Diagnostic + likely fix:
+  set the BIOS chassis fan curve to a constant moderate duty (~50–60%), so a
+  re-assert pulse spins the fans UP for a second (visible spike, self-rescuing)
+  instead of down to 0 — if the outages become 1 s rpm spikes, the theory is
+  proven. App-side hardening either way: keep case bands out of the 1–27% trap
+  zone (zero snap ~28–30; OFF in the current test profile) — 0% or ≥28% means
+  a kill either costs nothing or self-heals in seconds.
+  **Update 2026-08-02 (three more days of telemetry, 07-30→08-02):** the kills
+  persist every ~5–15 min whenever the case band sits at 10–20% (42 group stops
+  on 07-31, 24 on 08-01; at 20% duty the fans stood still for 53–90% of all
+  samples), CPU headers still spotless across all four days — and the
+  "≥28% self-heals in seconds" rule is now DISPROVEN: on 08-02 15:55–16:25+,
+  headers control/3 + control/4 sat at 0 rpm at a commanded 37% for 30+ minutes
+  while `FanEngine` rewrote duty to all four headers every tick (unconditional
+  `SetControl` loop) and control/2 + control/5 ran ~985 rpm alongside. So the
+  override can LATCH individual chassis channels for tens of minutes, not just
+  pulse the group; which pair is affected varies between events. The tach-freeze
+  alternative was ELIMINATED by eye 2026-08-02 ~16:30: during the latched
+  episode Kuba saw two chassis fans spinning, one fully still and one
+  repeatedly twitching — jerking slightly and falling back — i.e. the fans are
+  physically stalled and the twitcher is getting brief drive pulses that are
+  immediately cut, consistent with the app's 1 Hz duty write landing for a
+  fraction of a second before the EC re-zeros the channel (a write-fight the
+  app loses). Note this also caps what the stall-rescue feature can promise:
+  a 100% rescue pulse fights the same fight. SCEWIN nvram dumps CANNOT audit any of this — ASRock's H/W
+  Monitor per-header config is not in the AMI setup NVRAM (the whole 391 KB
+  export contains only 3 AMD-CBS fan items). Next steps unchanged (BIOS
+  chassis curve at constant 50–60% as the EC-re-assert litmus test) plus a
+  candidate app feature: per-header stall rescue — commanded >0 with tach 0
+  for N s → pulse that one header high for a few seconds, then restore.
+  **Tach floor (2026-08-03, verified by eye):** the NCT6686D reads 0 rpm below
+  roughly ~300 rpm — at 10% duty both NH-D15 fans visibly spin (~250–280 rpm)
+  while the app and `rpm_per_header` show 0. A zero read is only proof of a
+  stopped fan when the expected speed is comfortably above ~300 rpm; below
+  that, telemetry cannot distinguish slow-spinning from stopped (matters for
+  any stall-rescue feature and for kill-event analysis at very low duties).
+  Case fans replaced 2026-08-03 with 4× used Noctua NF-A14 PWM (OLX, 270 zł
+  set) — min ~300 rpm, documented start at any duty >0%, no fan-stop trap;
+  the Arctic P14 Pros (27% break-away) are retired from the chassis headers.
+  **Update 2026-08-02 evening (after Kuba's new BIOS settings, reboot 21:27):
+  the override is active FROM BOOT and its release correlates with the case
+  temp crossing 50 °C.** From 21:31:33 the app commanded a constant 27% and all
+  four chassis fans sat at 0 rpm for a full 30 min — the same 27% that
+  breaks these fans away from a dead stop in ~15 s when the headers are free.
+  At 22:01:22 the raw case temp touched 50.0° (curve dipped the duty
+  27→10→27 over the next 40 s) and at 22:02:04 THREE of the four headers
+  released simultaneously (0 → ~630 rpm within 2 s at the same 27%);
+  control/4 stayed in the fight — for the rest of the 22h hour it read 0 in
+  37% of samples and only ~390 rpm (vs siblings' ~630) when turning, i.e. the
+  visible "twitcher": drive pulses landing between EC re-zeros. Same-day
+  earlier sessions fit the same picture: h16–h17 had control/4+3 pinned at 0
+  through TWO reboots (17:27, 17:41) and every duty change, while case temps
+  stayed below ~50°. Working hypothesis sharpened: the EC enforces the BIOS
+  chassis-fan state — including its own fan-stop/zero region below a ~50 °C
+  board temp — against the app's writes; the group releases when the EC's own
+  temp source crosses its threshold and the EC starts commanding nonzero
+  itself. Duty-change dislodging is the weaker alternative (contradicted by
+  h17: reboots + ramps didn't free control/4+3). Consequence: BIOS chassis
+  settings must have NO fan-stop / 0% / "silent" low-temp region — a constant
+  50–60% chassis curve (the standing litmus test) makes an EC win spin fans
+  UP instead of down, and per-header "Allow Fan Stop"-style toggles must be
+  off. CPU channel remains spotless all day, incl. the Pump header at 20%
+  (~370 rpm steady — the 07-29 fault stays fixed).
+  **Continuation 22:30–22:35 (this session's telemetry check):** Kuba's curve
+  edit landed 22:30:48–55 (dropped the 50:10 and 58:20 points, bumped
+  37:27 → 37:28); within seconds ALL FOUR headers jumped ~640 → ~725 rpm
+  (+~90 rpm for a 1-point duty change — more than PWM scaling explains,
+  consistent with an EC state flip at the same moment) and control/4's
+  0↔~300 rpm cycling STOPPED: continuous clean spin from 22:31:00 (last
+  stall 22:30:44), still ~715 rpm at 22:35 with the case temp back at 43° —
+  well BELOW the ~50° release point, and the EC zero-enforcement did not
+  re-engage. So either the EC's own curve has wide hysteresis / releases
+  latch-like once tripped, or the 50° correlation was coincidental with the
+  duty wiggle. Watch item: if control/4 resumes cycling at 28% duty while
+  the case temp stays in the 40s, the temp-threshold theory is out and
+  per-header hardware (fan or header on control/4 — also half of the
+  afternoon latched pair) moves up; distinguishing test remains the July
+  method: physically swap the fans on control/4 and control/2 and see
+  whether the cycling follows the header or the fan. Not DC mode: only 9
+  garbage tach reads (>2500 rpm) in 13 199 Case rows all day — rule (c)'s
+  DC signature is absent.
 - Real hardware wins over simulation whenever it reads any temp sensor, even with
   zero controllable headers (channels then show "[no fan header]").
 - Diagnostics in `%AppData%\FanCurves\`: `sensors.txt` (all sensors + values at
@@ -845,7 +865,15 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   like"): `telemetry-YYYY-MM-DD.csv` — one row per channel per tick with every
   controller input/output (raw/avg/trend temp, draw + sustained avg, out/target %,
   why-chip reason, headroom, demand, ceiling/aim, learned base/R/mass), daily
-  rotation, 7 days kept — and `behavior.txt` (4 MB cap → `behavior-old.txt`) with
+  rotation, 7 days kept. The `rpm` column is only `ControlIds[0]`; the trailing
+  **`rpm_per_header`** column (`ChannelStatus.Rpms`, added 2026-07-29) carries
+  EVERY assigned header's rpm `|`-joined in `ControlIds` order — a channel driving
+  six headers can have one fan stalled or spinning up far slower than its
+  siblings, and the single-header column made that invisible (it also read 0 for a
+  whole day once because `ControlIds[0]` happened to be an empty header). The
+  header line is written when the day's file is created, so a schema change needs
+  the day's CSV deleted, not just a restart.
+  Also written: `behavior.txt` (4 MB cap → `behavior-old.txt`) with
   CHANGES only: fan ON/OFF, target ladder steps, reason transitions (pure
   None↔Ramp flips suppressed — the target line already implies the ramp),
   driving/released flips, `·· <event>` markers (`App.Telemetry?.Event`, used for
@@ -861,12 +889,10 @@ leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine wit
   hook in `App`; the toggle writes a `·· review logging on/off` marker and calls
   the new `TelemetryLog.Flush()` when switching off, so the ≤5 s of buffered CSV
   rows are not stranded until process exit.
-- **Installed & verified on real hardware 2026-07-23** (the X870 Steel Legend /
-  9950X3D build): v0.1.0 exe at `%LOCALAPPDATA%\Programs\FanCurves\FanCurves.exe`,
-  autostart task registered, PawnIO 2.2.0 installed (silent flags are
-  `-install -silent`, dash-style — `/S` fails with exit 87). LhmBackend sees the
-  NCT6686D: 8 controllable headers + all board temps; CPU temp from
-  `/amdcpu/0/temperature/2` (Tctl/Tdie). Control works — the Quiet preset stopped
-  the CPU fans at idle within the first minute. Kuba manually assigned the
+- **Installed & verified on real hardware** (the X870 Steel Legend / 9950X3D
+  build): exe at `%LOCALAPPDATA%\Programs\FanCurves\FanCurves.exe`, autostart
+  task registered, PawnIO 2.2.0 (silent flags are `-install -silent`, dash-style —
+  `/S` fails with exit 87). LhmBackend sees the NCT6686D: 8 controllable headers +
+  all board temps; CPU temp from `/amdcpu/0/temperature/2` (Tctl/Tdie). The
   "Pump Fan" header (`/lpc/nct6686d/0/control/1`, physically the second NH-D15
-  fan) to the CPU cooler channel, as on the previous test setup.
+  fan) is manually assigned to the CPU cooler channel.

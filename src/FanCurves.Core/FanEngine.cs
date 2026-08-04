@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 
 namespace FanCurves.Core;
 
@@ -44,7 +44,11 @@ public record ChannelStatus(
     double AimC = 0,           // sustained aim in force — the line headroom is measured to
     double SlopeCPerSec = 0,   // measured warming/cooling slope of the trend
     double BaseTempC = 0,      // learned cool-idle baseline
-    double ResistanceCPerW = 0); // learned cooling resistance at the commanded %
+    double ResistanceCPerW = 0, // learned cooling resistance at the commanded %
+    // Every assigned header's rpm, in ControlIds order — Rpm above is just the first.
+    // A channel driving several headers can have one fan stalled while the rest spin,
+    // and only a per-header reading makes that visible.
+    IReadOnlyList<double?>? Rpms = null);
 
 /// <summary>
 /// Ticks roughly once a second (jittered ±15% so sampling never phase-locks onto
@@ -74,6 +78,8 @@ public class FanEngine : IDisposable
     public Profile Profile { get; private set; }
     public bool Applying { get; private set; }
     public event Action<IReadOnlyList<ChannelStatus>>? Ticked;
+    /// <summary>A tick threw and was skipped (see Tick) — for the event log.</summary>
+    public event Action<Exception>? Faulted;
 
     public FanEngine(IHardwareBackend hw, Profile profile)
     {
@@ -186,412 +192,438 @@ public class FanEngine : IDisposable
                 _hw.ReleaseControl(id);
     }
 
+    /// <summary>
+    /// One tick, guarded. The profile's collections are edited on the UI thread (sensor
+    /// and header checkboxes, curve drags) without taking this lock, so a tick can catch
+    /// a list mid-edit — "Collection was modified" killed the process twice on
+    /// 2026-07-29, which is the worst possible failure: it leaves the Super I/O frozen
+    /// at the last written PWM with nothing watching the die. Skipping one tick costs a
+    /// second of control; dying costs the machine. The re-arm sits in the finally
+    /// because this is a ONE-SHOT timer — an escape before it would stop fan control
+    /// for the rest of the session even if the process survived.
+    /// </summary>
     private void Tick()
     {
         lock (_lock)
         {
-            _hw.Update();
-            double now = _clock.Elapsed.TotalSeconds;
-            var statuses = new List<ChannelStatus>();
+            try { TickCore(); }
+            catch (Exception ex) { Faulted?.Invoke(ex); }
+            finally { _timer?.Change(Random.Shared.Next(850, 1151), Timeout.Infinite); }
+        }
+    }
 
-            // A changed fingerprint = a user edit landed since the last tick →
-            // apply it on THIS tick, skipping holds and the slew glide.
-            string sig = SettingsSignature();
-            if (_settingsSig != null && sig != _settingsSig && Profile.InstantApplyEnabled)
+    private void TickCore()
+    {
+        _hw.Update();
+        double now = _clock.Elapsed.TotalSeconds;
+        var statuses = new List<ChannelStatus>();
+
+        // A changed fingerprint = a user edit landed since the last tick →
+        // apply it on THIS tick, skipping holds and the slew glide.
+        string sig = SettingsSignature();
+        if (_settingsSig != null && sig != _settingsSig && Profile.InstantApplyEnabled)
+        {
+            foreach (var f in _filters.Values) f.ApplyNow();
+            foreach (var f in _powerFilters.Values) f.ApplyNow();
+            foreach (var b in _budgets.Values) b.ApplyNow();
+        }
+        _settingsSig = sig;
+
+        foreach (var ch in Profile.Channels.ToArray())
+        {
+            // Snapshot everything the UI thread can edit under our feet (assignment
+            // checkboxes, curve drags, undo/redo). Copying is not atomic either, so
+            // the guard in Tick is still the backstop — but a snapshot turns the
+            // common case from "tick skipped" into "tick runs on last-known lists".
+            var sensorIds = ch.SensorIds.ToArray();
+            var powerSensorIds = ch.PowerSensorIds.ToArray();
+            var controlIds = ch.ControlIds.ToArray();
+            var points = ch.Points.ToArray();
+            var powerPoints = ch.PowerPoints.ToArray();
+
+            double? temp = sensorIds
+                .Select(_hw.ReadValue)
+                .Where(v => v.HasValue)
+                .Select(v => v!.Value)
+                .DefaultIfEmpty(double.NaN)
+                .Max();
+            if (double.IsNaN(temp.Value)) temp = null;
+
+            // Sum of the channel's power sensors — non-null switches the channel
+            // from the temperature filter to the thermal-budget controller.
+            double? watts = null;
+            if (Profile.ControlMode != ControlMode.Temperature && powerSensorIds.Length > 0)
             {
-                foreach (var f in _filters.Values) f.ApplyNow();
-                foreach (var f in _powerFilters.Values) f.ApplyNow();
-                foreach (var b in _budgets.Values) b.ApplyNow();
+                double sum = 0;
+                bool any = false;
+                foreach (var id in powerSensorIds)
+                    if (_hw.ReadValue(id) is double w and >= 0) { sum += w; any = true; }
+                if (any) watts = sum;
             }
-            _settingsSig = sig;
 
-            foreach (var ch in Profile.Channels)
+            // The safety floor degrades to "no floor" when the feature is off — a
+            // disabled floor must not block a stop, gate the trial stops, or claim
+            // the MinFloor why-chip.
+            double minPct = Profile.SafetyFloorEnabled ? ch.MinPercent : 0;
+
+            double output = 0;
+            bool applied = false;
+            bool overrideActive = false;
+            var reason = OutputReason.None;
+            double targetPct = 0, reasonLevel = 0, reasonSeconds = 0;
+            double effectiveTemp = double.NaN;
+            double? wattsAvg = null;
+            double budgetJoules = 0, massJPerC = 0;
+            double tauSeconds = double.PositiveInfinity, demandLevel = 0;
+            double trendTempC = double.NaN, ceilingC = 0, aimC = 0, slopeCPerSec = 0;
+            double baseTempC = 0, resistanceCPerW = 0;
+            if (temp.HasValue)
             {
-                double? temp = ch.SensorIds
-                    .Select(_hw.ReadValue)
-                    .Where(v => v.HasValue)
-                    .Select(v => v!.Value)
-                    .DefaultIfEmpty(double.NaN)
-                    .Max();
-                if (double.IsNaN(temp.Value)) temp = null;
+                var curve = new FanCurve(points);
+                double filtered;
 
-                // Sum of the channel's power sensors — non-null switches the channel
-                // from the temperature filter to the thermal-budget controller.
-                double? watts = null;
-                if (Profile.ControlMode != ControlMode.Temperature && ch.PowerSensorIds.Count > 0)
+                // The temperature filter runs whenever it has a say: alone when the
+                // channel has no live power side, in Auto mode, where its target
+                // rides into the budget controller as a floor — whichever side asks
+                // for more fan wins, and the budget's physics stay honest because its
+                // slewed output IS the physical output — and in PowerCurve mode,
+                // where it is the safety floor under the watts staircase.
+                ResponseFilter? filter = null;
+                double tempFiltered = 0;
+                if (!watts.HasValue ||
+                    Profile.ControlMode is ControlMode.Auto or ControlMode.PowerCurve)
                 {
-                    double sum = 0;
-                    bool any = false;
-                    foreach (var id in ch.PowerSensorIds)
-                        if (_hw.ReadValue(id) is double w and >= 0) { sum += w; any = true; }
-                    if (any) watts = sum;
+                    if (!_filters.TryGetValue(ch, out filter))
+                    {
+                        filter = new ResponseFilter();
+                        _filters[ch] = filter;
+                    }
+                    filter.AveragingSeconds = ch.AveragingSeconds;
+                    filter.HysteresisC = ch.HysteresisC;
+                    filter.StepDownHoldSeconds = ch.StepDownHoldSeconds;
+                    filter.SlewUpPercentPerSec = ch.SlewUpPercentPerSec;
+                    filter.SlewDownPercentPerSec = ch.SlewDownPercentPerSec;
+                    filter.ZeroSnapPercent = Profile.ZeroSnapEnabled ? Profile.ZeroSnapPercent : 0;
+                    tempFiltered = filter.Step(now, temp.Value, curve);
                 }
 
-                // The safety floor degrades to "no floor" when the feature is off — a
-                // disabled floor must not block a stop, gate the trial stops, or claim
-                // the MinFloor why-chip.
-                double minPct = Profile.SafetyFloorEnabled ? ch.MinPercent : 0;
-
-                double output = 0;
-                bool applied = false;
-                bool overrideActive = false;
-                var reason = OutputReason.None;
-                double targetPct = 0, reasonLevel = 0, reasonSeconds = 0;
-                double effectiveTemp = double.NaN;
-                double? wattsAvg = null;
-                double budgetJoules = 0, massJPerC = 0;
-                double tauSeconds = double.PositiveInfinity, demandLevel = 0;
-                double trendTempC = double.NaN, ceilingC = 0, aimC = 0, slopeCPerSec = 0;
-                double baseTempC = 0, resistanceCPerW = 0;
-                if (temp.HasValue)
+                if (watts.HasValue && Profile.ControlMode == ControlMode.PowerCurve)
                 {
-                    var curve = new FanCurve(ch.Points);
-                    double filtered;
-
-                    // The temperature filter runs whenever it has a say: alone when the
-                    // channel has no live power side, in Auto mode, where its target
-                    // rides into the budget controller as a floor — whichever side asks
-                    // for more fan wins, and the budget's physics stay honest because its
-                    // slewed output IS the physical output — and in PowerCurve mode,
-                    // where it is the safety floor under the watts staircase.
-                    ResponseFilter? filter = null;
-                    double tempFiltered = 0;
-                    if (!watts.HasValue ||
-                        Profile.ControlMode is ControlMode.Auto or ControlMode.PowerCurve)
+                    // Power-curve mode: the same MacBook filter, run in the WATTS
+                    // dimension — sustained draw average → watts staircase → slewed
+                    // output. Deterministic: what the curve says is what runs. The
+                    // temperature side above stays as a safety floor, and the fuse
+                    // still snaps to the temp staircase on the raw die temp; the
+                    // predictive budget layer is off entirely.
+                    if (!_powerFilters.TryGetValue(ch, out var pfilter))
                     {
-                        if (!_filters.TryGetValue(ch, out filter))
-                        {
-                            filter = new ResponseFilter();
-                            _filters[ch] = filter;
-                        }
-                        filter.AveragingSeconds = ch.AveragingSeconds;
-                        filter.HysteresisC = ch.HysteresisC;
-                        filter.StepDownHoldSeconds = ch.StepDownHoldSeconds;
-                        filter.SlewUpPercentPerSec = ch.SlewUpPercentPerSec;
-                        filter.SlewDownPercentPerSec = ch.SlewDownPercentPerSec;
-                        filter.ZeroSnapPercent = Profile.ZeroSnapEnabled ? Profile.ZeroSnapPercent : 0;
-                        tempFiltered = filter.Step(now, temp.Value, curve);
+                        pfilter = new ResponseFilter();
+                        _powerFilters[ch] = pfilter;
                     }
+                    pfilter.AveragingSeconds = Profile.PowerAveragingSeconds;
+                    pfilter.HysteresisC = Profile.PowerCurveHysteresisW; // watts here
+                    pfilter.StepDownHoldSeconds = ch.StepDownHoldSeconds;
+                    pfilter.SlewUpPercentPerSec = ch.SlewUpPercentPerSec;
+                    pfilter.SlewDownPercentPerSec = ch.SlewDownPercentPerSec;
+                    pfilter.ZeroSnapPercent = Profile.ZeroSnapEnabled ? Profile.ZeroSnapPercent : 0;
 
-                    if (watts.HasValue && Profile.ControlMode == ControlMode.PowerCurve)
+                    bool hasPowerCurve = powerPoints.Length > 0;
+                    double pFiltered = hasPowerCurve
+                        ? pfilter.Step(now, watts.Value, FanCurve.FromPower(powerPoints))
+                        : 0;
+                    double tTarget = filter!.TargetLevel;
+                    double pTarget = hasPowerCurve ? pfilter.TargetLevel : 0;
+                    effectiveTemp = filter.EffectiveTemp;
+                    wattsAvg = hasPowerCurve ? pfilter.EffectiveTemp : watts;
+                    // Gates the stop probe exactly like the budget's DemandLevel: a
+                    // die-limited load reads "stable" to the probe, but its draw
+                    // keeps the watts staircase asking for fan.
+                    demandLevel = pTarget;
+
+                    if (!_fuses.TryGetValue(ch, out var fuse))
                     {
-                        // Power-curve mode: the same MacBook filter, run in the WATTS
-                        // dimension — sustained draw average → watts staircase → slewed
-                        // output. Deterministic: what the curve says is what runs. The
-                        // temperature side above stays as a safety floor, and the fuse
-                        // still snaps to the temp staircase on the raw die temp; the
-                        // predictive budget layer is off entirely.
-                        if (!_powerFilters.TryGetValue(ch, out var pfilter))
-                        {
-                            pfilter = new ResponseFilter();
-                            _powerFilters[ch] = pfilter;
-                        }
-                        pfilter.AveragingSeconds = Profile.PowerAveragingSeconds;
-                        pfilter.HysteresisC = Profile.PowerCurveHysteresisW; // watts here
-                        pfilter.StepDownHoldSeconds = ch.StepDownHoldSeconds;
-                        pfilter.SlewUpPercentPerSec = ch.SlewUpPercentPerSec;
-                        pfilter.SlewDownPercentPerSec = ch.SlewDownPercentPerSec;
-                        pfilter.ZeroSnapPercent = Profile.ZeroSnapEnabled ? Profile.ZeroSnapPercent : 0;
-
-                        bool hasPowerCurve = ch.PowerPoints.Count > 0;
-                        double pFiltered = hasPowerCurve
-                            ? pfilter.Step(now, watts.Value, FanCurve.FromPower(ch.PowerPoints))
-                            : 0;
-                        double tTarget = filter!.TargetLevel;
-                        double pTarget = hasPowerCurve ? pfilter.TargetLevel : 0;
-                        effectiveTemp = filter.EffectiveTemp;
-                        wattsAvg = hasPowerCurve ? pfilter.EffectiveTemp : watts;
-                        // Gates the stop probe exactly like the budget's DemandLevel: a
-                        // die-limited load reads "stable" to the probe, but its draw
-                        // keeps the watts staircase asking for fan.
-                        demandLevel = pTarget;
-
-                        if (!_fuses.TryGetValue(ch, out var fuse))
-                        {
-                            fuse = new FuseState();
-                            _fuses[ch] = fuse;
-                        }
-                        if (temp.Value >= Profile.OverrideTempC)
-                        {
-                            fuse.Active = true;
-                            fuse.OkSince = double.NaN;
-                        }
-                        else if (fuse.Active)
-                        {
-                            if (temp.Value <= Profile.OverrideTempC - Profile.OverrideReleaseC)
-                            {
-                                if (double.IsNaN(fuse.OkSince)) fuse.OkSince = now;
-                                if (now - fuse.OkSince >= Profile.OverrideReleaseSeconds)
-                                    fuse.Active = false;
-                            }
-                            else fuse.OkSince = double.NaN;
-                        }
-                        overrideActive = fuse.Active;
-
-                        filtered = Math.Max(tempFiltered, pFiltered);
-                        if (fuse.Active)
-                        {
-                            fuse.Held = Math.Max(fuse.Held,
-                                Math.Max(curve.Evaluate(temp.Value), filtered));
-                            filtered = fuse.Held;
-                        }
-                        else fuse.Held = 0;
-
-                        output = Math.Max(minPct, filtered);
-                        targetPct = Math.Max(minPct, Math.Max(tTarget, pTarget));
-
-                        // Most specific explanation wins; later checks override earlier ones.
-                        if (overrideActive)
-                        {
-                            reason = OutputReason.HardOverride;
-                            reasonLevel = curve.Evaluate(temp.Value);
-                        }
-                        else
-                        {
-                            bool powerLeads = pTarget > tTarget + 0.5;
-                            if (powerLeads)
-                            {
-                                reason = OutputReason.PowerCurve;
-                                reasonLevel = tTarget; // what the temp curve alone asks
-                            }
-                            // A pending step-down only matters on the side whose level is
-                            // in force, and only while it would actually lower the max.
-                            var leadF = powerLeads ? pfilter : filter;
-                            double otherTarget = powerLeads ? tTarget : pTarget;
-                            if (!double.IsNaN(leadF.DownHoldRemaining) &&
-                                leadF.PendingDownLevel >= otherTarget - 0.5)
-                            {
-                                reason = OutputReason.StepDownHold;
-                                reasonLevel = Math.Max(minPct,
-                                    Math.Max(otherTarget, leadF.PendingDownLevel));
-                                reasonSeconds = leadF.DownHoldRemaining;
-                            }
-                            if ((powerLeads ? pfilter.SnappedToZero : filter.SnappedToZero)
-                                && output <= 0.01)
-                            {
-                                reason = OutputReason.ZeroSnap;
-                                reasonLevel = powerLeads ? pfilter.CurveLevel : filter.CurveLevel;
-                            }
-                            if (Math.Abs(output - targetPct) > 0.5)
-                                reason = output < targetPct ? OutputReason.RampUp : OutputReason.RampDown;
-                            if (minPct > 0 && filtered < minPct - 0.01)
-                            {
-                                reason = OutputReason.MinFloor;
-                                reasonLevel = Math.Max(filter.CurveLevel,
-                                    hasPowerCurve ? pfilter.CurveLevel : 0);
-                            }
-                        }
+                        fuse = new FuseState();
+                        _fuses[ch] = fuse;
                     }
-                    else if (watts.HasValue)
+                    if (temp.Value >= Profile.OverrideTempC)
                     {
-                        if (!_budgets.TryGetValue(ch, out var budget))
+                        fuse.Active = true;
+                        fuse.OkSince = double.NaN;
+                    }
+                    else if (fuse.Active)
+                    {
+                        if (temp.Value <= Profile.OverrideTempC - Profile.OverrideReleaseC)
                         {
-                            budget = new PowerBudgetController();
-                            budget.Model.LoadFrom(ch);
-                            _budgets[ch] = budget;
+                            if (double.IsNaN(fuse.OkSince)) fuse.OkSince = now;
+                            if (now - fuse.OkSince >= Profile.OverrideReleaseSeconds)
+                                fuse.Active = false;
                         }
-                        budget.DisplayAveragingSeconds = ch.AveragingSeconds;
-                        budget.StepDownHoldSeconds = ch.StepDownHoldSeconds;
-                        budget.HysteresisC = ch.HysteresisC;
-                        budget.SlewUpPercentPerSec = ch.SlewUpPercentPerSec;
-                        budget.SlewDownPercentPerSec = ch.SlewDownPercentPerSec;
-                        budget.ZeroSnapPercent = Profile.ZeroSnapEnabled ? Profile.ZeroSnapPercent : 0;
-                        budget.PowerAveragingSeconds = Profile.PowerAveragingSeconds;
-                        budget.RampLeadSeconds = Profile.RampLeadSeconds;
-                        // Disabled features degrade to their natural "never fires" values:
-                        // a 0 W relief cap can never be undercut, and a 0/0 floor line is 0
-                        // everywhere. Either also clears an already-standing waiver/floor.
-                        budget.ReliefMaxWatts = Profile.ReliefEnabled ? Profile.ReliefMaxWatts : 0;
-                        budget.PowerFloorPercentAt100W = Profile.PowerFloorEnabled ? Profile.PowerFloorPercentAt100W : 0;
-                        budget.PowerFloorPercentAt200W = Profile.PowerFloorEnabled ? Profile.PowerFloorPercentAt200W : 0;
-                        budget.OverrideTempC = Profile.OverrideTempC;
-                        budget.CeilingMarginC = Profile.BudgetCeilingMarginC;
-                        budget.SteadyTargetMarginC = Profile.SteadyTargetMarginC;
-                        budget.TrendAvgSeconds = Profile.PowerTrendSeconds;
-                        budget.SlopeWindowSeconds = Profile.PowerSlopeSeconds;
-                        budget.ShortPowerSeconds = Profile.PowerNowSeconds;
-                        budget.OverrideReleaseC = Profile.OverrideReleaseC;
-                        budget.OverrideReleaseSeconds = Profile.OverrideReleaseSeconds;
-                        budget.LearningEnabled = Profile.ThermalLearningEnabled;
-                        budget.FutilityProbeEnabled = Profile.FutilityProbeEnabled;
-                        // Auto mode: the temperature side's demand is a hard floor, and
-                        // the staircase's next step is a line the buffer drains toward.
-                        budget.FloorPercent = filter?.TargetLevel ?? 0;
-                        budget.GuardFloor = filter != null && Profile.FloorGuardEnabled;
+                        else fuse.OkSince = double.NaN;
+                    }
+                    overrideActive = fuse.Active;
 
-                        filtered = budget.Step(now, temp.Value, watts.Value, curve);
-                        budget.Model.StoreTo(ch); // learned values ride along in the profile
-                        effectiveTemp = budget.EffectiveTemp;
-                        wattsAvg = budget.PowerAvg;
-                        budgetJoules = budget.BudgetJoules;
-                        massJPerC = budget.Model.MassJPerC;
-                        tauSeconds = budget.TauSeconds;
-                        demandLevel = budget.DemandLevel;
-                        trendTempC = budget.TrendTempC;
-                        ceilingC = budget.CeilingC;
-                        aimC = budget.SteadyTargetC;
-                        slopeCPerSec = budget.SlopeCPerSec;
-                        baseTempC = budget.Model.BaseTempC;
-                        resistanceCPerW = budget.Model.R(filtered);
-                        overrideActive = budget.OverrideActive;
-                        output = Math.Max(minPct, filtered);
-                        targetPct = Math.Max(minPct, budget.TargetLevel);
+                    filtered = Math.Max(tempFiltered, pFiltered);
+                    if (fuse.Active)
+                    {
+                        fuse.Held = Math.Max(fuse.Held,
+                            Math.Max(curve.Evaluate(temp.Value), filtered));
+                        filtered = fuse.Held;
+                    }
+                    else fuse.Held = 0;
 
-                        // Most specific explanation wins; later checks override earlier ones.
-                        if (overrideActive)
-                        {
-                            reason = OutputReason.HardOverride;
-                            reasonLevel = curve.Evaluate(temp.Value);
-                        }
-                        else
-                        {
-                            if (!double.IsNaN(budget.DownHoldRemaining))
-                            {
-                                reason = OutputReason.StepDownHold;
-                                reasonLevel = Math.Max(minPct, budget.PendingDownLevel);
-                                reasonSeconds = budget.DownHoldRemaining;
-                            }
-                            else if (!double.IsNaN(budget.UpHoldRemaining))
-                            {
-                                reason = OutputReason.StepUpHold;
-                                reasonLevel = Math.Max(minPct, budget.PendingUpLevel);
-                                reasonSeconds = budget.UpHoldRemaining;
-                            }
-                            else if (budget.SnappedToZero && output <= 0.01)
-                            {
-                                reason = OutputReason.ZeroSnap;
-                                reasonLevel = budget.PreSnapTarget;
-                            }
-                            else if (budget.TargetLevel < budget.CurveLevelAtAvg - 0.5)
-                            {
-                                reason = OutputReason.BudgetHold;
-                                reasonLevel = budget.CurveLevelAtAvg;
-                                reasonSeconds = budget.TauSeconds;
-                            }
-                            else if (budget.TargetLevel > budget.CurveLevelAtAvg + 0.5)
-                            {
-                                reason = OutputReason.BudgetRamp;
-                                reasonLevel = budget.CurveLevelAtAvg;
-                                reasonSeconds = budget.TauSeconds;
-                            }
-                            if (Math.Abs(output - targetPct) > 0.5 &&
-                                reason is OutputReason.None or OutputReason.BudgetHold)
-                                reason = output < targetPct ? OutputReason.RampUp : OutputReason.RampDown;
-                            if (minPct > 0 && filtered < minPct - 0.01)
-                            {
-                                reason = OutputReason.MinFloor;
-                                reasonLevel = budget.PreSnapTarget;
-                            }
-                        }
+                    output = Math.Max(minPct, filtered);
+                    targetPct = Math.Max(minPct, Math.Max(tTarget, pTarget));
+
+                    // Most specific explanation wins; later checks override earlier ones.
+                    if (overrideActive)
+                    {
+                        reason = OutputReason.HardOverride;
+                        reasonLevel = curve.Evaluate(temp.Value);
                     }
                     else
                     {
-                        filtered = tempFiltered;
-                        effectiveTemp = filter!.EffectiveTemp;
-                        output = Math.Max(minPct, filtered);
-                        targetPct = Math.Max(minPct, filter.TargetLevel);
-
-                        // Most specific explanation wins; later checks override earlier ones.
-                        if (!double.IsNaN(filter.DownHoldRemaining))
+                        bool powerLeads = pTarget > tTarget + 0.5;
+                        if (powerLeads)
+                        {
+                            reason = OutputReason.PowerCurve;
+                            reasonLevel = tTarget; // what the temp curve alone asks
+                        }
+                        // A pending step-down only matters on the side whose level is
+                        // in force, and only while it would actually lower the max.
+                        var leadF = powerLeads ? pfilter : filter;
+                        double otherTarget = powerLeads ? tTarget : pTarget;
+                        if (!double.IsNaN(leadF.DownHoldRemaining) &&
+                            leadF.PendingDownLevel >= otherTarget - 0.5)
                         {
                             reason = OutputReason.StepDownHold;
-                            reasonLevel = Math.Max(minPct, filter.PendingDownLevel);
-                            reasonSeconds = filter.DownHoldRemaining;
+                            reasonLevel = Math.Max(minPct,
+                                Math.Max(otherTarget, leadF.PendingDownLevel));
+                            reasonSeconds = leadF.DownHoldRemaining;
                         }
-                        else if (filter.HysteresisHolding)
-                        {
-                            reason = OutputReason.Hysteresis;
-                        }
-                        else if (filter.SnappedToZero && output <= 0.01)
+                        if ((powerLeads ? pfilter.SnappedToZero : filter.SnappedToZero)
+                            && output <= 0.01)
                         {
                             reason = OutputReason.ZeroSnap;
-                            reasonLevel = filter.CurveLevel;
+                            reasonLevel = powerLeads ? pfilter.CurveLevel : filter.CurveLevel;
                         }
                         if (Math.Abs(output - targetPct) > 0.5)
                             reason = output < targetPct ? OutputReason.RampUp : OutputReason.RampDown;
                         if (minPct > 0 && filtered < minPct - 0.01)
                         {
                             reason = OutputReason.MinFloor;
-                            reasonLevel = filter.CurveLevel;
+                            reasonLevel = Math.Max(filter.CurveLevel,
+                                hasPowerCurve ? pfilter.CurveLevel : 0);
                         }
                     }
-                    if (Applying && ch.Enabled && ch.ControlIds.Count > 0)
+                }
+                else if (watts.HasValue)
+                {
+                    if (!_budgets.TryGetValue(ch, out var budget))
                     {
-                        if (overrideActive)
+                        budget = new PowerBudgetController();
+                        budget.Model.LoadFrom(ch);
+                        _budgets[ch] = budget;
+                    }
+                    budget.DisplayAveragingSeconds = ch.AveragingSeconds;
+                    budget.StepDownHoldSeconds = ch.StepDownHoldSeconds;
+                    budget.HysteresisC = ch.HysteresisC;
+                    budget.SlewUpPercentPerSec = ch.SlewUpPercentPerSec;
+                    budget.SlewDownPercentPerSec = ch.SlewDownPercentPerSec;
+                    budget.ZeroSnapPercent = Profile.ZeroSnapEnabled ? Profile.ZeroSnapPercent : 0;
+                    budget.PowerAveragingSeconds = Profile.PowerAveragingSeconds;
+                    budget.RampLeadSeconds = Profile.RampLeadSeconds;
+                    // Disabled features degrade to their natural "never fires" values:
+                    // a 0 W relief cap can never be undercut, and a 0/0 floor line is 0
+                    // everywhere. Either also clears an already-standing waiver/floor.
+                    budget.ReliefMaxWatts = Profile.ReliefEnabled ? Profile.ReliefMaxWatts : 0;
+                    budget.PowerFloorPercentAt100W = Profile.PowerFloorEnabled ? Profile.PowerFloorPercentAt100W : 0;
+                    budget.PowerFloorPercentAt200W = Profile.PowerFloorEnabled ? Profile.PowerFloorPercentAt200W : 0;
+                    budget.OverrideTempC = Profile.OverrideTempC;
+                    budget.CeilingMarginC = Profile.BudgetCeilingMarginC;
+                    budget.SteadyTargetMarginC = Profile.SteadyTargetMarginC;
+                    budget.TrendAvgSeconds = Profile.PowerTrendSeconds;
+                    budget.SlopeWindowSeconds = Profile.PowerSlopeSeconds;
+                    budget.ShortPowerSeconds = Profile.PowerNowSeconds;
+                    budget.OverrideReleaseC = Profile.OverrideReleaseC;
+                    budget.OverrideReleaseSeconds = Profile.OverrideReleaseSeconds;
+                    budget.LearningEnabled = Profile.ThermalLearningEnabled;
+                    budget.FutilityProbeEnabled = Profile.FutilityProbeEnabled;
+                    // Auto mode: the temperature side's demand is a hard floor, and
+                    // the staircase's next step is a line the buffer drains toward.
+                    budget.FloorPercent = filter?.TargetLevel ?? 0;
+                    budget.GuardFloor = filter != null && Profile.FloorGuardEnabled;
+
+                    filtered = budget.Step(now, temp.Value, watts.Value, curve);
+                    budget.Model.StoreTo(ch); // learned values ride along in the profile
+                    effectiveTemp = budget.EffectiveTemp;
+                    wattsAvg = budget.PowerAvg;
+                    budgetJoules = budget.BudgetJoules;
+                    massJPerC = budget.Model.MassJPerC;
+                    tauSeconds = budget.TauSeconds;
+                    demandLevel = budget.DemandLevel;
+                    trendTempC = budget.TrendTempC;
+                    ceilingC = budget.CeilingC;
+                    aimC = budget.SteadyTargetC;
+                    slopeCPerSec = budget.SlopeCPerSec;
+                    baseTempC = budget.Model.BaseTempC;
+                    resistanceCPerW = budget.Model.R(filtered);
+                    overrideActive = budget.OverrideActive;
+                    output = Math.Max(minPct, filtered);
+                    targetPct = Math.Max(minPct, budget.TargetLevel);
+
+                    // Most specific explanation wins; later checks override earlier ones.
+                    if (overrideActive)
+                    {
+                        reason = OutputReason.HardOverride;
+                        reasonLevel = curve.Evaluate(temp.Value);
+                    }
+                    else
+                    {
+                        if (!double.IsNaN(budget.DownHoldRemaining))
                         {
-                            // The fuse outranks the courtesy features: no trial stops or
-                            // kicks while the die is over the override temperature.
-                            _probes.Remove(ch);
-                            _kicks.Remove(ch);
+                            reason = OutputReason.StepDownHold;
+                            reasonLevel = Math.Max(minPct, budget.PendingDownLevel);
+                            reasonSeconds = budget.DownHoldRemaining;
+                        }
+                        else if (!double.IsNaN(budget.UpHoldRemaining))
+                        {
+                            reason = OutputReason.StepUpHold;
+                            reasonLevel = Math.Max(minPct, budget.PendingUpLevel);
+                            reasonSeconds = budget.UpHoldRemaining;
+                        }
+                        else if (budget.SnappedToZero && output <= 0.01)
+                        {
+                            reason = OutputReason.ZeroSnap;
+                            reasonLevel = budget.PreSnapTarget;
+                        }
+                        else if (budget.TargetLevel < budget.CurveLevelAtAvg - 0.5)
+                        {
+                            reason = OutputReason.BudgetHold;
+                            reasonLevel = budget.CurveLevelAtAvg;
+                            reasonSeconds = budget.TauSeconds;
+                        }
+                        else if (budget.TargetLevel > budget.CurveLevelAtAvg + 0.5)
+                        {
+                            reason = OutputReason.BudgetRamp;
+                            reasonLevel = budget.CurveLevelAtAvg;
+                            reasonSeconds = budget.TauSeconds;
+                        }
+                        if (Math.Abs(output - targetPct) > 0.5 &&
+                            reason is OutputReason.None or OutputReason.BudgetHold)
+                            reason = output < targetPct ? OutputReason.RampUp : OutputReason.RampDown;
+                        if (minPct > 0 && filtered < minPct - 0.01)
+                        {
+                            reason = OutputReason.MinFloor;
+                            reasonLevel = budget.PreSnapTarget;
+                        }
+                    }
+                }
+                else
+                {
+                    filtered = tempFiltered;
+                    effectiveTemp = filter!.EffectiveTemp;
+                    output = Math.Max(minPct, filtered);
+                    targetPct = Math.Max(minPct, filter.TargetLevel);
+
+                    // Most specific explanation wins; later checks override earlier ones.
+                    if (!double.IsNaN(filter.DownHoldRemaining))
+                    {
+                        reason = OutputReason.StepDownHold;
+                        reasonLevel = Math.Max(minPct, filter.PendingDownLevel);
+                        reasonSeconds = filter.DownHoldRemaining;
+                    }
+                    else if (filter.HysteresisHolding)
+                    {
+                        reason = OutputReason.Hysteresis;
+                    }
+                    else if (filter.SnappedToZero && output <= 0.01)
+                    {
+                        reason = OutputReason.ZeroSnap;
+                        reasonLevel = filter.CurveLevel;
+                    }
+                    if (Math.Abs(output - targetPct) > 0.5)
+                        reason = output < targetPct ? OutputReason.RampUp : OutputReason.RampDown;
+                    if (minPct > 0 && filtered < minPct - 0.01)
+                    {
+                        reason = OutputReason.MinFloor;
+                        reasonLevel = filter.CurveLevel;
+                    }
+                }
+                if (Applying && ch.Enabled && controlIds.Length > 0)
+                {
+                    if (overrideActive)
+                    {
+                        // The fuse outranks the courtesy features: no trial stops or
+                        // kicks while the die is over the override temperature.
+                        _probes.Remove(ch);
+                        _kicks.Remove(ch);
+                    }
+                    else
+                    {
+                        // Trial stop runs BEFORE the kick, so a probe-stopped channel counts
+                        // as stopped for the idle kick (same choice as zero snap). Channels
+                        // with a safety floor are never trial-stopped — the floor wins.
+                        // Nor is a channel whose sustained power draw demands any fan: the
+                        // probe's stability test is blind to a die-limited load — a CPU
+                        // clamping its own temperature reads perfectly "stable" at 180 W,
+                        // and a trial stop then holds the fan off indefinitely while the
+                        // die self-throttles (chess-engine report, 2026-07-27: fan held
+                        // at 0% at 178 W because the clamped die could never "rise").
+                        if (Profile.StopProbeEnabled && minPct <= 0 &&
+                            demandLevel <= 0.01)
+                        {
+                            if (!_probes.TryGetValue(ch, out var probe))
+                            {
+                                probe = new StopProbe();
+                                _probes[ch] = probe;
+                            }
+                            probe.RunSeconds = Profile.StopProbeRunSeconds;
+                            probe.ProbeSeconds = Profile.StopProbeSeconds;
+                            probe.StableRangeC = Profile.StopProbeStableRangeC;
+                            probe.FailRetrySeconds = Profile.StopProbeRetrySeconds;
+                            probe.MaxTempC = Profile.StopProbeMaxTempC;
+                            output = probe.Step(now, temp.Value, output);
+                            if (probe.Holding) reason = OutputReason.StopProbe;
                         }
                         else
                         {
-                            // Trial stop runs BEFORE the kick, so a probe-stopped channel counts
-                            // as stopped for the idle kick (same choice as zero snap). Channels
-                            // with a safety floor are never trial-stopped — the floor wins.
-                            // Nor is a channel whose sustained power draw demands any fan: the
-                            // probe's stability test is blind to a die-limited load — a CPU
-                            // clamping its own temperature reads perfectly "stable" at 180 W,
-                            // and a trial stop then holds the fan off indefinitely while the
-                            // die self-throttles (chess-engine report, 2026-07-27: fan held
-                            // at 0% at 178 W because the clamped die could never "rise").
-                            if (Profile.StopProbeEnabled && minPct <= 0 &&
-                                demandLevel <= 0.01)
-                            {
-                                if (!_probes.TryGetValue(ch, out var probe))
-                                {
-                                    probe = new StopProbe();
-                                    _probes[ch] = probe;
-                                }
-                                probe.RunSeconds = Profile.StopProbeRunSeconds;
-                                probe.ProbeSeconds = Profile.StopProbeSeconds;
-                                probe.StableRangeC = Profile.StopProbeStableRangeC;
-                                probe.FailRetrySeconds = Profile.StopProbeRetrySeconds;
-                                probe.MaxTempC = Profile.StopProbeMaxTempC;
-                                output = probe.Step(now, temp.Value, output);
-                                if (probe.Holding) reason = OutputReason.StopProbe;
-                            }
-                            else
-                            {
-                                _probes.Remove(ch); // re-enabling starts with a fresh window
-                            }
-                            if (Profile.IdleKickEnabled)
-                            {
-                                if (!_kicks.TryGetValue(ch, out var kick))
-                                {
-                                    kick = new IdleKick();
-                                    _kicks[ch] = kick;
-                                }
-                                kick.StoppedSeconds = Profile.IdleKickStoppedSeconds;
-                                kick.KickPercent = Profile.IdleKickPercent;
-                                kick.KickSeconds = Profile.IdleKickSeconds;
-                                output = kick.Step(now, output);
-                                if (kick.Kicking) reason = OutputReason.IdleKick;
-                            }
-                            else
-                            {
-                                _kicks.Remove(ch); // re-enabling starts the stopped clock fresh
-                            }
+                            _probes.Remove(ch); // re-enabling starts with a fresh window
                         }
-                        foreach (var id in ch.ControlIds) _hw.SetControl(id, output);
-                        applied = true;
+                        if (Profile.IdleKickEnabled)
+                        {
+                            if (!_kicks.TryGetValue(ch, out var kick))
+                            {
+                                kick = new IdleKick();
+                                _kicks[ch] = kick;
+                            }
+                            kick.StoppedSeconds = Profile.IdleKickStoppedSeconds;
+                            kick.KickPercent = Profile.IdleKickPercent;
+                            kick.KickSeconds = Profile.IdleKickSeconds;
+                            output = kick.Step(now, output);
+                            if (kick.Kicking) reason = OutputReason.IdleKick;
+                        }
+                        else
+                        {
+                            _kicks.Remove(ch); // re-enabling starts the stopped clock fresh
+                        }
                     }
+                    foreach (var id in controlIds) _hw.SetControl(id, output);
+                    applied = true;
                 }
-                // While the BIOS (or nothing) drives the fan, the stopped/running clocks must not run.
-                if (!applied) { _kicks.Remove(ch); _probes.Remove(ch); }
-
-                double? rpm = ch.ControlIds.Count > 0 ? _hw.ReadControlRpm(ch.ControlIds[0]) : null;
-                statuses.Add(new ChannelStatus(ch.Name, temp, effectiveTemp, output, rpm, applied,
-                    targetPct, reason, reasonLevel, reasonSeconds,
-                    watts, wattsAvg, budgetJoules, massJPerC,
-                    tauSeconds, demandLevel, trendTempC, ceilingC, aimC, slopeCPerSec,
-                    baseTempC, resistanceCPerW));
             }
+            // While the BIOS (or nothing) drives the fan, the stopped/running clocks must not run.
+            if (!applied) { _kicks.Remove(ch); _probes.Remove(ch); }
 
-            Ticked?.Invoke(statuses);
-
-            _timer?.Change(Random.Shared.Next(850, 1151), Timeout.Infinite);
+            var rpms = Array.ConvertAll(controlIds, _hw.ReadControlRpm);
+            double? rpm = rpms.Length > 0 ? rpms[0] : null;
+            statuses.Add(new ChannelStatus(ch.Name, temp, effectiveTemp, output, rpm, applied,
+                targetPct, reason, reasonLevel, reasonSeconds,
+                watts, wattsAvg, budgetJoules, massJPerC,
+                tauSeconds, demandLevel, trendTempC, ceilingC, aimC, slopeCPerSec,
+                baseTempC, resistanceCPerW, rpms));
         }
+
+        Ticked?.Invoke(statuses);
     }
 
     public void Dispose()

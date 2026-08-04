@@ -16,21 +16,26 @@ public partial class MainWindow : Window
     private readonly Profile _profile;
     private readonly List<ChannelVm> _channelVms = new();
     private readonly List<ChannelHistory> _histories = new(); // parallel to _channelVms
+    private readonly HistoryViewport _viewport = new();       // one scroll state, both strips
     private bool _loadingUi; // guard so slider init doesn't write back into the config
     private bool _devMode;
     private bool _exiting;
     private readonly TrayIcon _tray;
     private IReadOnlyList<ChannelStatus>? _lastStatuses;
+    private string? _lastTrayTip; // skip the Shell_NotifyIcon call when unchanged
 
-    // Undo/redo for curve edits (drag / add / remove), Ctrl+Z / Ctrl+Y. Each entry is
-    // one committed edit; the baselines hold the last known points per channel so a
-    // CurveChanged can be diffed into a before/after pair. Presets reset everything.
+    // Undo/redo, Ctrl+Z / Ctrl+Y. Each entry is one committed edit, of two kinds:
+    // a curve edit (drag / add / remove — the baselines below hold the last known points
+    // per channel so a CurveChanged can be diffed into a before/after pair) or a preset
+    // switch, which rewrites every channel's tuning and so stores whole-profile snapshots.
     // Power-curve edits ride the same stack: Power=true, and the snapshot lists carry
     // watts in the TempC slot (internal only — never serialized that way).
+    private abstract record Edit;
     private sealed record CurveEdit(ChannelConfig Channel, bool Power,
-        List<CurvePoint> Before, List<CurvePoint> After, string BeforeName);
-    private readonly List<CurveEdit> _undoStack = new();
-    private readonly List<CurveEdit> _redoStack = new();
+        List<CurvePoint> Before, List<CurvePoint> After, string BeforeName) : Edit;
+    private sealed record TuningEdit(TuningSnapshot Before, TuningSnapshot After) : Edit;
+    private readonly List<Edit> _undoStack = new();
+    private readonly List<Edit> _redoStack = new();
     private readonly Dictionary<ChannelConfig, List<CurvePoint>> _pointsBaseline = new();
     private readonly Dictionary<ChannelConfig, List<CurvePoint>> _powerBaseline = new();
 
@@ -152,12 +157,17 @@ public partial class MainWindow : Window
             _pointsBaseline[ch] = ch.Points.ToList();
             _powerBaseline[ch] = SnapPoints(ch, power: true);
         }
+        HistoryView.Viewport = _viewport;
+        BudgetView.Viewport = _viewport;
+        // Scrolled back = not live: the LIVE jump-back button appears next to CLEAR.
+        _viewport.Changed += () => LiveButton.Visibility =
+            _devMode && !_viewport.Live ? Visibility.Visible : Visibility.Collapsed;
         ChannelList.ItemsSource = _channelVms;
         ChannelList.SelectedIndex = 0;
 
         // Ctrl+Z / Ctrl+Y (ApplicationCommands' default gestures) — plus Ctrl+Shift+Z for redo.
-        CommandBindings.Add(new CommandBinding(ApplicationCommands.Undo, (_, _) => UndoCurveEdit()));
-        CommandBindings.Add(new CommandBinding(ApplicationCommands.Redo, (_, _) => RedoCurveEdit()));
+        CommandBindings.Add(new CommandBinding(ApplicationCommands.Undo, (_, _) => UndoEdit()));
+        CommandBindings.Add(new CommandBinding(ApplicationCommands.Redo, (_, _) => RedoEdit()));
         InputBindings.Add(new KeyBinding(ApplicationCommands.Redo, Key.Z, ModifierKeys.Control | ModifierKeys.Shift));
 
         Editor.CurveChanged += OnCurveEdited;
@@ -178,8 +188,14 @@ public partial class MainWindow : Window
             if (WindowState == WindowState.Maximized) _sizeMode = SizeMode.Max;
             else if (WindowState == WindowState.Normal && _sizeMode == SizeMode.Max) EnterFixed();
             UpdateSizeGlyph();
+            // Restored from minimized: ticks were skipping the UI — catch up now.
+            if (WindowState != WindowState.Minimized) RefreshLiveUi();
         };
         UpdateSizeGlyph();
+
+        // Reopened from the tray: same catch-up (per-tick painting is skipped while
+        // the window is hidden — the app lives in the tray most of the time).
+        IsVisibleChanged += (_, e) => { if (e.NewValue is true) RefreshLiveUi(); };
 
         Opacity = 0;
         Loaded += (_, _) =>
@@ -272,6 +288,10 @@ public partial class MainWindow : Window
     {
         var spin = new DoubleAnimation(FanSpin.Angle, FanSpin.Angle + 360, TimeSpan.FromSeconds(9))
         { RepeatBehavior = RepeatBehavior.Forever };
+        // The one perpetual animation in the app. At the default 60 fps it forces a
+        // composition pass per frame for as long as the window shows; the glyph turns
+        // a lazy 40°/s, so 20 fps is indistinguishable and three times cheaper.
+        Timeline.SetDesiredFrameRate(spin, 20);
         FanSpin.BeginAnimation(RotateTransform.AngleProperty, spin);
     }
 
@@ -289,19 +309,34 @@ public partial class MainWindow : Window
 
     private void AdoptPreset(Profile preset)
     {
+        var before = _profile.CaptureTuning();
         _profile.AdoptTuning(preset);
+        var after = _profile.CaptureTuning();
         _profile.Save();
-        // A preset rewrites every curve; stale before/after pairs would restore nonsense.
-        _undoStack.Clear();
-        _redoStack.Clear();
+        // A preset rewrites every curve and every behaviour knob, so the whole tuning
+        // goes on the undo stack as one entry — re-clicking the preset you are already
+        // on changes nothing and must not push one. Curve edits made before the switch
+        // stay on the stack below it: undo is LIFO, so they are only reached once this
+        // entry has put their state back.
+        if (!before.Matches(after))
+        {
+            _undoStack.Add(new TuningEdit(before, after));
+            if (_undoStack.Count > 100) _undoStack.RemoveAt(0);
+            _redoStack.Clear();
+        }
+        ResetCurveBaselines();
+        OnChannelSelected(this, null!);
+        Editor.InvalidateVisual();
+        UpdatePresetHighlight();
+    }
+
+    private void ResetCurveBaselines()
+    {
         foreach (var ch in _profile.Channels)
         {
             _pointsBaseline[ch] = ch.Points.ToList();
             _powerBaseline[ch] = SnapPoints(ch, power: true);
         }
-        OnChannelSelected(this, null!);
-        Editor.InvalidateVisual();
-        UpdatePresetHighlight();
     }
 
     private void UpdatePresetHighlight()
@@ -333,22 +368,52 @@ public partial class MainWindow : Window
         UpdatePresetHighlight();
     }
 
-    private void UndoCurveEdit()
+    private void UndoEdit()
     {
         if (_undoStack.Count == 0) return;
         var edit = _undoStack[^1];
         _undoStack.RemoveAt(_undoStack.Count - 1);
-        _redoStack.Add(edit);
-        ApplyCurveEdit(edit, edit.Before, edit.BeforeName);
+        _redoStack.Add(StepEdit(edit, undo: true));
     }
 
-    private void RedoCurveEdit()
+    private void RedoEdit()
     {
         if (_redoStack.Count == 0) return;
         var edit = _redoStack[^1];
         _redoStack.RemoveAt(_redoStack.Count - 1);
-        _undoStack.Add(edit);
-        ApplyCurveEdit(edit, edit.After, "Custom");
+        _undoStack.Add(StepEdit(edit, undo: false));
+    }
+
+    /// <summary>Applies one edit in the given direction and returns the entry to push
+    /// onto the opposite stack.</summary>
+    private Edit StepEdit(Edit edit, bool undo)
+    {
+        switch (edit)
+        {
+            case CurveEdit c:
+                ApplyCurveEdit(c, undo ? c.Before : c.After, undo ? c.BeforeName : "Custom");
+                return c;
+            case TuningEdit t:
+                // Tuning that is not itself undoable (the dev-panel behaviour sliders) may
+                // have moved since the switch. Re-capture before restoring, so stepping
+                // back the other way returns what was really on screen, not a stale
+                // snapshot that would silently drop those edits.
+                var current = _profile.CaptureTuning();
+                ApplyTuningEdit(undo ? t.Before : t.After);
+                return undo ? t with { After = current } : t with { Before = current };
+            default:
+                return edit;
+        }
+    }
+
+    private void ApplyTuningEdit(TuningSnapshot snapshot)
+    {
+        _profile.ApplyTuning(snapshot);
+        _profile.Save();
+        ResetCurveBaselines();
+        OnChannelSelected(this, null!); // dev sliders + editor follow the restored tuning
+        Editor.InvalidateVisual();
+        UpdatePresetHighlight();
     }
 
     private void ApplyCurveEdit(CurveEdit edit, List<CurvePoint> points, string name)
@@ -391,6 +456,7 @@ public partial class MainWindow : Window
         HistoryView.Visibility = _devMode ? Visibility.Visible : Visibility.Collapsed;
         BudgetView.Visibility = _devMode ? Visibility.Visible : Visibility.Collapsed;
         ClearHistoryButton.Visibility = _devMode ? Visibility.Visible : Visibility.Collapsed;
+        LiveButton.Visibility = _devMode && !_viewport.Live ? Visibility.Visible : Visibility.Collapsed;
         CurveAxisButton.Visibility = _devMode ? Visibility.Visible : Visibility.Collapsed;
         if (!_devMode) SetCurveAxis(false); // simple mode always shows the temp curve
         DevButton.Tag = _devMode ? "on" : null;
@@ -407,9 +473,8 @@ public partial class MainWindow : Window
         var ch = SelectedChannel;
         Editor.Channel = ch;
         int idx = ChannelList.SelectedIndex;
-        HistoryView.History = idx >= 0 && idx < _histories.Count ? _histories[idx] : null;
-        HistoryView.Refresh();
-        BudgetView.History = HistoryView.History;
+        // Switching channel drops any scroll-back anchor — the strips land on live data.
+        _viewport.History = idx >= 0 && idx < _histories.Count ? _histories[idx] : null;
         BudgetView.LeadSeconds = _profile.RampLeadSeconds;
         BudgetView.NoPowerNote = BudgetNote();
         BudgetView.Refresh();
@@ -460,7 +525,7 @@ public partial class MainWindow : Window
             PowerChecks.Items.Add(new TextBlock
             {
                 Text = "No power sensors on this backend.",
-                Foreground = new SolidColorBrush(Color.FromArgb(0x8c, 0xff, 0xff, 0xff)),
+                Foreground = Paint.White(0x8c),
             });
         ControlChecks.Items.Clear();
         _controlReadouts.Clear();
@@ -468,7 +533,23 @@ public partial class MainWindow : Window
         {
             var cb = new CheckBox { Content = SourceLabel(c.Name, 58, out var val), IsChecked = ch.ControlIds.Contains(c.Id), Tag = c.Id };
             _controlReadouts.Add((val, c.Id));
-            cb.Checked += (_, _) => { if (!ch.ControlIds.Contains(c.Id)) ch.ControlIds.Add(c.Id); _profile.Save(); };
+            cb.Checked += (_, _) =>
+            {
+                // A header obeys exactly ONE PWM value, so ownership is exclusive:
+                // with the same header on two channels, FanEngine.Tick writes both
+                // in Profile.Channels order and the LAST one silently wins every
+                // tick — a fan parked at 0% by the other channel's curve, with no
+                // why-chip and nothing in the UI to hint at it. Sensors are not
+                // exclusive (both channels may legitimately read one temp).
+                foreach (var other in _profile.Channels)
+                    if (!ReferenceEquals(other, ch)) other.ControlIds.Remove(c.Id);
+                if (!ch.ControlIds.Contains(c.Id)) ch.ControlIds.Add(c.Id);
+                _profile.Save();
+                // No list rebuild here: the panel only ever shows the SELECTED
+                // channel, and RebuildSourceChecks runs on every channel switch.
+                // Calling it from this handler would clear ControlChecks.Items
+                // while the checkbox raising the event still lives in it.
+            };
             cb.Unchecked += (_, _) => { ch.ControlIds.Remove(c.Id); _hw.ReleaseControl(c.Id); _profile.Save(); };
             ControlChecks.Items.Add(cb);
         }
@@ -476,7 +557,7 @@ public partial class MainWindow : Window
             ControlChecks.Items.Add(new TextBlock
             {
                 Text = "No controllable headers found.",
-                Foreground = new SolidColorBrush(Color.FromArgb(0x8c, 0xff, 0xff, 0xff)),
+                Foreground = Paint.White(0x8c),
             });
         RefreshSourceReadouts();
     }
@@ -492,7 +573,7 @@ public partial class MainWindow : Window
             Text = "—",
             FontFamily = mono,
             FontSize = 11.5,
-            Foreground = new SolidColorBrush(Color.FromArgb(0x8c, 0xff, 0xff, 0xff)),
+            Foreground = Paint.White(0x8c),
             TextAlignment = TextAlignment.Left,
             Margin = new Thickness(0, 0, 8, 0),
             VerticalAlignment = VerticalAlignment.Top,
@@ -560,49 +641,13 @@ public partial class MainWindow : Window
         Dispatcher.BeginInvoke(() =>
         {
             _lastStatuses = statuses;
-            for (int i = 0; i < statuses.Count && i < _channelVms.Count; i++)
+            for (int i = 0; i < statuses.Count && i < _histories.Count; i++)
             {
-                _channelVms[i].UpdateFrom(statuses[i]);
-                if (i < _histories.Count)
-                {
-                    var t = statuses[i];
-                    _histories[i].Add(new HistorySample(
-                        t.RawTemp, t.EffectiveTemp, t.OutputPercent,
-                        t.Watts, t.WattsAvg, t.BudgetJoules, t.TauSeconds, t.DemandLevel,
-                        t.CeilingC, t.AimC, t.Reason == OutputReason.HardOverride));
-                }
-            }
-
-            var s = SelectedStatus;
-            if (s != null)
-            {
-                // The curve chart's watts scale ranges over the same 10-min window as
-                // the budget strip, so the two right-hand scales agree and the power
-                // lines don't jump with every sample.
-                double wattsPeak = 0;
-                var hist = HistoryView.History;
-                for (int i = 0; hist != null && i < hist.Count; i++)
-                {
-                    if (hist[i].Watts is double hw) wattsPeak = Math.Max(wattsPeak, hw);
-                    if (hist[i].WattsAvg is double ha) wattsPeak = Math.Max(wattsPeak, ha);
-                }
-                Editor.UpdateLive(s.RawTemp, s.EffectiveTemp, s.OutputPercent,
-                    s.Watts, s.WattsAvg, wattsPeak);
-            }
-            HistoryView.Refresh();
-            BudgetView.LeadSeconds = _profile.RampLeadSeconds;
-            BudgetView.NoPowerNote = BudgetNote();
-            BudgetView.Refresh();
-
-            UpdateHero();
-            UpdateDetail();
-            UpdateChip();
-            if (_devMode)
-            {
-                RefreshSourceReadouts();
-                UpdatePowerInfo();
-                UpdateBudgetInfo();
-                UpdateModelInfo();
+                var t = statuses[i];
+                _histories[i].Add(new HistorySample(
+                    DateTime.Now, t.RawTemp, t.EffectiveTemp, t.OutputPercent,
+                    t.Watts, t.WattsAvg, t.BudgetJoules, t.TauSeconds, t.DemandLevel,
+                    t.CeilingC, t.AimC, t.Reason == OutputReason.HardOverride));
             }
 
             // The thermal model learns continuously; park it in profile.json every
@@ -613,9 +658,67 @@ public partial class MainWindow : Window
                 _profile.Save();
             }
 
-            _tray.SetStatus("Fan Curves — " + string.Join(" · ", statuses.Select(t =>
-                $"{(double.IsNaN(t.EffectiveTemp) ? "?" : Inv($"{t.EffectiveTemp:0}°"))}→{t.OutputPercent:0}%")));
+            // Tray tooltip: rebuilt per tick, but the Win32 update only goes out when
+            // the whole-degree readout actually changed (most idle ticks it hasn't).
+            string tip = "Fan Curves — " + string.Join(" · ", statuses.Select(t =>
+                $"{(double.IsNaN(t.EffectiveTemp) ? "?" : Inv($"{t.EffectiveTemp:0}°"))}→{t.OutputPercent:0}%"));
+            if (tip != _lastTrayTip)
+            {
+                _lastTrayTip = tip;
+                _tray.SetStatus(tip);
+            }
+
+            // Everything below only paints the window. Hidden in the tray (where this
+            // app spends most of its life) or minimized, skip it all — the histories
+            // above are already fed, and RefreshLiveUi catches the window up the
+            // moment it comes back.
+            if (IsVisible && WindowState != WindowState.Minimized) RefreshLiveUi();
         });
+    }
+
+    /// <summary>Everything a tick paints: segment readouts, charts, hero, chips, and
+    /// the dev-panel readouts. Runs per tick while the window shows, and once on
+    /// reopen/restore to catch up after the hidden-in-tray skip.</summary>
+    private void RefreshLiveUi()
+    {
+        var statuses = _lastStatuses;
+        if (statuses == null) return;
+        for (int i = 0; i < statuses.Count && i < _channelVms.Count; i++)
+            _channelVms[i].UpdateFrom(statuses[i]);
+
+        var s = SelectedStatus;
+        if (s != null)
+        {
+            // The curve chart's watts scale ranges over the same 10-min live window
+            // as the budget strip, so the two right-hand scales agree and the power
+            // lines don't jump with every sample (the ring IS the live window; the
+            // curve chart's overlay stays live even while the strips are scrolled).
+            double wattsPeak = 0;
+            int si = ChannelList.SelectedIndex;
+            var hist = si >= 0 && si < _histories.Count ? _histories[si] : null;
+            for (int i = 0; hist != null && i < hist.Count; i++)
+            {
+                if (hist[i].Watts is double hw) wattsPeak = Math.Max(wattsPeak, hw);
+                if (hist[i].WattsAvg is double ha) wattsPeak = Math.Max(wattsPeak, ha);
+            }
+            Editor.UpdateLive(s.RawTemp, s.EffectiveTemp, s.OutputPercent,
+                s.Watts, s.WattsAvg, wattsPeak);
+        }
+        HistoryView.Refresh();
+        BudgetView.LeadSeconds = _profile.RampLeadSeconds;
+        BudgetView.NoPowerNote = BudgetNote();
+        BudgetView.Refresh();
+
+        UpdateHero();
+        UpdateDetail();
+        UpdateChip();
+        if (_devMode)
+        {
+            RefreshSourceReadouts();
+            UpdatePowerInfo();
+            UpdateBudgetInfo();
+            UpdateModelInfo();
+        }
     }
 
     /// <summary>Big numeral: the selected channel's rolling average (what drives the steps).</summary>
@@ -704,9 +807,7 @@ public partial class MainWindow : Window
         else { text = "Curves active"; warm = true; }
 
         ChipText.Text = text;
-        ChipDot.Fill = warm
-            ? (Brush)FindResource("Accent")
-            : new SolidColorBrush(Color.FromArgb(0x66, 0xff, 0xff, 0xff));
+        ChipDot.Fill = warm ? (Brush)FindResource("Accent") : Paint.White(0x66);
         ChipGlow.Opacity = warm ? 0.9 : 0.0;
     }
 
@@ -905,13 +1006,16 @@ public partial class MainWindow : Window
         _profile.Save();
     }
 
-    /// <summary>Wipe the 10-minute ring on every channel; both strips start fresh.</summary>
+    /// <summary>Wipe the history (ring + spill file) on every channel; both strips start fresh.</summary>
     private void OnClearHistory(object sender, RoutedEventArgs e)
     {
         foreach (var h in _histories) h.Clear();
-        HistoryView.Refresh();
-        BudgetView.Refresh();
+        _viewport.JumpToLive();
+        _viewport.Invalidate();   // the cached window still holds the wiped samples
     }
+
+    /// <summary>Jump the scrolled-back strips home to the live right edge.</summary>
+    private void OnJumpToLive(object sender, RoutedEventArgs e) => _viewport.JumpToLive();
 
     /// <summary>Why the budget strip may be empty — depends on the control mode.</summary>
     private string BudgetNote() =>

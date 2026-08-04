@@ -225,7 +225,7 @@ public class TelemetryLog : IDisposable
     private const string CsvHeader =
         "time,channel,applied,out_pct,target_pct,reason,reason_level,reason_s," +
         "raw_c,avg_c,trend_c,rpm,watts,watts_avg,budget_kj,headroom_s,demand_pct," +
-        "ceiling_c,aim_c,slope_cps,base_c,r_cpw,mass_jpc";
+        "ceiling_c,aim_c,slope_cps,base_c,r_cpw,mass_jpc,rpm_per_header";
 
     private static string CsvRow(DateTime now, ChannelStatus s) => string.Join(',',
         now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
@@ -250,7 +250,10 @@ public class TelemetryLog : IDisposable
         N(s.SlopeCPerSec, "0.####"),
         N(s.BaseTempC, "0.0"),
         N(s.ResistanceCPerW, "0.###"),
-        N(s.MassJPerC, "0"));
+        N(s.MassJPerC, "0"),
+        // "|"-joined so the cell survives a comma-separated row; one entry per
+        // assigned header, in ControlIds order.
+        s.Rpms is null ? "" : string.Join('|', s.Rpms.Select(r => N(r, "0"))));
 
     /// <summary>NaN/null → empty cell, ∞ → "inf", else invariant with the given format.</summary>
     private static string N(double? v, string fmt) =>

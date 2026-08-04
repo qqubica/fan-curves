@@ -19,7 +19,7 @@
     <UseWindowsForms>true</UseWindowsForms> <!-- NotifyIcon for the tray -->
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <ApplicationManifest>app.manifest</ApplicationManifest> <!-- requireAdministrator -->
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <Product>FanCurves</Product>
     <Copyright>© 2026 Kuba (qqubica), MIT license</Copyright>
   </PropertyGroup>

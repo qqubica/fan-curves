@@ -106,7 +106,8 @@ the BIOS.
 
 - **Simple** (default): pick a preset — `Quiet · MacBook-like` or
   `Performance` — see the live curve and the rolling average that drives it.
-  Nothing to configure.
+  Nothing to configure. A preset overwrites your curves and tuning, so Ctrl+Z
+  takes the switch back (Ctrl+Y reapplies it).
 - **Developer** (top-bar toggle or `--dev`): edit curve points by dragging
   (double-click to add, right-click to remove, Ctrl+Z/Y undo/redo), tune the
   averaging window / hysteresis / hold / slew per channel, configure
@@ -119,7 +120,11 @@ the BIOS.
   history (average temp, raw temp, commanded fan %, the budget ceiling, and a
   marker for every fan stop/start) and the thermal budget itself — power draw
   and its sustained average against the predicted headroom and the ramp-lead
-  threshold that triggers a step up, with any fuse periods shaded.
+  threshold that triggers a step up, with any fuse periods shaded. The strips
+  scroll back through the last ~24 h (scroll wheel — hold Shift for 10× — or
+  drag; double-click or the LIVE button returns to now) without holding the day
+  in RAM: older samples spill to a temp file that disappears with the app, and
+  the time axis and hover chips show the wall-clock time of each measurement.
 
 ![FanCurves — developer mode](docs/screenshot-dev.png)
 

@@ -617,13 +617,14 @@
                                                 ClipToBounds="True" Margin="6,0,10,6"
                                                 Visibility="Collapsed"/>
 
-                            <!-- Wipes the 10-minute ring on every channel, so both strips start
-                                 fresh. Seated right of the strip's own HISTORY title and styled
-                                 like it; shown with the strips (dev mode only). -->
+                            <!-- Wipes the recorded history (ring + spill file) on every channel,
+                                 so both strips start fresh. Seated right of the strip's own
+                                 HISTORY title and styled like it; shown with the strips (dev
+                                 mode only). -->
                             <Button x:Name="ClearHistoryButton" Grid.Row="2" Click="OnClearHistory"
                                     HorizontalAlignment="Left" VerticalAlignment="Top"
                                     Margin="112,2,0,0" Visibility="Collapsed"
-                                    ToolTip="Clear the last 10 minutes of history on every channel — the history and budget strips start fresh.">
+                                    ToolTip="Clear the recorded history on every channel (including the scroll-back file) — the history and budget strips start fresh.">
                                 <Button.Template>
                                     <ControlTemplate TargetType="Button">
                                         <Border Background="Transparent" Padding="6,5">
@@ -633,6 +634,28 @@
                                         <ControlTemplate.Triggers>
                                             <Trigger Property="IsMouseOver" Value="True">
                                                 <Setter TargetName="ClearTxt" Property="Foreground" Value="#c4c4cc"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Button.Template>
+                            </Button>
+
+                            <!-- Jumps the scrolled-back strips home to the live right edge.
+                                 Only visible while the shared viewport is anchored in the
+                                 past (scroll wheel / drag on either strip). -->
+                            <Button x:Name="LiveButton" Grid.Row="2" Click="OnJumpToLive"
+                                    HorizontalAlignment="Left" VerticalAlignment="Top"
+                                    Margin="158,2,0,0" Visibility="Collapsed"
+                                    ToolTip="Back to now — the strips are showing past history (scroll wheel pans, Shift scrolls faster, drag to pan, double-click also returns to live).">
+                                <Button.Template>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border Background="Transparent" Padding="6,5">
+                                            <TextBlock x:Name="LiveTxt" local:Tracked.Text="LIVE" FontSize="9"
+                                                       FontWeight="SemiBold" Foreground="#3dffffff"/>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="LiveTxt" Property="Foreground" Value="#c4c4cc"/>
                                             </Trigger>
                                         </ControlTemplate.Triggers>
                                     </ControlTemplate>

@@ -56,6 +56,33 @@ public enum ControlMode
     PowerCurve,
 }
 
+/// <summary>One channel's share of a <see cref="TuningSnapshot"/>: the tuning a preset
+/// overwrites, i.e. everything in ChannelConfig except what describes the machine
+/// (sensor/header assignments) or was measured on it (the learned thermal model).</summary>
+public sealed record ChannelTuning(
+    List<CurvePoint> Points, List<PowerPoint> PowerPoints, double AveragingSeconds,
+    double HysteresisC, double StepDownHoldSeconds, double SlewUpPercentPerSec,
+    double SlewDownPercentPerSec, double MinPercent)
+{
+    /// <summary>Value equality — the compiler-generated one compares the two point lists by
+    /// reference, so a snapshot would never match a re-captured copy of the same state.</summary>
+    public bool Matches(ChannelTuning o) =>
+        Points.SequenceEqual(o.Points) && PowerPoints.SequenceEqual(o.PowerPoints) &&
+        AveragingSeconds == o.AveragingSeconds && HysteresisC == o.HysteresisC &&
+        StepDownHoldSeconds == o.StepDownHoldSeconds &&
+        SlewUpPercentPerSec == o.SlewUpPercentPerSec &&
+        SlewDownPercentPerSec == o.SlewDownPercentPerSec && MinPercent == o.MinPercent;
+}
+
+/// <summary>A profile's curve + behaviour tuning, detached from the live objects
+/// (<see cref="Profile.CaptureTuning"/> / <see cref="Profile.ApplyTuning"/>).</summary>
+public sealed record TuningSnapshot(string Name, List<ChannelTuning> Channels)
+{
+    public bool Matches(TuningSnapshot o) =>
+        Name == o.Name && Channels.Count == o.Channels.Count &&
+        Channels.Zip(o.Channels).All(p => p.First.Matches(p.Second));
+}
+
 public class Profile
 {
     public string Name { get; set; } = "Profile";
@@ -183,16 +210,14 @@ public class Profile
                 MinPercent = 0, // true MacBook behaviour: fans fully stop at idle
                 Points =
                 {
-                    // Silent (stopped) through everything up to 57°C avg,
-                    // then a gentle 20% start and fine-grained steps under load.
+                    // Silent (stopped) through everything up to 50°C avg, then a
+                    // barely-audible 10% start and a 50% cap — sustained-load speed
+                    // comes from the power side (Auto), not the temp staircase.
                     new CurvePoint(20, 0),
-                    new CurvePoint(57, 20),
+                    new CurvePoint(50, 10),
+                    new CurvePoint(55, 20),
                     new CurvePoint(62, 40),
-                    new CurvePoint(70, 50),
-                    new CurvePoint(76, 65),
-                    new CurvePoint(84, 81),
-                    new CurvePoint(88, 90),
-                    new CurvePoint(92, 100),
+                    new CurvePoint(84, 50),
                 },
                 // The watts twin (PowerCurve mode): sized for a ~200 W-class CPU —
                 // silence through desktop draw, the same ladder of levels as the
@@ -215,14 +240,17 @@ public class Profile
             new ChannelConfig
             {
                 Name = "Case fans",
-                MinPercent = 0, // 0% = fans stopped (Arctic P-series stop below 5% PWM)
+                MinPercent = 0, // 0% = fans stopped
                 Points =
                 {
-                    new CurvePoint(20, 0),  // fully stopped through idle and light load
-                    new CurvePoint(58, 25),
+                    new CurvePoint(20, 0),  // fully stopped through idle
+                    new CurvePoint(40, 5),  // whisper bands (NF-A14s run at any duty >0%)
+                    new CurvePoint(42, 10),
+                    new CurvePoint(60, 20),
                     new CurvePoint(70, 40),
-                    new CurvePoint(80, 55),
-                    new CurvePoint(88, 70),
+                    new CurvePoint(75, 60),
+                    new CurvePoint(82, 82),
+                    new CurvePoint(86, 100),
                 },
                 // Case channel sums CPU+GPU draw, so the steps sit higher.
                 PowerPoints =
@@ -298,13 +326,25 @@ public class Profile
     /// Copy curve + behaviour tuning from a preset while keeping this profile's
     /// sensor/header assignments (those describe the machine, not the preset).
     /// </summary>
-    public void AdoptTuning(Profile preset)
+    public void AdoptTuning(Profile preset) => ApplyTuning(preset.CaptureTuning());
+
+    /// <summary>Everything a preset switch overwrites, as a detached copy — so the UI can
+    /// undo one by handing the pre-switch snapshot back to <see cref="ApplyTuning"/>.</summary>
+    public TuningSnapshot CaptureTuning() => new(Name, Channels
+        .Select(c => new ChannelTuning(
+            c.Points.ToList(), c.PowerPoints.ToList(), c.AveragingSeconds, c.HysteresisC,
+            c.StepDownHoldSeconds, c.SlewUpPercentPerSec, c.SlewDownPercentPerSec, c.MinPercent))
+        .ToList());
+
+    /// <summary>Restore a <see cref="CaptureTuning"/> snapshot. Sensor/header assignments and
+    /// every app-level setting are untouched — a snapshot only carries curve + behaviour tuning.</summary>
+    public void ApplyTuning(TuningSnapshot snapshot)
     {
-        Name = preset.Name;
-        for (int i = 0; i < Channels.Count && i < preset.Channels.Count; i++)
+        Name = snapshot.Name;
+        for (int i = 0; i < Channels.Count && i < snapshot.Channels.Count; i++)
         {
             var mine = Channels[i];
-            var src = preset.Channels[i];
+            var src = snapshot.Channels[i];
             mine.Points = src.Points.ToList();
             mine.PowerPoints = src.PowerPoints.ToList();
             mine.AveragingSeconds = src.AveragingSeconds;
