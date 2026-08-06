@@ -12,6 +12,7 @@
 mod charts;
 mod client;
 mod devpanel;
+mod icon;
 
 use eframe::egui::{
     Align2, Button, CentralPanel, Color32, Context, CornerRadius, FontId, Frame, Margin, RichText,
@@ -46,7 +47,9 @@ fn main() -> eframe::Result {
             .with_inner_size(if dev { DEV_SIZE } else { SIMPLE_SIZE })
             .with_position([100.0, 100.0])
             .with_resizable(false)
-            .with_title("Fan Curves"),
+            .with_title("Fan Curves")
+            // Same mark as the WPF app's window/taskbar/tray icon.
+            .with_icon(icon::icon_data()),
         ..Default::default()
     };
     eframe::run_native(
@@ -430,17 +433,11 @@ impl App {
     /// Title bar: fan glyph, name, and the mode toggle — the WPF caption row.
     fn title_bar(&mut self, ui: &mut eframe::egui::Ui) {
         ui.horizontal(|ui| {
-            // Fan glyph: three blades + hub. It only spins in the WPF app; here
-            // it is static, because the repaint rules forbid a perpetual
-            // animation and this UI paints once per engine tick.
+            // The app mark. It spins in the WPF app; here it is static, because
+            // the repaint rules forbid a perpetual animation and this UI paints
+            // once per engine tick.
             let (rect, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
-            let c = rect.center();
-            for k in 0..3 {
-                let a = std::f32::consts::TAU * (k as f32) / 3.0;
-                let dir = Vec2::new(a.sin(), -a.cos());
-                ui.painter().circle_filled(c + dir * 5.2, 2.6, Color32::from_white_alpha(217));
-            }
-            ui.painter().circle_filled(c, 2.1, Color32::from_white_alpha(217));
+            icon::draw_glyph(ui.painter(), rect.center(), 20.0, Color32::from_white_alpha(217));
             ui.add_space(6.0);
             ui.label(RichText::new("Fan Curves").font(FontId::proportional(13.0)).color(TEXT));
 
