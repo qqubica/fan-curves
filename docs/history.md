@@ -866,3 +866,32 @@ warns when both would start; the UI repeats the warning above the switch.
 Verified: non-elevated attempts fail with a clear message rather than
 half-working, and the daemon correctly reported "daemon off, WPF app's task
 ALSO registered" on this machine.
+
+## Rust UI phase 5: two-tier history and scrollback (2026-08-07)
+
+The strip could only ever show ten minutes, because the port held 600 samples
+in RAM and nothing else — so scrollback was a STORAGE task before it was a UI
+task. Ported the C# two-tier design: the ring stays exact for the live window,
+and every sample is also appended to a per-channel spill file as a fixed
+10-byte quantized record (u32 seconds since 2020, three i16 tenths). Only the
+disk copy is lossy, deliberately below display resolution. Delete-on-close on
+Windows, unlinked immediately on Unix, so a crash cannot leave a file behind;
+any file error degrades silently to RAM-only, because history is a convenience
+and must never take the UI down.
+
+The viewport anchors on ABSOLUTE sample indices, which is what makes incoming
+ticks leave a scrolled window alone and lets CLEAR strand an anchor harmlessly
+rather than silently re-pointing it at different data. Wheel pans ~1 min per
+notch (10x with Shift), drag follows the cursor with a fractional remainder so
+slow drags still move, double-click and LIVE return to now, and reaching the
+live edge drops the anchor so the view resumes following. While scrolled the
+amber live dots vanish and the right edge prints the window-end clock instead
+of "now" — the WPF distinction between watching and reviewing.
+
+Four unit tests cover the parts that are easy to get subtly wrong: a spill
+round-trip past the ring, scroll-and-snap-back, CLEAR stranding an anchor, and
+NaN surviving quantization as a gap rather than becoming a real reading.
+
+Remaining and deliberately NOT done: a tray icon with close-to-tray (residency
+belongs to the daemon in this architecture, so the tray has no job — the window
+is disposable), and custom borderless chrome (cosmetic).

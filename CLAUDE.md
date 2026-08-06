@@ -104,9 +104,15 @@ the shipping app until the port reaches feature parity.
   perpetual spin violates the repaint rules), the strip's **hover crosshair +
   readout chip**, **stopped-time spans**, **CLEAR**, and the **three-size
   window cycle**.
-  **Still missing**: history SCROLLBACK (wheel/drag/LIVE — needs the two-tier
-  spill-file storage first; the port holds 600 samples in RAM and nothing on
-  disk), tray presence / close-to-tray, and custom window chrome.
+  Also done: **two-tier history + scrollback** (`history.rs` — exact 600-sample
+  ring plus a per-channel spill file of fixed 10-byte quantized records,
+  delete-on-close, silent RAM-only degradation on any file error; the viewport
+  anchors on ABSOLUTE indices so incoming ticks never move a scrolled window
+  and CLEAR strands an anchor harmlessly; wheel ≈1 min/notch, 10× with Shift,
+  drag with a fractional remainder, double-click / LIVE back to now).
+  **Still missing, both deliberate**: no tray / close-to-tray (residency
+  belongs to the DAEMON here, so the tray has no job — the window is
+  disposable), and custom borderless chrome (cosmetic).
 - **Autostart** (`fan-daemon/src/autostart.rs`): Task Scheduler logon task
   `FanCurvesDaemon`, `/RL HIGHEST` (a Run key cannot elevate, and the daemon
   needs admin) — its own name so it and the WPF app's `FanCurves` task can be
