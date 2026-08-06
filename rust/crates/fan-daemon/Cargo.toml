@@ -1,0 +1,11 @@
+[package]
+name = "fan-daemon"
+description = "fan-curves headless engine daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+fan-core = { path = "../fan-core" }
+ctrlc = "3"

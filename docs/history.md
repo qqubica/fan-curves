@@ -575,3 +575,27 @@ off), presumably part of the chassis-header EC investigation.
 
 Saved profiles keep loading: only fields were deleted, none renamed, so the
 orphaned power values are ignored and dropped on the next save.
+
+## Rust port — phase 1: core + parity (2026-08-06)
+
+Kuba's decision after a resource-usage review: port the app to Rust, with the
+goal of minimal footprint and a universal (Windows + Linux) build. Target
+architecture from that discussion: a small headless engine daemon per OS plus
+an on-demand egui UI, native hardware backends (PawnIO + NCT6686D on Windows,
+hwmon/sysfs on Linux) replacing LibreHardwareMonitorLib eventually. The
+same-day temperature-only removal shrank the port surface considerably — the
+thermal-budget controller no longer needed porting.
+
+Phase 1 landed the `rust/` cargo workspace: `fan-core` (curve, filter, kick,
+probe, profile, engine, backend trait, sim plant — one module per C# file) and
+`fan-daemon` (jittered tick loop, auto-assign port, BIOS handback on drop).
+Parity with C# is enforced by `rust/parity-harness`, which drives the REAL
+FanCurves.Core through deterministic scenarios (~5,500 ticks: spikes, band
+descents, zero-snap bands, apply-now jumps, probe fail/backoff/max-temp,
+kick cycles) and writes golden CSVs that `cargo test` replays through the port
+— matching at 1e-9, in practice bit-identical. First run: 29 unit + 6 golden
+tests green; the daemon loaded the real profile.json unchanged.
+
+Toolchain installed the same day (rustup 1.29 + VS Build Tools 17.14 via
+winget). Smart App Control had been switched off earlier that morning, which
+unblocked local builds generally.

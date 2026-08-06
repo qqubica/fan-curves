@@ -38,6 +38,35 @@ No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
   after, so the tag exists locally (git-solo and other history tools only see
   local refs; the v0.1.0 tag was missed this way once).
 
+## Rust port (`rust/`, started 2026-08-06)
+
+Kuba's decision: port the app to Rust for minimal resource usage and a
+universal Windows + Linux build. Target architecture: headless engine daemon +
+on-demand egui UI + native per-OS hardware backends (PawnIO + NCT6686D on
+Windows, hwmon/sysfs on Linux) — LibreHardwareMonitorLib eventually drops out.
+Cargo workspace `rust/`: `crates/fan-core` (one module per C# Core file;
+serde-compatible with the SAME `%AppData%\FanCurves\profile.json` — PascalCase
+names, unknown fields ignored, missing fields take the C# defaults) and
+`crates/fan-daemon` (jittered tick loop, auto-assign port, `--sim` / `--ticks` /
+`--profile` / `--no-apply`, BIOS handback on drop/Ctrl+C). The WPF app stays
+the shipping app until the port reaches feature parity.
+
+- **Parity is enforced, not assumed**: `rust/parity-harness` (C# console app
+  referencing FanCurves.Core) writes golden per-tick traces into
+  `crates/fan-core/tests/golden/`; `cargo test` replays them through the port
+  and compares every output column at 1e-9 (in practice bit-identical).
+  **After any intentional behaviour change in FanCurves.Core, regenerate**
+  (`dotnet run --project rust/parity-harness`) — otherwise the golden tests
+  pin the old behaviour and fail honestly.
+- The daemon must never save the real profile from a sim run (same hazard as
+  C# `Profile.ReadOnly`): it only writes the profile when `--profile` names an
+  explicit path.
+- Engine components take monotonic `now` seconds as parameters — the daemon
+  owns the clock; tests replay any timeline deterministically.
+- Toolchain (installed 2026-08-06): rustup + VS Build Tools via winget. cargo
+  is NOT on PATH in this harness's shells — use
+  `& "$env:USERPROFILE\.cargo\bin\cargo.exe"` from `rust/`.
+
 ## Layout
 
 - `src/FanCurves.Core` — engine, no UI deps:
