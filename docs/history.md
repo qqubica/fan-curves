@@ -599,3 +599,24 @@ tests green; the daemon loaded the real profile.json unchanged.
 Toolchain installed the same day (rustup 1.29 + VS Build Tools 17.14 via
 winget). Smart App Control had been switched off earlier that morning, which
 unblocked local builds generally.
+
+## Rust port — phase 2: telemetry + IPC (2026-08-06)
+
+The daemon became a complete headless engine. TelemetryLog ported with the
+C# schema, number formats ("0.#"/"0.0"/"0" trims) and behavior vocabulary kept
+identical — verified live when the Rust daemon appended rows to the same
+telemetry-sim CSV a C# --sim run had created that morning, header untouched.
+Local-time offset is captured once at startup (std has no timezone database;
+the `time` crate's lookup is only safe pre-threads), so a DST flip mid-run
+shifts log timestamps until restart — accepted, documented.
+
+IPC: local socket `fan-curves-daemon.sock` (named pipe on Windows) speaking
+line-delimited JSON — ping/status/profile/set_profile/preset/apply/pause/
+shutdown. Binding the socket doubles as the single-instance check, and
+`shutdown` is the daemon's exit.signal. `--send` makes the binary its own
+client. Verified end-to-end: preset adoption over IPC instant-applied within a
+tick (Quiet → Performance, CPU 0% → 45% at the same temp), pause released to
+BIOS, shutdown exited cleanly with the "headers to BIOS" marker flushed.
+Read-only guard confirmed: preset via IPC on the real profile answered
+"saved":false. Footprint with IPC + telemetry live: 5.6 MB working set / 1.0 MB
+private. Service/autostart wiring deferred to the hardware-backend phase.

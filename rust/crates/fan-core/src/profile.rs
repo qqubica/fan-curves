@@ -211,6 +211,24 @@ impl Profile {
         }
     }
 
+    /// Copy curve + behaviour tuning from a preset while keeping this profile's
+    /// sensor/header assignments and app-level settings (those describe the
+    /// machine, not the preset) — port of the C# `AdoptTuning`.
+    pub fn adopt_tuning(&mut self, preset: &Profile) {
+        self.name = preset.name.clone();
+        for i in 0..self.channels.len().min(preset.channels.len()) {
+            let src = &preset.channels[i];
+            let dst = &mut self.channels[i];
+            dst.points = src.points.clone();
+            dst.averaging_seconds = src.averaging_seconds;
+            dst.hysteresis_c = src.hysteresis_c;
+            dst.step_down_hold_seconds = src.step_down_hold_seconds;
+            dst.slew_up_percent_per_sec = src.slew_up_percent_per_sec;
+            dst.slew_down_percent_per_sec = src.slew_down_percent_per_sec;
+            dst.min_percent = src.min_percent;
+        }
+    }
+
     /// Load `profile.json`, falling back to the default preset on a missing,
     /// corrupted, or channel-less file — same contract as the C# `LoadOrDefault`.
     pub fn load_or_default(path: &Path) -> Self {
@@ -288,6 +306,27 @@ mod tests {
         assert_eq!(ch.hysteresis_c, 1.5);
         assert_eq!(ch.step_down_hold_seconds, 10.0); // missing → default
         assert!(ch.enabled);
+    }
+
+    #[test]
+    fn adopt_tuning_keeps_the_machine_and_app_settings() {
+        let mut p = Profile::mac_book_like();
+        p.channels[0].sensor_ids = vec!["/amdcpu/0/temperature/2".into()];
+        p.channels[0].control_ids = vec!["/lpc/nct6686d/0/control/0".into(), "/lpc/nct6686d/0/control/1".into()];
+        p.zero_snap_percent = 28.0;
+        p.idle_kick_enabled = true;
+
+        p.adopt_tuning(&Profile::performance());
+
+        assert_eq!(p.name, "Performance");
+        assert_eq!(p.channels[0].min_percent, 30.0); // preset tuning adopted
+        assert_eq!(p.channels[0].averaging_seconds, 8.0);
+        assert_eq!(p.channels[0].points, Profile::performance().channels[0].points);
+        // The machine (assignments) and app-level switches survive.
+        assert_eq!(p.channels[0].control_ids.len(), 2);
+        assert_eq!(p.channels[0].sensor_ids[0], "/amdcpu/0/temperature/2");
+        assert_eq!(p.zero_snap_percent, 28.0);
+        assert!(p.idle_kick_enabled);
     }
 
     #[test]

@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
+use serde::{Deserialize, Serialize};
+
 use crate::backend::HardwareBackend;
 use crate::curve::FanCurve;
 use crate::filter::ResponseFilter;
@@ -10,7 +12,7 @@ use crate::profile::Profile;
 
 /// Why the commanded % differs from the curve's configured level right now
 /// (port of `OutputReason` in `FanEngine.cs`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputReason {
     None,         // output matches the curve — nothing to explain
     RampUp,       // slew limit still gliding up toward the target level
@@ -23,7 +25,25 @@ pub enum OutputReason {
     StopProbe,    // trial stop — fan held at 0 to see if it is needed at all
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Display for OutputReason {
+    /// The C# enum names — the telemetry CSV's `reason` column vocabulary,
+    /// kept identical so existing analysis scripts parse both apps' logs.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            OutputReason::None => "None",
+            OutputReason::RampUp => "RampUp",
+            OutputReason::RampDown => "RampDown",
+            OutputReason::StepDownHold => "StepDownHold",
+            OutputReason::Hysteresis => "Hysteresis",
+            OutputReason::ZeroSnap => "ZeroSnap",
+            OutputReason::MinFloor => "MinFloor",
+            OutputReason::IdleKick => "IdleKick",
+            OutputReason::StopProbe => "StopProbe",
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelStatus {
     pub name: String,
     pub raw_temp: Option<f64>,

@@ -3,21 +3,30 @@
 //! Runs the ported `FanEngine` on a jittered ~1 s tick, exactly like the WPF
 //! app's timer (850–1150 ms so sampling never phase-locks onto periodic system
 //! activity — all downstream time logic runs on the monotonic clock, so the
-//! uneven spacing is harmless). Ctrl+C (and engine drop on any exit path) hands
-//! every header back to the BIOS.
+//! uneven spacing is harmless). On every exit path the headers go back to the
+//! BIOS. Console output is CHANGES ONLY (`--verbose` for the per-tick line);
+//! the durable record is the telemetry CSV + behavior log (same schema as the
+//! WPF app, sim-prefixed). A local socket (see `ipc.rs`) serves the on-demand
+//! UI; binding it doubles as the single-instance check.
 //!
 //! Only the simulated backend exists so far; `--sim` is therefore implied.
 //! Real hardware backends (PawnIO/NCT6686D on Windows, hwmon on Linux) are the
 //! next phases.
 
+mod ipc;
+mod telemetry;
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fan_core::backend::SensorKind;
 use fan_core::rng::Rng;
 use fan_core::{ChannelStatus, FanEngine, HardwareBackend, OutputReason, Profile, SimulatedBackend};
+
+use ipc::Shared;
+use telemetry::TelemetryLog;
 
 struct Args {
     sim: bool,
@@ -25,10 +34,12 @@ struct Args {
     verbose: bool,
     ticks: Option<u64>,
     profile: Option<PathBuf>,
+    send: Option<String>,
 }
 
 fn parse_args() -> Args {
-    let mut args = Args { sim: false, apply: true, verbose: false, ticks: None, profile: None };
+    let mut args =
+        Args { sim: false, apply: true, verbose: false, ticks: None, profile: None, send: None };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -37,10 +48,11 @@ fn parse_args() -> Args {
             "--verbose" => args.verbose = true,
             "--ticks" => args.ticks = it.next().and_then(|v| v.parse().ok()),
             "--profile" => args.profile = it.next().map(PathBuf::from),
+            "--send" => args.send = it.next(),
             other => {
                 eprintln!("unknown argument: {other}");
                 eprintln!(
-                    "usage: fan-daemon [--sim] [--no-apply] [--verbose] [--ticks N] [--profile path]"
+                    "usage: fan-daemon [--sim] [--no-apply] [--verbose] [--ticks N] [--profile path]\n       fan-daemon --send '{{\"cmd\":\"status\"}}'"
                 );
                 std::process::exit(2);
             }
@@ -159,9 +171,9 @@ fn auto_assign<B: HardwareBackend>(profile: &mut Profile, hw: &B) -> bool {
     changed
 }
 
-/// Last tick's state per channel, for change-only output — a daemon must not
-/// spend steady-state work narrating "nothing happened" every second (same
-/// philosophy as the WPF app's behavior log: CHANGES only).
+/// Last tick's state per channel, for change-only console output — a daemon
+/// must not spend steady-state work narrating "nothing happened" every second
+/// (same philosophy as the behavior log: CHANGES only).
 struct Prev {
     applied: bool,
     on: bool,
@@ -255,9 +267,28 @@ fn describe(s: &ChannelStatus) -> String {
 
 fn main() {
     let args = parse_args();
+
+    // Client mode: one request line to a running daemon, print the reply, done.
+    if let Some(request) = &args.send {
+        match ipc::send(request) {
+            Ok(reply) => println!("{reply}"),
+            Err(e) => {
+                eprintln!("could not reach the daemon: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     if !args.sim {
         eprintln!("only --sim exists so far (real hardware backends are the next phase); running the simulation");
     }
+
+    // Local-offset lookup is only reliable before other threads exist; captured
+    // once, so a DST flip mid-run shifts log timestamps until restart.
+    let utc_offset_secs = time::UtcOffset::current_local_offset()
+        .map(|o| o.whole_seconds() as i64)
+        .unwrap_or(0);
 
     // Dev flows never write the real config (the C# Profile.ReadOnly contract):
     // auto-assign against the sim backend would prune the machine's real IDs.
@@ -282,27 +313,57 @@ fn main() {
         );
     }
 
-    let stop = Arc::new(AtomicBool::new(false));
-    {
-        let stop = Arc::clone(&stop);
-        ctrlc::set_handler(move || stop.store(true, Ordering::SeqCst))
-            .expect("install Ctrl+C handler");
-    }
+    // The socket is also the single-instance lock.
+    let listener = match ipc::bind() {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("another fan-daemon appears to be running (socket busy: {e})");
+            std::process::exit(1);
+        }
+    };
 
     let mut engine = FanEngine::new(hw, profile);
     if args.apply {
         engine.apply();
     }
 
+    let shared = Arc::new(Shared {
+        engine: Mutex::new(engine),
+        latest: Mutex::new(Vec::new()),
+        telemetry: Mutex::new(TelemetryLog::new(config_dir(), true, utc_offset_secs)),
+        profile_path,
+        read_only,
+        stop: AtomicBool::new(false),
+    });
+    {
+        let shared = Arc::clone(&shared);
+        ctrlc::set_handler(move || shared.stop.store(true, Ordering::SeqCst))
+            .expect("install Ctrl+C handler");
+    }
+    shared.telemetry.lock().unwrap().event(&format!(
+        "daemon started (sim backend, v{}, {})",
+        env!("CARGO_PKG_VERSION"),
+        if args.apply { "applying" } else { "monitoring" }
+    ));
+    {
+        let shared = Arc::clone(&shared);
+        std::thread::spawn(move || ipc::serve(listener, shared));
+    }
+
     let seed = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.subsec_nanos() as u64).unwrap_or(1);
     let mut jitter = Rng::new(seed | 1);
     let start = Instant::now();
     let mut ticks = 0u64;
-
     let mut prev: Vec<Option<Prev>> = Vec::new();
-    while !stop.load(Ordering::SeqCst) {
+
+    while !shared.stop.load(Ordering::SeqCst) {
         let now = start.elapsed().as_secs_f64();
-        let statuses = engine.tick(now);
+        let (statuses, profile_snapshot, telemetry_on) = {
+            let mut engine = shared.engine.lock().unwrap();
+            let statuses = engine.tick(now);
+            (statuses, engine.profile().clone(), engine.profile().telemetry_logging_enabled)
+        };
+        *shared.latest.lock().unwrap() = statuses.clone();
 
         if args.verbose {
             let line = statuses
@@ -334,6 +395,10 @@ fn main() {
             }
         }
 
+        if telemetry_on {
+            shared.telemetry.lock().unwrap().record(&profile_snapshot, &statuses);
+        }
+
         ticks += 1;
         if let Some(limit) = args.ticks {
             if ticks >= limit {
@@ -343,7 +408,13 @@ fn main() {
         std::thread::sleep(Duration::from_millis(jitter.range(850, 1151)));
     }
 
-    // Engine drop hands every header back to the BIOS; say so for the log.
-    drop(engine);
+    // Explicit handback: the IPC thread keeps its Arc alive, so the engine's
+    // Drop through the Arc is not guaranteed to run — release here, always.
+    {
+        let mut telemetry = shared.telemetry.lock().unwrap();
+        telemetry.event("daemon exiting — headers to BIOS");
+        telemetry.flush();
+    }
+    shared.engine.lock().unwrap().stop_applying();
     println!("released all controls to BIOS, exiting");
 }

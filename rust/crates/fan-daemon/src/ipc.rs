@@ -1,0 +1,176 @@
+//! IPC endpoint for the on-demand UI (and CLI): a local socket — named pipe on
+//! Windows, Unix socket elsewhere — speaking line-delimited JSON. One request
+//! line in, one response line out; connections may pipeline.
+//!
+//! Commands:
+//!   {"cmd":"ping"}                     → {"ok":true,"version":"…","simulated":true}
+//!   {"cmd":"status"}                   → applying + profile name + latest tick statuses
+//!   {"cmd":"profile"}                  → the full profile (PascalCase, same schema as profile.json)
+//!   {"cmd":"set_profile","profile":…}  → replace + save (unless the daemon is read-only)
+//!   {"cmd":"preset","name":"quiet"|"performance"} → adopt tuning, keep assignments
+//!   {"cmd":"apply"} / {"cmd":"pause"}  → start/stop writing PWM (pause = BIOS control)
+//!
+//! Binding the socket also serves as the single-instance check: a second daemon
+//! fails to create the listener and exits.
+
+use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use interprocess::local_socket::traits::{ListenerExt as _, Stream as _};
+use interprocess::local_socket::{
+    GenericNamespaced, Listener, ListenerOptions, Stream, ToNsName,
+};
+use serde::Deserialize;
+use serde_json::json;
+
+use fan_core::{ChannelStatus, FanEngine, Profile, SimulatedBackend};
+
+use crate::telemetry::TelemetryLog;
+
+pub const SOCKET_NAME: &str = "fan-curves-daemon.sock";
+
+/// Everything the tick loop and the IPC handlers share.
+pub struct Shared {
+    pub engine: Mutex<FanEngine<SimulatedBackend>>,
+    pub latest: Mutex<Vec<ChannelStatus>>,
+    pub telemetry: Mutex<TelemetryLog>,
+    pub profile_path: std::path::PathBuf,
+    pub read_only: bool,
+    /// Set by Ctrl+C or the `shutdown` command; the tick loop exits on it and
+    /// hands the headers back to the BIOS (the daemon's `exit.signal`).
+    pub stop: AtomicBool,
+}
+
+pub fn bind() -> std::io::Result<Listener> {
+    let name = SOCKET_NAME.to_ns_name::<GenericNamespaced>()?;
+    ListenerOptions::new().name(name).create_sync()
+}
+
+pub fn serve(listener: Listener, shared: Arc<Shared>) {
+    for conn in listener.incoming() {
+        let Ok(conn) = conn else { continue };
+        let shared = Arc::clone(&shared);
+        std::thread::spawn(move || {
+            let _ = handle(conn, &shared); // a dropped connection is not an error
+        });
+    }
+}
+
+fn handle(conn: Stream, shared: &Shared) -> std::io::Result<()> {
+    let (recv, send) = conn.split();
+    let mut reader = BufReader::new(recv);
+    let mut writer = BufWriter::new(send);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            return Ok(());
+        }
+        let response = respond(&line, shared);
+        writer.write_all(response.to_string().as_bytes())?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "cmd", rename_all = "snake_case")]
+enum Request {
+    Ping,
+    Status,
+    Profile,
+    SetProfile { profile: Box<Profile> },
+    Preset { name: String },
+    Apply,
+    Pause,
+    Shutdown,
+}
+
+fn respond(line: &str, shared: &Shared) -> serde_json::Value {
+    let request = match serde_json::from_str::<Request>(line) {
+        Ok(r) => r,
+        Err(e) => return json!({ "ok": false, "error": format!("bad request: {e}") }),
+    };
+    match request {
+        Request::Ping => json!({
+            "ok": true,
+            "version": env!("CARGO_PKG_VERSION"),
+            "simulated": true,
+        }),
+        Request::Status => {
+            let engine = shared.engine.lock().unwrap();
+            let latest = shared.latest.lock().unwrap();
+            json!({
+                "ok": true,
+                "applying": engine.applying(),
+                "profile_name": engine.profile().name,
+                "channels": *latest,
+            })
+        }
+        Request::Profile => {
+            let engine = shared.engine.lock().unwrap();
+            json!({ "ok": true, "read_only": shared.read_only, "profile": engine.profile() })
+        }
+        Request::SetProfile { profile } => {
+            if profile.channels.is_empty() {
+                return json!({ "ok": false, "error": "profile has no channels" });
+            }
+            let mut engine = shared.engine.lock().unwrap();
+            engine.replace_profile(*profile);
+            let saved = save_if_allowed(shared, engine.profile());
+            shared.telemetry.lock().unwrap().event("profile replaced via IPC");
+            json!({ "ok": true, "saved": saved })
+        }
+        Request::Preset { name } => {
+            let preset = match name.as_str() {
+                "quiet" => Profile::mac_book_like(),
+                "performance" => Profile::performance(),
+                other => return json!({ "ok": false, "error": format!("unknown preset: {other}") }),
+            };
+            let mut engine = shared.engine.lock().unwrap();
+            engine.profile_mut().adopt_tuning(&preset);
+            // The changed settings fingerprint instant-applies on the next tick,
+            // exactly like a preset click in the WPF UI.
+            let saved = save_if_allowed(shared, engine.profile());
+            shared.telemetry.lock().unwrap().event(&format!("preset adopted via IPC: {}", preset.name));
+            json!({ "ok": true, "profile_name": engine.profile().name, "saved": saved })
+        }
+        Request::Apply => {
+            shared.engine.lock().unwrap().apply();
+            shared.telemetry.lock().unwrap().event("apply via IPC");
+            json!({ "ok": true })
+        }
+        Request::Pause => {
+            shared.engine.lock().unwrap().stop_applying();
+            shared.telemetry.lock().unwrap().event("paused via IPC (headers to BIOS)");
+            json!({ "ok": true })
+        }
+        Request::Shutdown => {
+            shared.telemetry.lock().unwrap().event("shutdown requested via IPC");
+            shared.stop.store(true, Ordering::SeqCst);
+            json!({ "ok": true, "stopping": true })
+        }
+    }
+}
+
+fn save_if_allowed(shared: &Shared, profile: &Profile) -> bool {
+    if shared.read_only {
+        return false;
+    }
+    profile.save(&shared.profile_path).is_ok()
+}
+
+/// Client side: send one request line, print the one response line (`--send`).
+pub fn send(request: &str) -> std::io::Result<String> {
+    let name = SOCKET_NAME.to_ns_name::<GenericNamespaced>()?;
+    let conn = Stream::connect(name)?;
+    let (recv, send_half) = conn.split();
+    let mut writer = BufWriter::new(send_half);
+    writer.write_all(request.as_bytes())?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
+    let mut reply = String::new();
+    BufReader::new(recv).read_line(&mut reply)?;
+    Ok(reply.trim_end().to_string())
+}

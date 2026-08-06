@@ -81,6 +81,16 @@ the shipping app until the port reaches feature parity.
   input); any perpetual animation (the fan glyph) capped at ≤ 20 fps; while
   hidden/minimized feed histories only, paint nothing; the UI is a separate
   process that fully exits on close — the daemon is the only resident part.
+- **Phase 2 (done 2026-08-06): telemetry + IPC.** The daemon writes the review
+  log with the SAME schema/formats/vocabulary as the C# `TelemetryLog` (sim
+  runs append to the same `telemetry-sim-*.csv` files interchangeably; local
+  UTC offset captured once at startup — DST flips shift timestamps until
+  restart). IPC = local socket `fan-curves-daemon.sock` (named pipe on
+  Windows), line-delimited JSON: ping / status / profile / set_profile /
+  preset / apply / pause / shutdown; binding doubles as the single-instance
+  lock; `--send <json>` is the built-in client. Service/autostart wiring
+  deferred to the hardware-backend phase (autostarting a sim-only daemon is
+  pointless).
 
 ## Layout
 
