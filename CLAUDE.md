@@ -127,13 +127,23 @@ the shipping app until the port reaches feature parity.
     are exposed like LHM; the FANOUT_CFG capability probe hid two real ones.
   - The daemon treats the shared profile as **read-only unless `--save-profile`**
     while the WPF app is the shipping controller.
-  - **Verified on the real board** (2026-08-06): detect + EC reads + Tctl/CCD
-    matched the running WPF app tick-for-tick (same temps, same 20%/10%
-    outputs); non-elevated runs refuse cleanly and fall back to simulation.
-    **The PWM WRITE path is NOT yet hardware-verified** — run
-    `fan-daemon --selftest-write 7 40` elevated (header 7 has no fan and is
-    unassigned; prints mode/duty before, after write, after restore).
-    Never run both control loops at once: last writer wins per header.
+  - **Fully verified on the real board** (2026-08-06), reads AND writes.
+    Detect + EC reads + Tctl/CCD matched the running WPF app tick-for-tick
+    (same temps, same 20%/10% outputs); non-elevated runs refuse cleanly and
+    fall back to simulation. The write self-test
+    (`fan-daemon --selftest-write 7 40` elevated — header 7 has no fan and is
+    in no channel) drove ch7's command register 0x80 → 0x66 → 0x80 with every
+    other channel untouched: write handshake and handback both correct.
+  - **What the register dump taught us** (`--selftest-write` prints all eight
+    channels before/after/restore): `0xA28+i` is the COMMAND byte (what we
+    write), `0x160+i` is the EC's ACTUAL output duty — they agree on driven
+    headers (ch0/1 read 0x33 = the WPF app's 20%, ch2–5 read 0x19 = its 10%),
+    but an unused header holds a command while reporting 0 output, so
+    `0x160+i` alone can never prove a write landed. The mode register `0xA00`
+    reads **0xFF on this board — every channel already "manual" from the
+    BIOS**, so the `mode | (1<<i)` step is a no-op here and the restore
+    correctly leaves the bit set rather than clearing state the firmware owns.
+  - Never run both control loops at once: last writer wins per header.
 - **Phase 5 (done 2026-08-06): Linux hwmon backend** (`fan-core/src/hwmon.rs`)
   — sysfs enumeration, millidegree temps, tach, pwm 0–255 writes with
   `pwmN_enable` saved on first write and restored on release (the SetDefault

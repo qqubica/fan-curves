@@ -679,3 +679,33 @@ profile): NCT6686D id D441, EC base 0xA20, PawnIO 2.2.0; CCD1 55-58 deg and VRM
 CPU / 10% case, and profile.json was untouched. The PWM write path remains
 hardware-unverified — the elevated self-test (--selftest-write 7 40, on the
 empty System Fan #6 header) is the pending step.
+
+### Write-path verification (2026-08-06, same day)
+
+The first self-test run was inconclusive and worth recording as a lesson in
+choosing the right readback. It printed only the mode register and the duty
+register: mode read 0xFF (so `mode | (1<<7)` changed nothing — the BIOS already
+marks every channel manual on this board) and duty read 0% before, after the
+write, and after restore. Nothing in that output could distinguish "the write
+failed" from "the write worked and this register doesn't show it".
+
+Dumping ALL eight channels' command byte (0xA28+i), output duty (0x160+i), mode
+bit and rpm settled it in one run:
+
+- ch7's COMMAND register went 0x80 -> 0x66 (the 40% asked for) -> 0x80 after
+  restore, with channels 0-6 untouched throughout. Write handshake and handback
+  both correct.
+- ch7's OUTPUT duty stayed 0x00 the whole time: the EC does not drive a header
+  with nothing attached, so 0x160+i can never prove a write landed. The command
+  register is the authoritative readback.
+- The live control group validated the whole register map: ch0/ch1 read 0x33
+  (20%) and ch2-ch5 read 0x19 (10%) — exactly what the running WPF app was
+  commanding at that moment through LibreHardwareMonitor. Two independent
+  implementations agreeing on the same registers.
+- 0xA00 = 0xFF on this board, i.e. all eight channels already flagged manual by
+  firmware. The restore path leaving the saved bit alone is therefore the
+  correct behaviour, not a no-op bug.
+
+Windows backend is now verified end to end (detect, reads, writes, handback).
+Still untested: the daemon actually holding the headers for a sustained period,
+which needs the WPF app stopped first.

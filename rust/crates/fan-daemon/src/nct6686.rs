@@ -358,43 +358,56 @@ impl Nct6686Backend {
 }
 
 impl Nct6686Backend {
-    /// Write-path self-test against real silicon: drive one header to a duty,
-    /// read the chip's own duty register back, then restore. Intended for an
-    /// UNUSED header (no fan attached, not in any channel) so the protocol can
-    /// be proven without moving a fan or fighting another controller.
+    /// Full register snapshot: the mode register plus, per channel, the command
+    /// byte we write (0xA28+i) and the EC's reported duty (0x160+i) with its
+    /// tach. Comparing a header the other controller is actively driving
+    /// against an idle one tells us which register actually reflects output.
+    fn dump_registers(&self, label: &str) -> io::Result<()> {
+        let mode = self.read_ec(FAN_CONTROL_MODE_REG)?;
+        println!("--- {label}: mode 0x{mode:02X} (bits {mode:08b})");
+        for i in 0..CONTROL_COUNT {
+            let cmd = self.read_ec(FAN_PWM_COMMAND_BASE + i as u16)?;
+            let duty = self.read_ec(PWM_READ_BASE + i as u16)?;
+            let rpm = self.read_ec16(FAN_RPM_BASE + 2 * i as u16)?;
+            println!(
+                "    ch{i} {:<14} manual={} cmd=0x{cmd:02X} ({:>3.0}%) duty=0x{duty:02X} ({:>3.0}%) rpm={rpm}",
+                CONTROL_NAMES[i],
+                (mode >> i) & 1,
+                cmd as f64 / 2.55,
+                duty as f64 / 2.55,
+            );
+        }
+        Ok(())
+    }
+
+    /// Write-path self-test against real silicon: snapshot every fan register,
+    /// drive one header to a duty, snapshot again, restore, snapshot again.
+    /// Intended for an UNUSED header (no fan attached, not in any channel) so
+    /// the protocol can be proven without moving a fan or fighting another
+    /// controller. The command register (0xA28+i) is the authoritative proof
+    /// that a write reached the chip — the duty register can legitimately stay
+    /// 0 on a header whose output the EC has disabled.
     pub fn selftest_write(&mut self, index: usize, percent: f64) -> io::Result<()> {
         if index >= CONTROL_COUNT {
             return Err(io::Error::other("header index out of range"));
         }
         let id = format!("{LPC_PREFIX}/control/{index}");
-        let read_duty = |me: &Self| -> io::Result<f64> {
-            Ok(me.read_ec(PWM_READ_BASE + index as u16)? as f64 / 2.55)
-        };
+        let duty = (percent.clamp(0.0, 100.0) * 2.55) as u8;
         {
             let _guard = self.isa.lock(1000).ok_or_else(|| io::Error::other("ISA bus busy"))?;
-            let mode = self.read_ec(FAN_CONTROL_MODE_REG)?;
-            println!(
-                "before : mode 0x{mode:02X} (manual bit {}), duty {:.0}%, rpm {}",
-                (mode >> index) & 1,
-                read_duty(self)?,
-                self.rpms.get(&id).map_or("--".into(), |r| format!("{r:.0}"))
-            );
-            let duty = (percent.clamp(0.0, 100.0) * 2.55) as u8;
+            self.dump_registers("BEFORE")?;
+            println!("\n>>> writing {percent:.0}% (0x{duty:02X}) to channel {index}\n");
             self.write_pwm(index, duty)?;
-            let mode = self.read_ec(FAN_CONTROL_MODE_REG)?;
-            println!(
-                "written: mode 0x{mode:02X} (manual bit {}), duty {:.0}% (asked {percent:.0}%)",
-                (mode >> index) & 1,
-                read_duty(self)?
-            );
+            self.dump_registers("AFTER WRITE")?;
         }
         self.release_control(&id);
         let _guard = self.isa.lock(1000).ok_or_else(|| io::Error::other("ISA bus busy"))?;
-        let mode = self.read_ec(FAN_CONTROL_MODE_REG)?;
+        self.dump_registers("AFTER RESTORE")?;
+
+        let cmd = self.read_ec(FAN_PWM_COMMAND_BASE + index as u16)?;
         println!(
-            "restored: mode 0x{mode:02X} (manual bit {}), duty {:.0}%",
-            (mode >> index) & 1,
-            read_duty(self)?
+            "\nverdict: command register {} after restore (0x{cmd:02X})",
+            if cmd == duty { "STILL HOLDS THE TEST VALUE — restore did not take" } else { "returned to its original value" }
         );
         Ok(())
     }

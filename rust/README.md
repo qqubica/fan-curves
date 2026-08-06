@@ -74,21 +74,29 @@ the WPF app is still the shipping controller: it only writes with
 |---|---|
 | Chip detect, EC reads, temps, tach, Tctl/CCD | **Verified on the real board** (NCT6686D id D441, EC base 0xA20, PawnIO 2.2.0): readings and computed outputs matched the running WPF app tick-for-tick |
 | Non-elevated behaviour | **Verified**: clean refusal, falls back to simulation, never half-works |
-| PWM write + BIOS handback | **NOT yet verified on hardware** — transcribed from LHM, compiles, untested |
+| PWM write + BIOS handback | **Verified**: `--selftest-write 7 40` drove ch7's command register 0x80 → 0x66 → 0x80, no other channel touched |
+| Driving real fans end to end | Not yet — the WPF app is still the controller; the daemon has never held the headers on this machine |
 
-To verify the write path, from an **elevated** shell (header 7 = System Fan #6
-has no fan attached and is in no channel, so nothing spins):
+Re-run the write self-test any time from an **elevated** shell (header 7 =
+System Fan #6 has no fan attached and is in no channel, so nothing spins):
 
 ```
-cargo build -p fan-daemon
-target\debug\fan-daemon.exe --selftest-write 7 40
+target\release\fan-daemon.exe --selftest-write 7 40
 ```
 
-It prints the mode register and duty before / after the write / after restore.
-Success = the manual bit goes 0→1→0 and the duty reads back ~40% then returns
-to its original value. Only after that should the daemon be allowed to drive
-real headers — and never while the WPF app is running (two controllers writing
-the same header is last-writer-wins).
+It dumps all eight channels — mode bit, command byte (`0xA28+i`), EC output
+duty (`0x160+i`), rpm — before the write, after it, and after the restore.
+Read it this way: the **command** register is the proof a write landed; the
+**duty** register is what the EC actually outputs, and it legitimately stays 0
+on a header with nothing attached. Channels the other controller is driving act
+as a live control group (they should mirror whatever the WPF app commands).
+
+Note for this board: `0xA00` reads 0xFF — the BIOS already marks every channel
+manual — so the mode-bit step is a no-op here and restore deliberately leaves
+the bit as the firmware had it.
+
+Never run both control loops at once: two writers on one header is
+last-writer-wins.
 - `parity-harness` — C# console app referencing the real `FanCurves.Core`; it
   generates golden per-tick traces into `crates/fan-core/tests/golden/`.
 
