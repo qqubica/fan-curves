@@ -7,7 +7,6 @@
 //! If no daemon answers at startup, it spawns a sibling `fan-daemon --sim`
 //! once and keeps retrying.
 
-use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -19,9 +18,9 @@ use serde_json::{json, Value};
 
 use fan_core::{ChannelStatus, Profile};
 
+use crate::history::ChannelHistory;
+
 pub const SOCKET_NAME: &str = "fan-curves-daemon.sock";
-/// One sample per engine tick, ~10 min of live strip.
-const HISTORY_CAP: usize = 600;
 
 #[derive(Clone, Copy)]
 pub struct HistorySample {
@@ -71,7 +70,7 @@ pub struct UiState {
     /// preset switch, and whenever a push reports back.
     pub profile: Option<Profile>,
     pub inventory: Inventory,
-    pub history: Vec<VecDeque<HistorySample>>,
+    pub history: Vec<ChannelHistory>,
     pub last_error: Option<String>,
     /// Bumped whenever `profile` is replaced from the daemon, so the UI knows
     /// to re-seed its draft instead of clobbering a fresh remote state.
@@ -236,21 +235,17 @@ fn poll_status(
     if let Some(name) = reply["profile_name"].as_str() {
         st.profile_name = name.to_string();
     }
-    st.history.resize_with(channels.len(), VecDeque::new);
+    st.history.resize_with(channels.len(), ChannelHistory::new);
     for (i, ch) in channels.iter().enumerate() {
-        if !ch.effective_temp.is_nan() {
-            let ring = &mut st.history[i];
-            ring.push_back(HistorySample {
-                t,
-                wall,
-                avg: ch.effective_temp,
-                raw: ch.raw_temp,
-                out: ch.output_percent,
-            });
-            while ring.len() > HISTORY_CAP {
-                ring.pop_front();
-            }
-        }
+        // A missing reading is RECORDED, not skipped: the strip draws it as a
+        // break in the trace, which is how a dead sensor should read.
+        st.history[i].push(HistorySample {
+            t,
+            wall,
+            avg: ch.effective_temp,
+            raw: ch.raw_temp,
+            out: ch.output_percent,
+        });
     }
     st.channels = channels;
     drop(st);

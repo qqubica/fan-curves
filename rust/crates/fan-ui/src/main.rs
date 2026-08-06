@@ -12,6 +12,7 @@
 mod charts;
 mod client;
 mod devpanel;
+mod history;
 mod icon;
 
 use eframe::egui::{
@@ -81,6 +82,8 @@ fn main() -> eframe::Result {
                     .map(|o| o.whole_seconds() as i64)
                     .unwrap_or(0),
                 size_mode: SizeMode::Fixed,
+                viewport: history::Viewport::default(),
+                drag_remainder: 0.0,
             }))
         }),
     )
@@ -105,6 +108,9 @@ struct App {
     redo: Vec<Edit>,
     utc_offset_secs: i64,
     size_mode: SizeMode,
+    viewport: history::Viewport,
+    /// Sub-sample drag leftover, so a slow drag still pans.
+    drag_remainder: f32,
 }
 
 /// The app has exactly three window sizes and no drag-resize, cycled in this
@@ -215,6 +221,15 @@ impl eframe::App for App {
                                 ui.with_layout(
                                     eframe::egui::Layout::right_to_left(eframe::egui::Align::Center),
                                     |ui| {
+                                        // LIVE only appears while scrolled back.
+                                        if !self.viewport.is_live()
+                                            && ui
+                                                .add(text_button("LIVE"))
+                                                .on_hover_text("Back to now")
+                                                .clicked()
+                                        {
+                                            self.viewport.to_live();
+                                        }
                                         if ui
                                             .add(text_button("CLEAR"))
                                             .on_hover_text(
@@ -224,15 +239,18 @@ impl eframe::App for App {
                                             .clicked()
                                         {
                                             let mut st = self.link.state.lock().unwrap();
-                                            for ring in st.history.iter_mut() {
-                                                ring.clear();
+                                            for h in st.history.iter_mut() {
+                                                h.clear();
                                             }
+                                            self.viewport.to_live();
                                         }
                                     },
                                 );
                             });
-                            let (rect, response) =
-                                ui.allocate_exact_size(Vec2::new(inner_w, strip_h), Sense::hover());
+                            let (rect, response) = ui.allocate_exact_size(
+                                Vec2::new(inner_w, strip_h),
+                                Sense::click_and_drag(),
+                            );
                             let mut snap = snap;
                             snap.hover_x = response
                                 .hovered()
@@ -240,6 +258,7 @@ impl eframe::App for App {
                                 .flatten()
                                 .map(|p| p.x);
                             snap.utc_offset_secs = self.utc_offset_secs;
+                            self.scroll_strip(ui, &response, rect, &mut snap);
                             charts::draw_history_strip(ui.painter(), rect, &snap);
                         }
                     });
@@ -320,6 +339,9 @@ pub struct Snapshot {
     pub utc_offset_secs: i64,
     pub autostart: bool,
     pub autostart_conflict: bool,
+    /// False while the strip is scrolled back — the live amber dots and the
+    /// counting-up stopped span are hidden then.
+    pub is_live: bool,
 }
 
 impl Snapshot {
@@ -351,7 +373,9 @@ impl Snapshot {
                 .and_then(|p| p.channels.get(selected))
                 .map(|c| c.points.clone())
                 .unwrap_or_default(),
-            history: st.history.get(selected).map(|r| r.iter().copied().collect()).unwrap_or_default(),
+            // Filled by the caller from the viewport (needs &mut for spill reads).
+            history: Vec::new(),
+            is_live: true,
             last_error: st.last_error.clone(),
             selected,
         }
@@ -400,6 +424,50 @@ impl App {
         if self.drag.is_none() && !edit.changed {
             self.baseline = None;
         }
+    }
+
+    /// Scrollback: wheel pans ~1 min a notch (10× with Shift), drag follows the
+    /// cursor, double-click returns to live. Fills the snapshot's window from
+    /// the viewport, which is the only place the spill file is read.
+    fn scroll_strip(
+        &mut self,
+        ui: &eframe::egui::Ui,
+        response: &eframe::egui::Response,
+        rect: eframe::egui::Rect,
+        snap: &mut Snapshot,
+    ) {
+        const NOTCH: i64 = 60; // ≈ 1 min at the ~1 s tick
+        let mut st = self.link.state.lock().unwrap();
+        let Some(h) = st.history.get_mut(snap.selected) else { return };
+
+        if response.double_clicked() {
+            self.viewport.to_live();
+        }
+        if response.hovered() {
+            let (scroll, shift) = ui.input(|i| (i.raw_scroll_delta.y, i.modifiers.shift));
+            if scroll != 0.0 {
+                let notches = (scroll / 50.0).round().clamp(-4.0, 4.0) as i64;
+                // Wheel UP goes into the past.
+                self.viewport.scroll_by(-notches * NOTCH * if shift { 10 } else { 1 }, h);
+            }
+        }
+        if response.dragged() {
+            // Dragging right pulls older samples in. Keep the fractional
+            // remainder so slow drags still move.
+            let px_per_sample = (rect.width() - 60.0).max(1.0) / (history::RING - 1) as f32;
+            self.drag_remainder += response.drag_delta().x / px_per_sample;
+            let whole = self.drag_remainder.trunc();
+            if whole != 0.0 {
+                self.drag_remainder -= whole;
+                self.viewport.scroll_by(-(whole as i64), h);
+            }
+        } else {
+            self.drag_remainder = 0.0;
+        }
+
+        let (samples, live) = self.viewport.samples(h);
+        snap.history = samples;
+        snap.is_live = live;
     }
 
     /// The fixed size for the current mode.

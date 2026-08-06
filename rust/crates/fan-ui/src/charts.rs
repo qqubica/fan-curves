@@ -419,6 +419,13 @@ pub fn draw_history_strip(painter: &Painter, rect: Rect, snap: &Snapshot) {
         return;
     }
     crate::micro(painter, Pos2::new(plot.min.x, rect.min.y + 7.0), Align2::LEFT_TOP, "H I S T O R Y", FAINT);
+    // Right edge names the window: "now" while live, else where it ends.
+    let edge = if snap.is_live {
+        "now".to_string()
+    } else {
+        snap.history.last().map_or(String::new(), |s| clock(s.wall, snap.utc_offset_secs))
+    };
+    crate::micro(painter, Pos2::new(plot.max.x, rect.max.y - 4.0), Align2::RIGHT_BOTTOM, &edge, FAINT);
 
     // Fan-% grid: 0 / 50 / 100 only (the curve chart carries the finer one).
     for pct in [0.0, 50.0, 100.0] {
@@ -531,10 +538,14 @@ pub fn draw_history_strip(painter: &Painter, rect: Rect, snap: &Snapshot) {
             }
         }
 
-        // Live edge — the only amber in the strip.
+        // Live edge — the only amber in the strip, and gone while scrolled.
         let last = count - 1;
-        painter.circle_filled(Pos2::new(x(last), y_temp(visible[last].avg)), 2.6, AMBER);
-        painter.circle_filled(Pos2::new(x(last), y_pct(visible[last].out)), 2.2, AMBER);
+        if snap.is_live {
+            if !visible[last].avg.is_nan() {
+                painter.circle_filled(Pos2::new(x(last), y_temp(visible[last].avg)), 2.6, AMBER);
+            }
+            painter.circle_filled(Pos2::new(x(last), y_pct(visible[last].out)), 2.2, AMBER);
+        }
 
         // Hover: crosshair, markers on both traces, and the readout chip.
         if let Some(px) = snap.hover_x {
