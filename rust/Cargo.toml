@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/fan-core", "crates/fan-daemon"]
+members = ["crates/fan-core", "crates/fan-daemon", "crates/fan-ui"]
 resolver = "2"
 
 [workspace.package]

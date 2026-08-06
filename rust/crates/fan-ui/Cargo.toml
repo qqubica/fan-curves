@@ -1,0 +1,18 @@
+[package]
+name = "fan-ui"
+description = "fan-curves on-demand UI (talks to fan-daemon over IPC, exits fully on close)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+fan-core = { path = "../fan-core" }
+eframe = { version = "0.31", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "wayland",
+    "x11",
+] }
+serde_json = "1"
+interprocess = "2"

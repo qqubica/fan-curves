@@ -1,0 +1,224 @@
+//! IPC client + poll thread. One background thread owns the socket: it polls
+//! `status` once a second, executes UI commands immediately when they arrive
+//! (the channel's recv timeout IS the poll pacing), and wakes egui with
+//! `request_repaint()` only when fresh data landed — the UI never animates on
+//! its own, per the repaint rules.
+//!
+//! If no daemon answers at startup, it spawns a sibling `fan-daemon --sim`
+//! once and keeps retrying.
+
+use std::collections::VecDeque;
+use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use interprocess::local_socket::traits::Stream as _;
+use interprocess::local_socket::{GenericNamespaced, RecvHalf, SendHalf, Stream, ToNsName};
+use serde_json::{json, Value};
+
+use fan_core::{ChannelStatus, Profile};
+
+pub const SOCKET_NAME: &str = "fan-curves-daemon.sock";
+/// One sample per engine tick, ~10 min of live strip.
+const HISTORY_CAP: usize = 600;
+
+#[derive(Clone, Copy)]
+pub struct HistorySample {
+    /// Seconds since the UI connected (client clock — the strip only needs spacing).
+    pub t: f64,
+    pub avg: f64,
+    pub raw: Option<f64>,
+    pub out: f64,
+}
+
+#[derive(Default)]
+pub struct UiState {
+    pub connected: bool,
+    pub daemon_version: String,
+    pub applying: bool,
+    pub profile_name: String,
+    pub read_only: bool,
+    pub channels: Vec<ChannelStatus>,
+    pub profile: Option<Profile>,
+    pub history: Vec<VecDeque<HistorySample>>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+pub enum Cmd {
+    Preset(&'static str),
+    Apply,
+    Pause,
+}
+
+pub struct Link {
+    pub state: Arc<Mutex<UiState>>,
+    pub tx: Sender<Cmd>,
+}
+
+pub fn start(ctx: eframe::egui::Context) -> Link {
+    let state = Arc::new(Mutex::new(UiState::default()));
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let state = Arc::clone(&state);
+        std::thread::spawn(move || worker(ctx, state, rx));
+    }
+    Link { state, tx }
+}
+
+struct Conn {
+    reader: BufReader<RecvHalf>,
+    writer: BufWriter<SendHalf>,
+}
+
+impl Conn {
+    fn open() -> std::io::Result<Self> {
+        let name = SOCKET_NAME.to_ns_name::<GenericNamespaced>()?;
+        let stream = Stream::connect(name)?;
+        let (recv, send) = stream.split();
+        Ok(Self { reader: BufReader::new(recv), writer: BufWriter::new(send) })
+    }
+
+    fn call(&mut self, request: Value) -> std::io::Result<Value> {
+        self.writer.write_all(request.to_string().as_bytes())?;
+        self.writer.write_all(b"\n")?;
+        self.writer.flush()?;
+        let mut line = String::new();
+        if self.reader.read_line(&mut line)? == 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "daemon closed"));
+        }
+        serde_json::from_str(&line)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+}
+
+fn worker(ctx: eframe::egui::Context, state: Arc<Mutex<UiState>>, rx: Receiver<Cmd>) {
+    let start = Instant::now();
+    let mut conn: Option<Conn> = None;
+    let mut spawned_daemon = false;
+
+    loop {
+        if conn.is_none() {
+            match Conn::open() {
+                Ok(mut c) => {
+                    let hello = c.call(json!({"cmd": "ping"})).ok();
+                    let profile = c.call(json!({"cmd": "profile"})).ok();
+                    let mut st = state.lock().unwrap();
+                    st.connected = true;
+                    st.last_error = None;
+                    if let Some(h) = hello {
+                        st.daemon_version =
+                            h["version"].as_str().unwrap_or_default().to_string();
+                    }
+                    apply_profile_reply(&mut st, profile);
+                    drop(st);
+                    conn = Some(c);
+                    ctx.request_repaint();
+                }
+                Err(e) => {
+                    {
+                        let mut st = state.lock().unwrap();
+                        st.connected = false;
+                        st.last_error = Some(format!("daemon unreachable: {e}"));
+                    }
+                    ctx.request_repaint();
+                    if !spawned_daemon {
+                        spawned_daemon = true;
+                        spawn_sibling_daemon();
+                    }
+                }
+            }
+        }
+
+        // The recv timeout is the 1 Hz status pacing; a command wakes us early.
+        match rx.recv_timeout(Duration::from_millis(1000)) {
+            Ok(cmd) => {
+                let request = match cmd {
+                    Cmd::Preset(name) => json!({"cmd": "preset", "name": name}),
+                    Cmd::Apply => json!({"cmd": "apply"}),
+                    Cmd::Pause => json!({"cmd": "pause"}),
+                };
+                let profile_changed = matches!(cmd, Cmd::Preset(_));
+                if run_call(&mut conn, &state, request).is_some() && profile_changed {
+                    let reply = run_call(&mut conn, &state, json!({"cmd": "profile"}));
+                    apply_profile_reply(&mut state.lock().unwrap(), reply);
+                }
+                poll_status(&ctx, &mut conn, &state, start);
+            }
+            Err(RecvTimeoutError::Timeout) => poll_status(&ctx, &mut conn, &state, start),
+            Err(RecvTimeoutError::Disconnected) => return, // UI is gone
+        }
+    }
+}
+
+/// Issue one request; on I/O failure drop the connection so the next loop
+/// reconnects. Returns the reply when the daemon answered.
+fn run_call(conn: &mut Option<Conn>, state: &Arc<Mutex<UiState>>, request: Value) -> Option<Value> {
+    let c = conn.as_mut()?;
+    match c.call(request) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            *conn = None;
+            let mut st = state.lock().unwrap();
+            st.connected = false;
+            st.last_error = Some(format!("lost daemon: {e}"));
+            None
+        }
+    }
+}
+
+fn poll_status(
+    ctx: &eframe::egui::Context,
+    conn: &mut Option<Conn>,
+    state: &Arc<Mutex<UiState>>,
+    start: Instant,
+) {
+    let Some(reply) = run_call(conn, state, json!({"cmd": "status"})) else { return };
+    let channels: Vec<ChannelStatus> =
+        serde_json::from_value(reply["channels"].clone()).unwrap_or_default();
+    let t = start.elapsed().as_secs_f64();
+    let mut st = state.lock().unwrap();
+    st.applying = reply["applying"].as_bool().unwrap_or(false);
+    if let Some(name) = reply["profile_name"].as_str() {
+        st.profile_name = name.to_string();
+    }
+    st.history.resize_with(channels.len(), VecDeque::new);
+    for (i, ch) in channels.iter().enumerate() {
+        if !ch.effective_temp.is_nan() {
+            let ring = &mut st.history[i];
+            ring.push_back(HistorySample {
+                t,
+                avg: ch.effective_temp,
+                raw: ch.raw_temp,
+                out: ch.output_percent,
+            });
+            while ring.len() > HISTORY_CAP {
+                ring.pop_front();
+            }
+        }
+    }
+    st.channels = channels;
+    drop(st);
+    ctx.request_repaint(); // fresh data — the ONE place the UI asks to paint
+}
+
+fn apply_profile_reply(st: &mut UiState, reply: Option<Value>) {
+    if let Some(r) = reply {
+        st.read_only = r["read_only"].as_bool().unwrap_or(false);
+        if let Ok(p) = serde_json::from_value::<Profile>(r["profile"].clone()) {
+            st.profile = Some(p);
+        }
+    }
+}
+
+/// Best-effort: start `fan-daemon --sim` from the UI binary's directory.
+fn spawn_sibling_daemon() {
+    let Ok(me) = std::env::current_exe() else { return };
+    let Some(dir) = me.parent() else { return };
+    let name = if cfg!(windows) { "fan-daemon.exe" } else { "fan-daemon" };
+    let path = dir.join(name);
+    if path.exists() {
+        let _ = std::process::Command::new(path).arg("--sim").spawn();
+    }
+}
