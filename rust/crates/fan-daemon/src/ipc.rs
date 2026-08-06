@@ -24,15 +24,16 @@ use interprocess::local_socket::{
 use serde::Deserialize;
 use serde_json::json;
 
-use fan_core::{ChannelStatus, FanEngine, Profile, SimulatedBackend};
+use fan_core::{ChannelStatus, FanEngine, HardwareBackend as _, Profile};
 
 use crate::telemetry::TelemetryLog;
+use crate::Backend;
 
 pub const SOCKET_NAME: &str = "fan-curves-daemon.sock";
 
 /// Everything the tick loop and the IPC handlers share.
 pub struct Shared {
-    pub engine: Mutex<FanEngine<SimulatedBackend>>,
+    pub engine: Mutex<FanEngine<Backend>>,
     pub latest: Mutex<Vec<ChannelStatus>>,
     pub telemetry: Mutex<TelemetryLog>,
     pub profile_path: std::path::PathBuf,
@@ -93,11 +94,15 @@ fn respond(line: &str, shared: &Shared) -> serde_json::Value {
         Err(e) => return json!({ "ok": false, "error": format!("bad request: {e}") }),
     };
     match request {
-        Request::Ping => json!({
-            "ok": true,
-            "version": env!("CARGO_PKG_VERSION"),
-            "simulated": true,
-        }),
+        Request::Ping => {
+            let engine = shared.engine.lock().unwrap();
+            json!({
+                "ok": true,
+                "version": env!("CARGO_PKG_VERSION"),
+                "simulated": engine.backend().is_simulated(),
+                "backend": engine.backend().description(),
+            })
+        }
         Request::Status => {
             let engine = shared.engine.lock().unwrap();
             let latest = shared.latest.lock().unwrap();

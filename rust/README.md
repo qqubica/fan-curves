@@ -36,6 +36,17 @@ on-demand UI split across Windows and Linux.
   `set_profile`, `preset` (quiet/performance, adopts tuning but keeps
   assignments), `apply`, `pause`, `shutdown` (the daemon's `exit.signal`).
   `fan-daemon --send '{"cmd":"status"}'` is the built-in client.
+- `crates/fan-ui` — the on-demand UI (eframe/egui): live status, staircase
+  chart with amber operating point, 10-min history strip, presets and
+  apply/pause over the daemon's IPC. Repaints only when the 1 Hz poll lands
+  fresh data; auto-spawns a sibling `fan-daemon --sim` when none answers; exits
+  fully on close. v1 is a viewer/controller — curve editing, undo, the dev
+  panel and history scrollback remain in the WPF app for now.
+- `fan-core/src/hwmon.rs` — the Linux backend: `/sys/class/hwmon` enumeration,
+  temp/tach reads, pwm writes with pwmN_enable save/restore as the BIOS
+  handback. Compile-checked via `cargo check --target x86_64-unknown-linux-gnu`;
+  not yet exercised on a real Linux machine. The `nct6683` kernel driver needs
+  `force=1` for PWM writes on many boards.
 - `parity-harness` — C# console app referencing the real `FanCurves.Core`; it
   generates golden per-tick traces into `crates/fan-core/tests/golden/`.
 

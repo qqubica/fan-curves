@@ -21,12 +21,101 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use fan_core::backend::SensorKind;
+use fan_core::backend::{HwControl, HwSensor, SensorKind};
 use fan_core::rng::Rng;
 use fan_core::{ChannelStatus, FanEngine, HardwareBackend, OutputReason, Profile, SimulatedBackend};
 
 use ipc::Shared;
 use telemetry::TelemetryLog;
+
+/// The daemon's one concrete backend type: enum dispatch keeps `FanEngine<B>`
+/// static while letting the platform pick at runtime. `--sim` everywhere;
+/// without it, Linux gets hwmon; the Windows native backend is the next phase.
+pub enum Backend {
+    Sim(SimulatedBackend),
+    #[cfg(target_os = "linux")]
+    Hwmon(fan_core::hwmon::HwmonBackend),
+}
+
+impl HardwareBackend for Backend {
+    fn description(&self) -> &str {
+        match self {
+            Backend::Sim(b) => b.description(),
+            #[cfg(target_os = "linux")]
+            Backend::Hwmon(b) => b.description(),
+        }
+    }
+    fn is_simulated(&self) -> bool {
+        match self {
+            Backend::Sim(b) => b.is_simulated(),
+            #[cfg(target_os = "linux")]
+            Backend::Hwmon(b) => b.is_simulated(),
+        }
+    }
+    fn sensors(&self) -> &[HwSensor] {
+        match self {
+            Backend::Sim(b) => b.sensors(),
+            #[cfg(target_os = "linux")]
+            Backend::Hwmon(b) => b.sensors(),
+        }
+    }
+    fn controls(&self) -> &[HwControl] {
+        match self {
+            Backend::Sim(b) => b.controls(),
+            #[cfg(target_os = "linux")]
+            Backend::Hwmon(b) => b.controls(),
+        }
+    }
+    fn update(&mut self) {
+        match self {
+            Backend::Sim(b) => b.update(),
+            #[cfg(target_os = "linux")]
+            Backend::Hwmon(b) => b.update(),
+        }
+    }
+    fn read_value(&self, sensor_id: &str) -> Option<f64> {
+        match self {
+            Backend::Sim(b) => b.read_value(sensor_id),
+            #[cfg(target_os = "linux")]
+            Backend::Hwmon(b) => b.read_value(sensor_id),
+        }
+    }
+    fn set_control(&mut self, control_id: &str, percent: f64) {
+        match self {
+            Backend::Sim(b) => b.set_control(control_id, percent),
+            #[cfg(target_os = "linux")]
+            Backend::Hwmon(b) => b.set_control(control_id, percent),
+        }
+    }
+    fn release_control(&mut self, control_id: &str) {
+        match self {
+            Backend::Sim(b) => b.release_control(control_id),
+            #[cfg(target_os = "linux")]
+            Backend::Hwmon(b) => b.release_control(control_id),
+        }
+    }
+    fn read_control_rpm(&self, control_id: &str) -> Option<f64> {
+        match self {
+            Backend::Sim(b) => b.read_control_rpm(control_id),
+            #[cfg(target_os = "linux")]
+            Backend::Hwmon(b) => b.read_control_rpm(control_id),
+        }
+    }
+    fn internal_sensor_count(&self) -> usize {
+        match self {
+            Backend::Sim(b) => b.internal_sensor_count(),
+            #[cfg(target_os = "linux")]
+            Backend::Hwmon(b) => b.internal_sensor_count(),
+        }
+    }
+    fn set_sensor_history_window(&mut self, hours: f64) {
+        match self {
+            Backend::Sim(b) => b.set_sensor_history_window(hours),
+            #[cfg(target_os = "linux")]
+            Backend::Hwmon(b) => b.set_sensor_history_window(hours),
+        }
+    }
+}
 
 struct Args {
     sim: bool,
@@ -280,8 +369,9 @@ fn main() {
         return;
     }
 
-    if !args.sim {
-        eprintln!("only --sim exists so far (real hardware backends are the next phase); running the simulation");
+    let use_real = !args.sim && cfg!(target_os = "linux");
+    if !args.sim && !use_real {
+        eprintln!("the native Windows backend is not wired up yet; running the simulation");
     }
 
     // Local-offset lookup is only reliable before other threads exist; captured
@@ -292,12 +382,22 @@ fn main() {
 
     // Dev flows never write the real config (the C# Profile.ReadOnly contract):
     // auto-assign against the sim backend would prune the machine's real IDs.
-    let read_only = args.profile.is_none();
+    // A REAL backend may save — pruning against real hardware is the healing
+    // behaviour, same as the WPF app.
+    let read_only = args.profile.is_none() && !use_real;
     let profile_path = args.profile.clone().unwrap_or_else(|| config_dir().join("profile.json"));
     let mut profile = Profile::load_or_default(&profile_path);
     println!("profile: \"{}\" from {}", profile.name, profile_path.display());
 
-    let mut hw = SimulatedBackend::new();
+    #[cfg(target_os = "linux")]
+    let mut hw = if use_real {
+        Backend::Hwmon(fan_core::hwmon::HwmonBackend::new())
+    } else {
+        Backend::Sim(SimulatedBackend::new())
+    };
+    #[cfg(not(target_os = "linux"))]
+    let mut hw = Backend::Sim(SimulatedBackend::new());
+    println!("backend: {}", hw.description());
     hw.update(); // one reading so auto-assign sees plausible values
     if auto_assign(&mut profile, &hw) && !read_only {
         if let Err(e) = profile.save(&profile_path) {

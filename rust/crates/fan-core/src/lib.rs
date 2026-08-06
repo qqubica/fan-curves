@@ -10,6 +10,7 @@ pub mod backend;
 pub mod curve;
 pub mod engine;
 pub mod filter;
+pub mod hwmon;
 pub mod kick;
 pub mod probe;
 pub mod profile;
