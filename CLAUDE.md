@@ -160,8 +160,10 @@ the shipping app until the port reaches feature parity.
   viewer/controller over the IPC socket: hero average numeral, channel
   selector, readouts + why-chip, staircase chart with amber live overlay,
   10-min history strip, preset/apply/pause. Repaints ONLY when the 1 Hz poll
-  delivers (the repaint rules hold); auto-spawns a sibling `fan-daemon --sim`;
-  exits fully on close. ~115 MB working set while OPEN (egui + GPU context —
+  delivers (the repaint rules hold), and the FIRST `status` is fetched
+  immediately on (re)connect — waiting for the first recv_timeout instead left
+  a tray-launched window on "NO CHANNEL" for a full second (fixed 2026-08-07);
+  auto-spawns a sibling `fan-daemon --sim`; exits fully on close. ~115 MB working set while OPEN (egui + GPU context —
   the on-demand/exit design is what keeps that off the resident budget).
   Curve editing/undo/dev panel/scrollback stay WPF-only for now. egui gotcha
   recorded in `main.rs`: `Color32` is PREMULTIPLIED — white-at-alpha needs

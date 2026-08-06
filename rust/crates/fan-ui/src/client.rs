@@ -152,6 +152,11 @@ fn worker(ctx: eframe::egui::Context, state: Arc<Mutex<UiState>>, rx: Receiver<C
                     drop(st);
                     conn = Some(c);
                     ctx.request_repaint();
+                    // First status RIGHT NOW: the recv_timeout below would
+                    // otherwise sit out a full second before the first poll,
+                    // and the freshly opened window would show an empty hero
+                    // and no channels for exactly that long.
+                    poll_status(&ctx, &mut conn, &state, start);
                 }
                 Err(e) => {
                     {
