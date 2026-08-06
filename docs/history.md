@@ -641,3 +641,41 @@ enumeration, temp/tach reads, pwm writes with pwmN_enable save/restore as the
 handback. The daemon's new Backend enum keeps FanEngine statically dispatched.
 Cross-checked with cargo check --target x86_64-unknown-linux-gnu (which caught
 a real move bug); honest status: not yet exercised on a Linux machine.
+
+## Rust port — phase 4: native Windows backend (2026-08-06)
+
+LibreHardwareMonitorLib replaced by ~600 lines of Rust talking to the same
+signed PawnIO driver. Transport is DeviceIoControl on \?\GLOBALROOT\Device\PawnIO
+(LHM's own approach — no PawnIOLib.dll link); the official signed LpcIO and
+AMDFamily17 0.2.10 modules are embedded with include_bytes!, because the driver
+verifies module signatures and refuses self-compiled ones.
+
+Protocol transcribed from LHM's Nct677X.cs (the NCT668x branch) and
+cross-checked against Linux nct6683.c. Sequence gotchas worth remembering:
+ioctl_find_bars must run while the chip is still in config mode (otherwise
+every later port access is ACCESS_DENIED, which reads as "EC dead" rather than
+an error), ioctl_select_slot wipes discovered BARs, and the EC page register
+must always be released to 0xFF — including on error paths — or other tools
+block on it.
+
+Deliberate deviations from LHM: (a) errors are never masked as zeros (LHM's
+Execute returns a zero-filled buffer on failure — that is precisely how "Tctl
+reads 0" once hid a dead driver for a session); (b) the restore path writes
+back the firmware's saved mode bit explicitly instead of LHM's `mode & ~saved`
+shorthand; (c) all 8 headers are exposed — the FANOUT_CFG capability probe
+suggested by the Linux driver hid two headers this board really does drive.
+
+Identifier compatibility became a design rule after a near-miss: the first
+implementation invented its own id namespace, and a real-backend run would have
+saved profile.json with ids the C# app cannot resolve — whose AutoAssign would
+then prune them and re-assign, silently destroying the manual Pump Fan pick.
+The backend now emits LHM's exact strings (/lpc/nct6686d/0/... and
+/amdcpu/0/temperature/{2,3,4}), and the daemon treats the shared profile as
+read-only unless --save-profile.
+
+Verified live against the running WPF app (elevated, monitor-only, scratch
+profile): NCT6686D id D441, EC base 0xA20, PawnIO 2.2.0; CCD1 55-58 deg and VRM
+53 deg matched the C# telemetry rows second-for-second, both apps computed 20%
+CPU / 10% case, and profile.json was untouched. The PWM write path remains
+hardware-unverified — the elevated self-test (--selftest-write 7 40, on the
+empty System Fan #6 header) is the pending step.

@@ -9,11 +9,16 @@
 //! WPF app, sim-prefixed). A local socket (see `ipc.rs`) serves the on-demand
 //! UI; binding it doubles as the single-instance check.
 //!
-//! Only the simulated backend exists so far; `--sim` is therefore implied.
-//! Real hardware backends (PawnIO/NCT6686D on Windows, hwmon on Linux) are the
-//! next phases.
+//! Backends: `--sim` runs the simulation anywhere; otherwise Windows drives the
+//! NCT6686D through PawnIO (admin required) and Linux uses hwmon/sysfs. If a
+//! real backend cannot start, the daemon says why and falls back to simulation
+//! rather than pretending to control fans.
 
 mod ipc;
+#[cfg(windows)]
+mod nct6686;
+#[cfg(windows)]
+mod pawnio;
 mod telemetry;
 
 use std::path::PathBuf;
@@ -29,12 +34,13 @@ use ipc::Shared;
 use telemetry::TelemetryLog;
 
 /// The daemon's one concrete backend type: enum dispatch keeps `FanEngine<B>`
-/// static while letting the platform pick at runtime. `--sim` everywhere;
-/// without it, Linux gets hwmon; the Windows native backend is the next phase.
+/// static while letting the platform pick at runtime.
 pub enum Backend {
     Sim(SimulatedBackend),
     #[cfg(target_os = "linux")]
     Hwmon(fan_core::hwmon::HwmonBackend),
+    #[cfg(windows)]
+    Nct(nct6686::Nct6686Backend),
 }
 
 impl HardwareBackend for Backend {
@@ -43,6 +49,8 @@ impl HardwareBackend for Backend {
             Backend::Sim(b) => b.description(),
             #[cfg(target_os = "linux")]
             Backend::Hwmon(b) => b.description(),
+            #[cfg(windows)]
+            Backend::Nct(b) => b.description(),
         }
     }
     fn is_simulated(&self) -> bool {
@@ -50,6 +58,8 @@ impl HardwareBackend for Backend {
             Backend::Sim(b) => b.is_simulated(),
             #[cfg(target_os = "linux")]
             Backend::Hwmon(b) => b.is_simulated(),
+            #[cfg(windows)]
+            Backend::Nct(b) => b.is_simulated(),
         }
     }
     fn sensors(&self) -> &[HwSensor] {
@@ -57,6 +67,8 @@ impl HardwareBackend for Backend {
             Backend::Sim(b) => b.sensors(),
             #[cfg(target_os = "linux")]
             Backend::Hwmon(b) => b.sensors(),
+            #[cfg(windows)]
+            Backend::Nct(b) => b.sensors(),
         }
     }
     fn controls(&self) -> &[HwControl] {
@@ -64,6 +76,8 @@ impl HardwareBackend for Backend {
             Backend::Sim(b) => b.controls(),
             #[cfg(target_os = "linux")]
             Backend::Hwmon(b) => b.controls(),
+            #[cfg(windows)]
+            Backend::Nct(b) => b.controls(),
         }
     }
     fn update(&mut self) {
@@ -71,6 +85,8 @@ impl HardwareBackend for Backend {
             Backend::Sim(b) => b.update(),
             #[cfg(target_os = "linux")]
             Backend::Hwmon(b) => b.update(),
+            #[cfg(windows)]
+            Backend::Nct(b) => b.update(),
         }
     }
     fn read_value(&self, sensor_id: &str) -> Option<f64> {
@@ -78,6 +94,8 @@ impl HardwareBackend for Backend {
             Backend::Sim(b) => b.read_value(sensor_id),
             #[cfg(target_os = "linux")]
             Backend::Hwmon(b) => b.read_value(sensor_id),
+            #[cfg(windows)]
+            Backend::Nct(b) => b.read_value(sensor_id),
         }
     }
     fn set_control(&mut self, control_id: &str, percent: f64) {
@@ -85,6 +103,8 @@ impl HardwareBackend for Backend {
             Backend::Sim(b) => b.set_control(control_id, percent),
             #[cfg(target_os = "linux")]
             Backend::Hwmon(b) => b.set_control(control_id, percent),
+            #[cfg(windows)]
+            Backend::Nct(b) => b.set_control(control_id, percent),
         }
     }
     fn release_control(&mut self, control_id: &str) {
@@ -92,6 +112,8 @@ impl HardwareBackend for Backend {
             Backend::Sim(b) => b.release_control(control_id),
             #[cfg(target_os = "linux")]
             Backend::Hwmon(b) => b.release_control(control_id),
+            #[cfg(windows)]
+            Backend::Nct(b) => b.release_control(control_id),
         }
     }
     fn read_control_rpm(&self, control_id: &str) -> Option<f64> {
@@ -99,6 +121,8 @@ impl HardwareBackend for Backend {
             Backend::Sim(b) => b.read_control_rpm(control_id),
             #[cfg(target_os = "linux")]
             Backend::Hwmon(b) => b.read_control_rpm(control_id),
+            #[cfg(windows)]
+            Backend::Nct(b) => b.read_control_rpm(control_id),
         }
     }
     fn internal_sensor_count(&self) -> usize {
@@ -106,6 +130,8 @@ impl HardwareBackend for Backend {
             Backend::Sim(b) => b.internal_sensor_count(),
             #[cfg(target_os = "linux")]
             Backend::Hwmon(b) => b.internal_sensor_count(),
+            #[cfg(windows)]
+            Backend::Nct(b) => b.internal_sensor_count(),
         }
     }
     fn set_sensor_history_window(&mut self, hours: f64) {
@@ -113,6 +139,8 @@ impl HardwareBackend for Backend {
             Backend::Sim(b) => b.set_sensor_history_window(hours),
             #[cfg(target_os = "linux")]
             Backend::Hwmon(b) => b.set_sensor_history_window(hours),
+            #[cfg(windows)]
+            Backend::Nct(b) => b.set_sensor_history_window(hours),
         }
     }
 }
@@ -121,33 +149,77 @@ struct Args {
     sim: bool,
     apply: bool,
     verbose: bool,
+    probe: bool,
+    save_profile: bool,
+    /// (header index, percent) — write-path self-test on one header, then exit.
+    selftest: Option<(usize, f64)>,
     ticks: Option<u64>,
     profile: Option<PathBuf>,
     send: Option<String>,
 }
 
 fn parse_args() -> Args {
-    let mut args =
-        Args { sim: false, apply: true, verbose: false, ticks: None, profile: None, send: None };
+    let mut args = Args {
+        sim: false,
+        apply: true,
+        verbose: false,
+        probe: false,
+        save_profile: false,
+        selftest: None,
+        ticks: None,
+        profile: None,
+        send: None,
+    };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--sim" => args.sim = true,
             "--no-apply" => args.apply = false,
             "--verbose" => args.verbose = true,
+            "--probe" => args.probe = true,
+            "--save-profile" => args.save_profile = true,
+            "--selftest-write" => {
+                args.selftest = it.next().and_then(|v| v.parse().ok()).map(|i| {
+                    (i, it.next().and_then(|v| v.parse().ok()).unwrap_or(40.0))
+                });
+            }
             "--ticks" => args.ticks = it.next().and_then(|v| v.parse().ok()),
             "--profile" => args.profile = it.next().map(PathBuf::from),
             "--send" => args.send = it.next(),
             other => {
                 eprintln!("unknown argument: {other}");
                 eprintln!(
-                    "usage: fan-daemon [--sim] [--no-apply] [--verbose] [--ticks N] [--profile path]\n       fan-daemon --send '{{\"cmd\":\"status\"}}'"
+                    "usage: fan-daemon [--sim] [--no-apply] [--verbose] [--ticks N] [--profile path]\n       fan-daemon --probe            (dump sensors/controls read-only, then exit)\n       fan-daemon --send '{{\"cmd\":\"status\"}}'"
                 );
                 std::process::exit(2);
             }
         }
     }
     args
+}
+
+/// Read-only hardware inventory (the daemon's `sensors.txt`): two updates a
+/// second apart so lagging readings settle, print everything, exit. Never
+/// writes a control — safe to run alongside whatever currently drives the fans.
+fn probe(hw: &mut Backend) {
+    println!("backend: {}", hw.description());
+    hw.update();
+    std::thread::sleep(Duration::from_millis(1000));
+    hw.update();
+    println!("-- sensors:");
+    for s in hw.sensors() {
+        let kind = match s.kind {
+            SensorKind::Temp => "temp",
+            SensorKind::Rpm => "rpm",
+        };
+        let v = hw.read_value(&s.id).map_or("null".into(), |v| format!("{v:.2}"));
+        println!("{kind:<5} {:<45} {:<55} = {v}", s.id, s.name);
+    }
+    println!("-- controls:");
+    for c in hw.controls() {
+        let rpm = hw.read_control_rpm(&c.id).map_or("--".into(), |r| format!("{r:.0} rpm"));
+        println!("ctrl  {:<45} {:<55} @ {rpm}", c.id, c.name);
+    }
 }
 
 /// `%AppData%\FanCurves` on Windows (the WPF app's directory — same profile.json),
@@ -369,10 +441,24 @@ fn main() {
         return;
     }
 
-    let use_real = !args.sim && cfg!(target_os = "linux");
-    if !args.sim && !use_real {
-        eprintln!("the native Windows backend is not wired up yet; running the simulation");
+    // Try the platform's real backend unless --sim was asked for; a failure is
+    // reported and demoted to simulation, never silently pretended away.
+    let mut hw = None;
+    if !args.sim {
+        #[cfg(windows)]
+        match nct6686::Nct6686Backend::detect() {
+            Ok(b) => hw = Some(Backend::Nct(b)),
+            Err(e) => eprintln!(
+                "no hardware control: {e}\n  (needs administrator + PawnIO installed; \
+                 falling back to simulation)"
+            ),
+        }
+        #[cfg(target_os = "linux")]
+        {
+            hw = Some(Backend::Hwmon(fan_core::hwmon::HwmonBackend::new()));
+        }
     }
+    let real = hw.is_some();
 
     // Local-offset lookup is only reliable before other threads exist; captured
     // once, so a DST flip mid-run shifts log timestamps until restart.
@@ -380,23 +466,36 @@ fn main() {
         .map(|o| o.whole_seconds() as i64)
         .unwrap_or(0);
 
-    // Dev flows never write the real config (the C# Profile.ReadOnly contract):
-    // auto-assign against the sim backend would prune the machine's real IDs.
-    // A REAL backend may save — pruning against real hardware is the healing
-    // behaviour, same as the WPF app.
-    let read_only = args.profile.is_none() && !use_real;
+    let mut hw = hw.unwrap_or_else(|| Backend::Sim(SimulatedBackend::new()));
+    if args.probe {
+        probe(&mut hw);
+        return;
+    }
+    #[cfg(windows)]
+    if let Some((index, percent)) = args.selftest {
+        match &mut hw {
+            Backend::Nct(b) => {
+                b.update(); // populate rpm readings for the report
+                if let Err(e) = b.selftest_write(index, percent) {
+                    eprintln!("self-test failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+            _ => eprintln!("--selftest-write needs the real backend (run elevated)"),
+        }
+        return;
+    }
+
+    // The shared `profile.json` is the WPF app's live config, and that app is
+    // still the shipping fan controller — so the daemon treats it as READ-ONLY
+    // unless told otherwise (`--save-profile`) or pointed at its own file
+    // (`--profile`). This is the C# `Profile.ReadOnly` contract widened: a sim
+    // run must not prune real IDs, and a Rust run must not race the WPF app
+    // over the file that holds Kuba's manual header assignments.
+    let read_only = args.profile.is_none() && !args.save_profile;
     let profile_path = args.profile.clone().unwrap_or_else(|| config_dir().join("profile.json"));
     let mut profile = Profile::load_or_default(&profile_path);
     println!("profile: \"{}\" from {}", profile.name, profile_path.display());
-
-    #[cfg(target_os = "linux")]
-    let mut hw = if use_real {
-        Backend::Hwmon(fan_core::hwmon::HwmonBackend::new())
-    } else {
-        Backend::Sim(SimulatedBackend::new())
-    };
-    #[cfg(not(target_os = "linux"))]
-    let mut hw = Backend::Sim(SimulatedBackend::new());
     println!("backend: {}", hw.description());
     hw.update(); // one reading so auto-assign sees plausible values
     if auto_assign(&mut profile, &hw) && !read_only {
@@ -430,7 +529,8 @@ fn main() {
     let shared = Arc::new(Shared {
         engine: Mutex::new(engine),
         latest: Mutex::new(Vec::new()),
-        telemetry: Mutex::new(TelemetryLog::new(config_dir(), true, utc_offset_secs)),
+        // Sim runs get the -sim log filenames, exactly like the WPF dev flows.
+        telemetry: Mutex::new(TelemetryLog::new(config_dir(), !real, utc_offset_secs)),
         profile_path,
         read_only,
         stop: AtomicBool::new(false),
@@ -441,8 +541,9 @@ fn main() {
             .expect("install Ctrl+C handler");
     }
     shared.telemetry.lock().unwrap().event(&format!(
-        "daemon started (sim backend, v{}, {})",
+        "daemon started (v{}, {}, {})",
         env!("CARGO_PKG_VERSION"),
+        if real { "real hardware" } else { "simulation" },
         if args.apply { "applying" } else { "monitoring" }
     ));
     {

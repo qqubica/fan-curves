@@ -102,6 +102,38 @@ the shipping app until the port reaches feature parity.
   recorded in `main.rs`: `Color32` is PREMULTIPLIED — white-at-alpha needs
   equal components (`from_rgba_premultiplied(a,a,a,a)`); components above
   alpha render as solid/additive white (the "white pill" bug).
+- **Phase 4 (done 2026-08-06): native Windows backend** (`fan-daemon/src/
+  pawnio.rs` + `nct6686.rs`) — LibreHardwareMonitorLib replaced. PawnIO is
+  reached by **DeviceIoControl on `\\?\GLOBALROOT\Device\PawnIO`** (no DLL
+  link; IOCTLs 0xA1B22084 load / 0xA1B22104 execute), with the **official
+  signed 0.2.10 `LpcIO.bin` + `AMDFamily17.bin` embedded** via `include_bytes!`
+  — the driver rejects unsigned modules, so self-compiled ones are impossible.
+  Super I/O detect on 0x2E/0x4E (NCT6686D = id 0xD4 rev 0x4x; **`ioctl_find_bars`
+  must run while still in config mode** or every later port read is
+  ACCESS_DENIED) → EC window at `base+4/5/6` with the wait-for-0xFF /
+  force-after-500 ms / always-release-to-0xFF page handshake → temps
+  `0x100+2i`, tach `0x140+2i`, duty `0x160+i`; PWM writes are
+  `0xA01=0x80 → 50 ms → set bit i in 0xA00 → 0xA28+i=duty → 0xA01=0x40 → 50 ms`,
+  with the firmware's mode bit and duty saved on first write and restored on
+  release. CPU temps over SMN: Tctl `0x59800` (>>21 ×0.125, −49 on range/tj
+  bits), CCDs `0x59B08+4n` (&0xFFF ×0.125 −305). Mutexes
+  `Global\Access_ISABUS.HTP.Method` + `Global\Access_PCI`, held around every
+  sequence; a busy bus SKIPS the operation (never write unlocked), except
+  handback which waits 1 s.
+  - **Identifiers are LHM-compatible on purpose**: `/lpc/nct6686d/0/{temperature,
+    fan,control}/N` and `/amdcpu/0/temperature/{2,3,4}` (Tctl, CCD1, CCD2) —
+    one profile.json for both apps. Diverging makes each app prune the other's
+    assignments (that is how a manual Pump Fan pick disappears). All 8 headers
+    are exposed like LHM; the FANOUT_CFG capability probe hid two real ones.
+  - The daemon treats the shared profile as **read-only unless `--save-profile`**
+    while the WPF app is the shipping controller.
+  - **Verified on the real board** (2026-08-06): detect + EC reads + Tctl/CCD
+    matched the running WPF app tick-for-tick (same temps, same 20%/10%
+    outputs); non-elevated runs refuse cleanly and fall back to simulation.
+    **The PWM WRITE path is NOT yet hardware-verified** — run
+    `fan-daemon --selftest-write 7 40` elevated (header 7 has no fan and is
+    unassigned; prints mode/duty before, after write, after restore).
+    Never run both control loops at once: last writer wins per header.
 - **Phase 5 (done 2026-08-06): Linux hwmon backend** (`fan-core/src/hwmon.rs`)
   — sysfs enumeration, millidegree temps, tach, pwm 0–255 writes with
   `pwmN_enable` saved on first write and restored on release (the SetDefault

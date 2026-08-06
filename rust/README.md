@@ -42,11 +42,53 @@ on-demand UI split across Windows and Linux.
   fresh data; auto-spawns a sibling `fan-daemon --sim` when none answers; exits
   fully on close. v1 is a viewer/controller — curve editing, undo, the dev
   panel and history scrollback remain in the WPF app for now.
+- `fan-daemon/src/pawnio.rs` + `nct6686.rs` — the Windows backend, replacing
+  LibreHardwareMonitorLib. Talks to the signed PawnIO driver by DeviceIoControl
+  (no DLL link), embedding the official signed 0.2.10 `LpcIO.bin` /
+  `AMDFamily17.bin` modules (LGPL-2.1, github.com/namazso/PawnIO.Modules — the
+  driver refuses anything unsigned). Super I/O detect → EC page/index/data
+  window → board temps, tach, PWM; AMD Tctl and per-CCD temps over SMN. Takes
+  the same `Global\Access_ISABUS.HTP.Method` / `Global\Access_PCI` mutexes every
+  monitoring tool uses. Needs administrator.
 - `fan-core/src/hwmon.rs` — the Linux backend: `/sys/class/hwmon` enumeration,
   temp/tach reads, pwm writes with pwmN_enable save/restore as the BIOS
   handback. Compile-checked via `cargo check --target x86_64-unknown-linux-gnu`;
   not yet exercised on a real Linux machine. The `nct6683` kernel driver needs
   `force=1` for PWM writes on many boards.
+
+### Sensor/control identifiers are LHM-compatible
+
+The Windows backend emits the SAME id strings LibreHardwareMonitorLib does —
+`/lpc/nct6686d/0/{temperature,fan,control}/N`, `/amdcpu/0/temperature/{2,3,4}`
+(Tctl, CCD1, CCD2) — so one `profile.json` works in both apps. Diverging here
+would make each app prune the other's assignments at launch, which is exactly
+how a manual header pick gets silently lost.
+
+For the same reason the daemon treats the shared profile as **read-only** while
+the WPF app is still the shipping controller: it only writes with
+`--save-profile`, or when `--profile <path>` names its own file.
+
+### Verification status (2026-08-06)
+
+| Path | Status |
+|---|---|
+| Chip detect, EC reads, temps, tach, Tctl/CCD | **Verified on the real board** (NCT6686D id D441, EC base 0xA20, PawnIO 2.2.0): readings and computed outputs matched the running WPF app tick-for-tick |
+| Non-elevated behaviour | **Verified**: clean refusal, falls back to simulation, never half-works |
+| PWM write + BIOS handback | **NOT yet verified on hardware** — transcribed from LHM, compiles, untested |
+
+To verify the write path, from an **elevated** shell (header 7 = System Fan #6
+has no fan attached and is in no channel, so nothing spins):
+
+```
+cargo build -p fan-daemon
+target\debug\fan-daemon.exe --selftest-write 7 40
+```
+
+It prints the mode register and duty before / after the write / after restore.
+Success = the manual bit goes 0→1→0 and the duty reads back ~40% then returns
+to its original value. Only after that should the daemon be allowed to drive
+real headers — and never while the WPF app is running (two controllers writing
+the same header is last-writer-wins).
 - `parity-harness` — C# console app referencing the real `FanCurves.Core`; it
   generates golden per-tick traces into `crates/fan-core/tests/golden/`.
 
