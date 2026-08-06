@@ -808,3 +808,37 @@ tick is drawn with two line segments rather than typed.
 
 Still open: history scrollback + hover chip (needs the two-tier spill storage),
 CLEAR/LIVE, stopped-time spans, tray presence, and the three-size window cycle.
+
+## Rust UI phase 4: icon, strip interaction, window sizes (2026-08-07)
+
+Icon: read the exact geometry out of the C# source rather than eyeballing it —
+MainWindow.xaml's canvas (blade ellipses centred at (10, 4.8), radii 2.5 x 4.2,
+rotated 0/120/240 about the centre, hub 2.1, white alpha 0xD9) and
+TrayIcon.DrawIcon's 32x32 (near-black disc, white ring at alpha 80, same
+blades, hub radius 3). One module serves both. egui has no rotated-ellipse
+primitive, so a blade is a sampled convex polygon; the icon is rasterised at 4x
+supersampling with a rotate-into-blade-space ellipse test. Verified by cropping
+and zooming both title bars: one blade up, two spreading down, in both apps.
+
+Strip interaction: hover crosshair with markers on both traces and the readout
+chip (clock, ago, avg, now, fan %), one-line wording with a two-line fallback
+when the plot is narrow. Samples now carry a wall clock, and the local UTC
+offset is captured once at startup (std has no timezone database, same
+constraint the daemon's telemetry hit). Fan turn-OFF to next turn-ON draws as a
+dim span with an m:ss label that skips when it would collide with the previous
+one and stays open while the stop is still running. CLEAR wipes every channel.
+
+Window: the three-size cycle (fixed, quarter, maximised) with the button
+labelling the NEXT size, and dev-mode toggling re-applying that mode's fixed
+size.
+
+Deliberately NOT ported: the title-bar glyph's perpetual spin. The WPF app caps
+it at 20 fps; in the port it would mean 20 composition passes a second for as
+long as the window is open, against a UI whose rule is to paint once per engine
+tick. The glyph is static.
+
+Still open: history SCROLLBACK (wheel/drag/LIVE), which needs the two-tier
+spill-file storage first — the port holds 600 samples in RAM and nothing on
+disk; tray presence and the close-to-tray / autostart switches, which need a
+decision about whether the daemon or a tray helper owns residency; and custom
+window chrome.

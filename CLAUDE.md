@@ -99,9 +99,15 @@ the shipping app until the port reaches feature parity.
   right-click remove, committing on RELEASE so one drag is one undo entry),
   **undo-redo** (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z, CurveEdit + TuningEdit), and
   the **why-chip** in the chart corner with the original wordings.
-  **Still missing**: history scrollback + hover crosshair (needs the two-tier
-  spill storage first), CLEAR/LIVE, stopped-time spans, tray presence and the
-  close-to-tray / autostart switches, the three-size window cycle and custom
+  Also done: the **app icon** (`icon.rs` — one geometry drawn twice, the WPF
+  title-bar canvas and TrayIcon's 32×32; the glyph is STATIC on purpose, a
+  perpetual spin violates the repaint rules), the strip's **hover crosshair +
+  readout chip**, **stopped-time spans**, **CLEAR**, and the **three-size
+  window cycle**.
+  **Still missing**: history SCROLLBACK (wheel/drag/LIVE — needs the two-tier
+  spill-file storage first; the port holds 600 samples in RAM and nothing on
+  disk), tray presence with close-to-tray / autostart (needs a decision on
+  whether the daemon or a tray helper owns residency), and custom window
   chrome. Full inventory of the WPF UI — every control, range and interaction
   rule — was extracted before porting; work from it rather than from memory
   (guessed ranges were wrong).
