@@ -689,6 +689,7 @@ dependencies = [
  "fan-core",
  "interprocess",
  "serde_json",
+ "time",
 ]
 
 [[package]]

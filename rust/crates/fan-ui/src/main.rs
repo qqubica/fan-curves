@@ -76,6 +76,11 @@ fn main() -> eframe::Result {
                 baseline: None,
                 undo: Vec::new(),
                 redo: Vec::new(),
+                // Timezone lookup is only safe before other threads exist.
+                utc_offset_secs: time::UtcOffset::current_local_offset()
+                    .map(|o| o.whole_seconds() as i64)
+                    .unwrap_or(0),
+                size_mode: SizeMode::Fixed,
             }))
         }),
     )
@@ -98,6 +103,17 @@ struct App {
     baseline: Option<(usize, Vec<fan_core::CurvePoint>, String)>,
     undo: Vec<Edit>,
     redo: Vec<Edit>,
+    utc_offset_secs: i64,
+    size_mode: SizeMode,
+}
+
+/// The app has exactly three window sizes and no drag-resize, cycled in this
+/// order by the size button — whose glyph previews the NEXT one.
+#[derive(Clone, Copy, PartialEq)]
+enum SizeMode {
+    Fixed,
+    Quarter,
+    Max,
 }
 
 /// Undo covers curve edits AND preset switches — a preset click overwrites
@@ -187,16 +203,43 @@ impl eframe::App for App {
 
                         if self.dev {
                             ui.add_space(2.0);
-                            ui.label(
-                                RichText::new(
-                                    "Drag points · double-click adds · right-click removes · \
-                                     Ctrl+Z undo, Ctrl+Y redo. Each point starts a flat band.",
-                                )
-                                .font(FontId::proportional(10.0))
-                                .color(FAINT),
-                            );
-                            let (rect, _) =
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(
+                                        "Drag points · double-click adds · right-click removes · \
+                                         Ctrl+Z undo, Ctrl+Y redo.",
+                                    )
+                                    .font(FontId::proportional(10.0))
+                                    .color(FAINT),
+                                );
+                                ui.with_layout(
+                                    eframe::egui::Layout::right_to_left(eframe::egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add(text_button("CLEAR"))
+                                            .on_hover_text(
+                                                "Clear the recorded history on every channel — the \
+                                                 strip starts fresh from the right edge.",
+                                            )
+                                            .clicked()
+                                        {
+                                            let mut st = self.link.state.lock().unwrap();
+                                            for ring in st.history.iter_mut() {
+                                                ring.clear();
+                                            }
+                                        }
+                                    },
+                                );
+                            });
+                            let (rect, response) =
                                 ui.allocate_exact_size(Vec2::new(inner_w, strip_h), Sense::hover());
+                            let mut snap = snap;
+                            snap.hover_x = response
+                                .hovered()
+                                .then(|| ui.input(|i| i.pointer.hover_pos()))
+                                .flatten()
+                                .map(|p| p.x);
+                            snap.utc_offset_secs = self.utc_offset_secs;
                             charts::draw_history_strip(ui.painter(), rect, &snap);
                         }
                     });
@@ -271,6 +314,10 @@ pub struct Snapshot {
     pub hysteresis_c: f64,
     pub zero_snap_percent: f64,
     pub averaging_seconds: f64,
+    /// Pointer x over the history strip, when hovering it.
+    pub hover_x: Option<f32>,
+    /// Local UTC offset, captured once at startup (std has no timezone data).
+    pub utc_offset_secs: i64,
 }
 
 impl Snapshot {
@@ -282,6 +329,8 @@ impl Snapshot {
             slew_down: ch.map_or(8.0, |c| c.slew_down_percent_per_sec),
             hysteresis_c: ch.map_or(3.0, |c| c.hysteresis_c),
             averaging_seconds: ch.map_or(20.0, |c| c.averaging_seconds),
+            hover_x: None,
+            utc_offset_secs: 0,
             zero_snap_percent: st.profile.as_ref().map_or(20.0, |p| {
                 if p.zero_snap_enabled { p.zero_snap_percent } else { 0.0 }
             }),
@@ -346,6 +395,35 @@ impl App {
         // Between gestures the baseline follows the live state.
         if self.drag.is_none() && !edit.changed {
             self.baseline = None;
+        }
+    }
+
+    /// The fixed size for the current mode.
+    fn apply_fixed_size(&self, ctx: &Context) {
+        let s = if self.dev { DEV_SIZE } else { SIMPLE_SIZE };
+        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Maximized(false));
+        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::InnerSize(Vec2::new(s[0], s[1])));
+    }
+
+    /// Fixed → Quarter → Max → Fixed. Quarter is half the monitor in each
+    /// dimension, i.e. a quarter of the screen.
+    fn cycle_size(&mut self, ctx: &Context) {
+        self.size_mode = match self.size_mode {
+            SizeMode::Fixed => SizeMode::Quarter,
+            SizeMode::Quarter => SizeMode::Max,
+            SizeMode::Max => SizeMode::Fixed,
+        };
+        match self.size_mode {
+            SizeMode::Fixed => self.apply_fixed_size(ctx),
+            SizeMode::Quarter => {
+                let monitor = ctx.input(|i| i.viewport().monitor_size).unwrap_or(Vec2::new(1920.0, 1080.0));
+                ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Maximized(false));
+                ctx.send_viewport_cmd(eframe::egui::ViewportCommand::InnerSize(Vec2::new(
+                    monitor.x / 2.0,
+                    monitor.y / 2.0,
+                )));
+            }
+            SizeMode::Max => ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Maximized(true)),
         }
     }
 
@@ -442,16 +520,29 @@ impl App {
             ui.label(RichText::new("Fan Curves").font(FontId::proportional(13.0)).color(TEXT));
 
             ui.with_layout(eframe::egui::Layout::right_to_left(eframe::egui::Align::Center), |ui| {
+                // Size cycle: Fixed → Quarter → Max → Fixed, label previews next.
+                let next = match self.size_mode {
+                    SizeMode::Fixed => "Quarter",
+                    SizeMode::Quarter => "Maximize",
+                    SizeMode::Max => "Restore",
+                };
+                if ui
+                    .add(chip_button(next))
+                    .on_hover_text("Cycle the window size — the label is the next size")
+                    .clicked()
+                {
+                    self.cycle_size(ui.ctx());
+                }
+                ui.add_space(8.0);
                 if ui
                     .add(chip_button("Developer"))
                     .on_hover_text("Show the developer panel, the history strip and curve editing")
                     .clicked()
                 {
                     self.dev = !self.dev;
-                    let size = if self.dev { DEV_SIZE } else { SIMPLE_SIZE };
-                    ui.ctx().send_viewport_cmd(eframe::egui::ViewportCommand::InnerSize(
-                        Vec2::new(size[0], size[1]),
-                    ));
+                    if self.size_mode == SizeMode::Fixed {
+                        self.apply_fixed_size(ui.ctx());
+                    }
                 }
             });
         });
@@ -729,6 +820,13 @@ fn card_frame() -> Frame {
         .stroke(Stroke::new(1.0, HAIRLINE))
         .corner_radius(CornerRadius::same(16))
         .inner_margin(Margin::same(16))
+}
+
+/// Bare text button (CLEAR / LIVE): no fill, no border — the WPF strip's style.
+fn text_button(text: &str) -> Button<'static> {
+    Button::new(RichText::new(devpanel::tracked(text)).font(FontId::proportional(9.0)).color(DIM))
+        .fill(Color32::TRANSPARENT)
+        .stroke(Stroke::NONE)
 }
 
 fn chip_button(text: &str) -> Button<'_> {

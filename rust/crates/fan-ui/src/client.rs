@@ -25,8 +25,10 @@ const HISTORY_CAP: usize = 600;
 
 #[derive(Clone, Copy)]
 pub struct HistorySample {
-    /// Seconds since the UI connected (client clock — the strip only needs spacing).
+    /// Seconds since the UI connected — drives "how long ago".
     pub t: f64,
+    /// Unix seconds, so the hover chip can show a wall clock.
+    pub wall: f64,
     pub avg: f64,
     pub raw: Option<f64>,
     pub out: f64,
@@ -217,6 +219,10 @@ fn poll_status(
     let channels: Vec<ChannelStatus> =
         serde_json::from_value(reply["channels"].clone()).unwrap_or_default();
     let t = start.elapsed().as_secs_f64();
+    let wall = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
     let mut st = state.lock().unwrap();
     st.applying = reply["applying"].as_bool().unwrap_or(false);
     if let Some(name) = reply["profile_name"].as_str() {
@@ -228,6 +234,7 @@ fn poll_status(
             let ring = &mut st.history[i];
             ring.push_back(HistorySample {
                 t,
+                wall,
                 avg: ch.effective_temp,
                 raw: ch.raw_temp,
                 out: ch.output_percent,

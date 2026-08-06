@@ -312,6 +312,102 @@ fn trim(v: f64) -> String {
     }
 }
 
+/// The dim bar between a fan turn-OFF and the next turn-ON, labelled `m:ss`.
+/// Returns the label's right edge so the next one can skip when it would
+/// overlap. `completed` draws the closing cap; a live stop stays open.
+#[allow(clippy::too_many_arguments)]
+fn draw_stopped_span(
+    painter: &Painter,
+    plot: Rect,
+    x1: f32,
+    x2: f32,
+    seconds: f64,
+    completed: bool,
+    prev_label_right: f32,
+) -> f32 {
+    let y = plot.max.y - 14.0;
+    let pen = Stroke::new(1.0, Color32::from_white_alpha(48));
+    if x2 - x1 >= 8.0 {
+        painter.line_segment([Pos2::new(x1 + 3.0, y), Pos2::new(x2 - 3.0, y)], pen);
+    }
+    painter.line_segment([Pos2::new(x1, y - 3.0), Pos2::new(x1, y + 3.0)], pen);
+    if completed {
+        painter.line_segment([Pos2::new(x2, y - 3.0), Pos2::new(x2, y + 3.0)], pen);
+    }
+    let s = seconds.max(0.0) as i64;
+    let text = format!("{}:{:02}", s / 60, s % 60);
+    let font = eframe::egui::FontId::monospace(10.0);
+    let galley = painter.layout_no_wrap(text, font, Color32::from_white_alpha(166));
+    let w = galley.size().x;
+    let left = ((x1 + x2) / 2.0 - w / 2.0).clamp(plot.min.x, plot.max.x - w);
+    // Skip a label that would collide with the previous span's.
+    if left < prev_label_right + 4.0 {
+        return prev_label_right;
+    }
+    let at = Pos2::new(left, y - galley.size().y / 2.0);
+    painter.rect_filled(
+        Rect::from_min_size(at, galley.size()).expand2(eframe::egui::vec2(3.0, 0.0)),
+        CornerRadius::same(2),
+        CARD,
+    );
+    painter.galley(at, galley, Color32::from_white_alpha(166));
+    left + w
+}
+
+/// Wall clock as `HH:mm:ss`, from unix seconds plus the local offset captured
+/// at startup (std has no timezone database).
+fn clock(unix: f64, offset_secs: i64) -> String {
+    let s = (unix as i64 + offset_secs).rem_euclid(86_400);
+    format!("{:02}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
+}
+
+/// "now" for the freshest sample, else `−m:ss` / `−h:mm:ss`.
+fn ago_text(age: f64, newest: bool) -> String {
+    if newest && age <= 1.0 {
+        return "now".into();
+    }
+    let s = age.max(0.0) as i64;
+    if s < 3600 {
+        format!("−{}:{:02}", s / 60, s % 60)
+    } else {
+        format!("−{}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
+    }
+}
+
+/// Rounded chip with a card backing — the strip's hover readout. Tries each
+/// wording and draws the first that fits the plot; falls back to the last.
+fn hover_chip(painter: &Painter, plot: Rect, x: f32, options: &[String]) {
+    let font = eframe::egui::FontId::monospace(10.5);
+    let mut chosen = painter.layout_no_wrap(
+        options.last().cloned().unwrap_or_default(),
+        font.clone(),
+        TEXT,
+    );
+    for o in options {
+        let g = painter.layout_no_wrap(o.clone(), font.clone(), TEXT);
+        if g.size().x + 12.0 <= plot.width() {
+            chosen = g;
+            break;
+        }
+    }
+    let size = chosen.size();
+    let pad = eframe::egui::vec2(6.0, 3.0);
+    let left = (x - size.x / 2.0).clamp(plot.min.x, plot.max.x - size.x - pad.x * 2.0);
+    let at = Pos2::new(left, plot.min.y + 3.0);
+    painter.rect_filled(
+        Rect::from_min_size(at, size + pad * 2.0),
+        CornerRadius::same(6),
+        CARD,
+    );
+    painter.rect_stroke(
+        Rect::from_min_size(at, size + pad * 2.0),
+        CornerRadius::same(6),
+        Stroke::new(1.0, Color32::from_white_alpha(38)),
+        eframe::egui::StrokeKind::Inside,
+    );
+    painter.galley(at + pad, chosen, TEXT);
+}
+
 pub fn draw_history_strip(painter: &Painter, rect: Rect, snap: &Snapshot) {
     // Seam hairline instead of a card edge: the strip shares the chart's card.
     painter.line_segment(
@@ -395,7 +491,10 @@ pub fn draw_history_strip(painter: &Painter, rect: Rect, snap: &Snapshot) {
             visible.iter().enumerate().map(|(i, s)| Pos2::new(x(i), y_temp(s.avg))).collect();
         painter.add(Shape::line(avg, Stroke::new(2.0, TEXT)));
 
-        // Fan ON/OFF baseline ticks: ON brighter than OFF.
+        // Fan ON/OFF baseline ticks (ON brighter), and the stopped-time span
+        // between an OFF and the next ON — how long the fan actually rested.
+        let mut last_off: Option<usize> = None;
+        let mut last_label_right = f32::NEG_INFINITY;
         for i in 1..count {
             let (prev, cur) = (visible[i - 1].out, visible[i].out);
             let on = prev <= 0.01 && cur > 0.01;
@@ -407,12 +506,71 @@ pub fn draw_history_strip(painter: &Painter, rect: Rect, snap: &Snapshot) {
                     Stroke::new(1.0, Color32::from_white_alpha(if on { 140 } else { 70 })),
                 );
             }
+            if off {
+                last_off = Some(i);
+            }
+            if on {
+                if let Some(o) = last_off.take() {
+                    last_label_right =
+                        draw_stopped_span(painter, plot, x(o), x(i), visible[i].t - visible[o].t, true, last_label_right);
+                }
+            }
+        }
+        // An ongoing stop counts up live against the right edge.
+        if let Some(o) = last_off {
+            if visible[count - 1].out <= 0.01 {
+                draw_stopped_span(
+                    painter,
+                    plot,
+                    x(o),
+                    x(count - 1),
+                    visible[count - 1].t - visible[o].t,
+                    false,
+                    last_label_right,
+                );
+            }
         }
 
         // Live edge — the only amber in the strip.
         let last = count - 1;
         painter.circle_filled(Pos2::new(x(last), y_temp(visible[last].avg)), 2.6, AMBER);
         painter.circle_filled(Pos2::new(x(last), y_pct(visible[last].out)), 2.2, AMBER);
+
+        // Hover: crosshair, markers on both traces, and the readout chip.
+        if let Some(px) = snap.hover_x {
+            if px >= plot.min.x - 4.0 && px <= plot.max.x + 4.0 {
+                let i = (((px - plot.max.x) / px_per_sample) + (count - 1) as f32)
+                    .round()
+                    .clamp(0.0, (count - 1) as f32) as usize;
+                let s = visible[i];
+                let xx = x(i);
+                painter.line_segment(
+                    [Pos2::new(xx, plot.min.y), Pos2::new(xx, plot.max.y)],
+                    Stroke::new(1.0, Color32::from_white_alpha(48)),
+                );
+                let mark = |p: Pos2| {
+                    painter.circle_filled(p, 4.4, CARD);
+                    painter.circle_filled(p, 3.0, TEXT);
+                };
+                mark(Pos2::new(xx, y_pct(s.out)));
+                if !s.avg.is_nan() {
+                    mark(Pos2::new(xx, y_temp(s.avg)));
+                }
+                let a = |v: f64| if v.is_nan() { "—".to_string() } else { format!("{v:.1}°") };
+                let clock_s = clock(s.wall, snap.utc_offset_secs);
+                let ago = ago_text(visible[count - 1].t - s.t, i == count - 1);
+                let raw = s.raw.map_or("—".to_string(), |r| format!("{r:.1}°"));
+                hover_chip(
+                    painter,
+                    plot,
+                    xx,
+                    &[
+                        format!("{clock_s} · {ago} · avg {} · now {raw} · {:.0}%", a(s.avg), s.out),
+                        format!("{clock_s} · {ago}\navg {} · now {raw} · {:.0}%", a(s.avg), s.out),
+                    ],
+                );
+            }
+        }
     } else {
         crate::micro(painter, plot.center(), Align2::CENTER_CENTER, "collecting…", FAINT);
     }
