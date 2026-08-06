@@ -774,3 +774,37 @@ Still missing versus the WPF app, in priority order: curve editing (drag/add/
 remove) and undo/redo, why-chip parity in the chart corner, history scrollback
 + hover crosshair with the two-tier spill storage behind it, tray presence and
 the three-size window cycle.
+
+## Rust UI phase 3: editing, undo, and layout matched to the .NET app (2026-08-06 night)
+
+Kuba: "look at the old application and look at the Rust version, it's looking
+different, it has different layout, make the layout of the Rust version similar
+to the .NET." Done by literally screenshotting the WPF app (--sim --dev
+--screenshot, safe while the Rust daemon drove the real fans) and comparing.
+
+Structural corrections that came out of that comparison: the WPF grid is
+252 | * | Auto, so the dev panel belongs on the RIGHT, not between the hero and
+the chart; the channel selector is a segmented control in the CHART CARD
+header, not a list in the sidebar; presets are CARDS in the sidebar with title
++ subtitle and a tick, not top-bar chips; pause is a full-width sidebar button;
+and everything in the middle column - channel header, curve, hint, history
+strip - lives inside ONE card, while the dev panel is one card with
+letter-spaced headers rather than eleven separate boxes.
+
+Also landed: curve editing (drag, double-click add, right-click remove) with
+the WPF hit radius, snapping and band clamps, committing on mouse-RELEASE so a
+drag is one undo entry; undo/redo with both entry kinds (TuningSnapshot moved
+into fan-core so a preset overwrite and an undo restore share one definition);
+the why-chip in the chart corner with the original wordings; and chart fixes
+found in the inventory - the strip now uses the curve chart's 15-100 C scale,
+index-based X, the 0/50/100 grid, fan ON/OFF ticks, and breaks the raw trace on
+missing samples instead of bridging them.
+
+Two egui specifics worth remembering: a Frame inside a horizontal row does NOT
+constrain its own width - a right-to-left layout inside it claimed the space
+reserved for the dev panel, so the exact region has to be allocated first with
+allocate_ui_with_layout; and the default font has no U+2713, so the preset
+tick is drawn with two line segments rather than typed.
+
+Still open: history scrollback + hover chip (needs the two-tier spill storage),
+CLEAR/LIVE, stopped-time spans, tray presence, and the three-size window cycle.

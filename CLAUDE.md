@@ -92,16 +92,32 @@ the shipping app until the port reaches feature parity.
   deferred to the hardware-backend phase (autostarting a sim-only daemon is
   pointless).
 - **UI feature parity with the WPF app is TRACKED, not assumed.** Done:
-  simple mode + **developer mode** (`devpanel.rs`, all eleven groups with the
+  simple mode, **developer mode** (`devpanel.rs`, all eleven groups with the
   WPF labels/ranges/step snapping/value formats/tooltips, master-checkbox
   headers, 45 % dim when off but still editable, SOURCES with live readings
-  and header exclusivity). **Still missing** (in priority order): curve
-  editing (drag / double-click add / right-click remove) and undo-redo,
-  why-chip parity in the chart corner with the WPF wordings, history
-  scrollback + hover crosshair (needs the two-tier spill storage first), tray
-  presence, and the three-size window cycle. Full inventory of the WPF UI —
-  every control, range and interaction rule — was extracted before porting;
-  work from it rather than from memory (guessed ranges were wrong).
+  and header exclusivity), **curve editing** (drag / double-click add /
+  right-click remove, committing on RELEASE so one drag is one undo entry),
+  **undo-redo** (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z, CurveEdit + TuningEdit), and
+  the **why-chip** in the chart corner with the original wordings.
+  **Still missing**: history scrollback + hover crosshair (needs the two-tier
+  spill storage first), CLEAR/LIVE, stopped-time spans, tray presence and the
+  close-to-tray / autostart switches, the three-size window cycle and custom
+  chrome. Full inventory of the WPF UI — every control, range and interaction
+  rule — was extracted before porting; work from it rather than from memory
+  (guessed ranges were wrong).
+- **The layout follows the WPF grid `252 | * | Auto`** (verified by
+  screenshotting the running .NET app and comparing): sidebar = hero label,
+  int/frac hero numeral, status-chip pill, PROFILE, preset CARDS, full-width
+  pause; middle = **ONE card** holding the segmented channel header, the
+  detail line, the curve, the hint and the history strip; dev panel on the
+  **RIGHT** as one card with letter-spaced headers. Do not reintroduce
+  per-group boxes or move the panel between the hero and the chart.
+  - egui: a `Frame` inside a horizontal row does NOT constrain its width — a
+    right-to-left layout inside it claims the whole row (it ate the dev
+    panel's space). Allocate the exact region with `allocate_ui_with_layout`
+    first, then draw the card inside it.
+  - The default font has no U+2713; the preset tick is drawn with two line
+    segments, not typed.
   - Edits go through **`update_profile`**, never `set_profile`: the latter
     calls `replace_profile`, which clears the filters and turns a slider nudge
     into an averaging-window reset.
