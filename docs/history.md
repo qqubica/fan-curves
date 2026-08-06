@@ -620,3 +620,24 @@ BIOS, shutdown exited cleanly with the "headers to BIOS" marker flushed.
 Read-only guard confirmed: preset via IPC on the real profile answered
 "saved":false. Footprint with IPC + telemetry live: 5.6 MB working set / 1.0 MB
 private. Service/autostart wiring deferred to the hardware-backend phase.
+
+## Rust port — phases 3 + 5: egui UI v1, Linux hwmon (2026-08-06)
+
+Phase 3 (fan-ui): the precision-instrument look translated to egui — layered
+near-black cards, monochrome white, amber strictly live-data. Hero average,
+channel selector, readouts, why-chip line, staircase chart with the amber
+operating dot and raw-temp dashed vertical, a 10-min client-fed history strip,
+presets/apply/pause over IPC. Repaint only on fresh poll data (1 Hz). Verified
+live against the daemon (screenshot in docs/screenshot-rust-ui.png). Two
+gotchas earned their comments: egui Color32 is premultiplied (white-at-alpha
+via equal components — components above alpha render as a solid white pill),
+and from_white_alpha is not const so palette constants use the premultiplied
+form. v1 excludes curve editing/undo/dev panel/scrollback. UI process costs
+~115 MB WS while open; acceptable because it is on-demand and exits — the
+resident budget stays the daemon's ~6 MB.
+
+Phase 5 (hwmon.rs): the Linux backend in ~200 lines of std::fs — hwmon
+enumeration, temp/tach reads, pwm writes with pwmN_enable save/restore as the
+handback. The daemon's new Backend enum keeps FanEngine statically dispatched.
+Cross-checked with cargo check --target x86_64-unknown-linux-gnu (which caught
+a real move bug); honest status: not yet exercised on a Linux machine.

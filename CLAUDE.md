@@ -91,6 +91,24 @@ the shipping app until the port reaches feature parity.
   lock; `--send <json>` is the built-in client. Service/autostart wiring
   deferred to the hardware-backend phase (autostarting a sim-only daemon is
   pointless).
+- **Phase 3 (done 2026-08-06): egui UI v1** (`crates/fan-ui`) — on-demand
+  viewer/controller over the IPC socket: hero average numeral, channel
+  selector, readouts + why-chip, staircase chart with amber live overlay,
+  10-min history strip, preset/apply/pause. Repaints ONLY when the 1 Hz poll
+  delivers (the repaint rules hold); auto-spawns a sibling `fan-daemon --sim`;
+  exits fully on close. ~115 MB working set while OPEN (egui + GPU context —
+  the on-demand/exit design is what keeps that off the resident budget).
+  Curve editing/undo/dev panel/scrollback stay WPF-only for now. egui gotcha
+  recorded in `main.rs`: `Color32` is PREMULTIPLIED — white-at-alpha needs
+  equal components (`from_rgba_premultiplied(a,a,a,a)`); components above
+  alpha render as solid/additive white (the "white pill" bug).
+- **Phase 5 (done 2026-08-06): Linux hwmon backend** (`fan-core/src/hwmon.rs`)
+  — sysfs enumeration, millidegree temps, tach, pwm 0–255 writes with
+  `pwmN_enable` saved on first write and restored on release (the SetDefault
+  equivalent). Daemon `Backend` enum picks hwmon on Linux without `--sim`.
+  Compile-checked via `cargo check --target x86_64-unknown-linux-gnu`; NOT yet
+  run on real Linux hardware (nct6683 needs `force=1` for PWM writes on many
+  boards).
 
 ## Layout
 
