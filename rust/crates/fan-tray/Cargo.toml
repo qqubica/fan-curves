@@ -1,0 +1,19 @@
+[package]
+name = "fan-tray"
+description = "fan-curves tray launcher: opens the UI, shows live status, nothing else"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+fan-core = { path = "../fan-core" }
+interprocess = "2"
+serde_json = "1"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }

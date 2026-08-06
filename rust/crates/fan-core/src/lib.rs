@@ -11,6 +11,7 @@ pub mod curve;
 pub mod engine;
 pub mod filter;
 pub mod hwmon;
+pub mod icon;
 pub mod kick;
 pub mod probe;
 pub mod profile;

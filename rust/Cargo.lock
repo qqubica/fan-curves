@@ -682,6 +682,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fan-tray"
+version = "0.1.0"
+dependencies = [
+ "fan-core",
+ "interprocess",
+ "serde_json",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "fan-ui"
 version = "0.1.0"
 dependencies = [
