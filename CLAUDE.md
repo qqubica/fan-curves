@@ -106,9 +106,17 @@ the shipping app until the port reaches feature parity.
   window cycle**.
   **Still missing**: history SCROLLBACK (wheel/drag/LIVE — needs the two-tier
   spill-file storage first; the port holds 600 samples in RAM and nothing on
-  disk), tray presence with close-to-tray / autostart (needs a decision on
-  whether the daemon or a tray helper owns residency), and custom window
-  chrome. Full inventory of the WPF UI — every control, range and interaction
+  disk), tray presence / close-to-tray, and custom window chrome.
+- **Autostart** (`fan-daemon/src/autostart.rs`): Task Scheduler logon task
+  `FanCurvesDaemon`, `/RL HIGHEST` (a Run key cannot elevate, and the daemon
+  needs admin) — its own name so it and the WPF app's `FanCurves` task can be
+  toggled independently. **Never registered automatically**: two controllers
+  writing the same headers is last-writer-wins, so it is an explicit act
+  (`--install-autostart`, the `set_autostart` IPC command, or the sidebar's
+  "Start with Windows"). The daemon prints residency at startup and warns when
+  BOTH tasks exist; the UI shows the same warning above the switch. Residency
+  belongs to the daemon — the UI is on-demand and exits, which is why there is
+  no close-to-tray. Full inventory of the WPF UI — every control, range and interaction
   rule — was extracted before porting; work from it rather than from memory
   (guessed ranges were wrong).
 - **The layout follows the WPF grid `252 | * | Auto`** (verified by

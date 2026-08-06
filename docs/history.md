@@ -842,3 +842,27 @@ spill-file storage first — the port holds 600 samples in RAM and nothing on
 disk; tray presence and the close-to-tray / autostart switches, which need a
 decision about whether the daemon or a tray helper owns residency; and custom
 window chrome.
+
+## Rust port: autostart, and the residency question answered (2026-08-07)
+
+The port could not survive a reboot — the WPF app's logon task brought it back
+and the daemon stayed dead — so "which process is resident" had to be settled
+before autostart meant anything. Answer: the DAEMON is resident, the UI is
+on-demand and exits. That is why there is no close-to-tray in the port: the
+window is not the thing that needs to stay alive, and keeping a 100 MB egui
+process parked in the tray would undo the reason for the port.
+
+Mechanism is the WPF app's: a Task Scheduler logon task with /RL HIGHEST,
+because a HKCU Run key cannot elevate and Super I/O access needs administrator.
+Registered under its OWN name (FanCurvesDaemon) so both apps' tasks can coexist
+and be toggled separately.
+
+Deliberately not automatic. Two controllers writing the same headers every
+second is last-writer-wins, so enabling autostart is an explicit act:
+--install-autostart, the set_autostart IPC command (the daemon is already
+elevated, so a normal-privilege UI can ask), or the sidebar checkbox. The
+daemon prints the residency situation at startup, detects the WPF task, and
+warns when both would start; the UI repeats the warning above the switch.
+Verified: non-elevated attempts fail with a clear message rather than
+half-working, and the daemon correctly reported "daemon off, WPF app's task
+ALSO registered" on this machine.
