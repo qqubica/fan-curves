@@ -15,8 +15,8 @@ mod devpanel;
 mod icon;
 
 use eframe::egui::{
-    Align2, Button, CentralPanel, Color32, Context, CornerRadius, FontId, Frame, Margin, RichText,
-    Sense, Stroke, Vec2, ViewportBuilder,
+    Align2, Button, CentralPanel, Checkbox, Color32, Context, CornerRadius, FontId, Frame, Margin,
+    RichText, Sense, Stroke, Vec2, ViewportBuilder,
 };
 use fan_core::{ChannelStatus, OutputReason};
 
@@ -318,6 +318,8 @@ pub struct Snapshot {
     pub hover_x: Option<f32>,
     /// Local UTC offset, captured once at startup (std has no timezone data).
     pub utc_offset_secs: i64,
+    pub autostart: bool,
+    pub autostart_conflict: bool,
 }
 
 impl Snapshot {
@@ -331,6 +333,8 @@ impl Snapshot {
             averaging_seconds: ch.map_or(20.0, |c| c.averaging_seconds),
             hover_x: None,
             utc_offset_secs: 0,
+            autostart: st.inventory.autostart,
+            autostart_conflict: st.inventory.autostart_conflict,
             zero_snap_percent: st.profile.as_ref().map_or(20.0, |p| {
                 if p.zero_snap_enabled { p.zero_snap_percent } else { 0.0 }
             }),
@@ -650,7 +654,8 @@ impl App {
                 .send(if snap.applying { Cmd::Pause } else { Cmd::Apply });
         }
 
-        // Footer pinned to the bottom of the sidebar.
+        // Footer pinned to the bottom of the sidebar, with the residency
+        // switch above it — the .NET app's "Start with Windows" seat.
         ui.with_layout(eframe::egui::Layout::bottom_up(eframe::egui::Align::LEFT), |ui| {
             let line = if snap.connected {
                 format!(
@@ -663,6 +668,37 @@ impl App {
                 snap.last_error.clone().unwrap_or_else(|| "daemon unreachable".into())
             };
             ui.label(RichText::new(line).font(FontId::proportional(10.0)).color(FAINT));
+            ui.add_space(8.0);
+
+            if snap.autostart_conflict && snap.autostart {
+                ui.label(
+                    RichText::new(
+                        "Both this daemon and the .NET app start at logon — they will fight \
+                         over the headers. Disable one.",
+                    )
+                    .font(FontId::proportional(10.0))
+                    .color(AMBER),
+                );
+            }
+            let mut on = snap.autostart;
+            if ui
+                .add_enabled(
+                    snap.connected,
+                    Checkbox::new(
+                        &mut on,
+                        RichText::new("Start with Windows")
+                            .font(FontId::proportional(11.5))
+                            .color(Color32::from_white_alpha(140)),
+                    ),
+                )
+                .on_hover_text(
+                    "Register a logon task that starts the fan daemon elevated. The daemon is \
+                     the resident part — this window is on-demand and can be closed freely.",
+                )
+                .changed()
+            {
+                let _ = self.link.tx.send(Cmd::SetAutostart(on));
+            }
         });
     }
 

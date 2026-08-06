@@ -14,6 +14,8 @@
 //! real backend cannot start, the daemon says why and falls back to simulation
 //! rather than pretending to control fans.
 
+#[cfg(windows)]
+mod autostart;
 mod ipc;
 #[cfg(windows)]
 mod nct6686;
@@ -153,6 +155,8 @@ struct Args {
     save_profile: bool,
     /// (header index, percent) — write-path self-test on one header, then exit.
     selftest: Option<(usize, f64)>,
+    /// Register (true) or remove (false) the start-with-Windows task, then exit.
+    autostart: Option<bool>,
     ticks: Option<u64>,
     profile: Option<PathBuf>,
     send: Option<String>,
@@ -166,6 +170,7 @@ fn parse_args() -> Args {
         probe: false,
         save_profile: false,
         selftest: None,
+        autostart: None,
         ticks: None,
         profile: None,
         send: None,
@@ -186,10 +191,12 @@ fn parse_args() -> Args {
             "--ticks" => args.ticks = it.next().and_then(|v| v.parse().ok()),
             "--profile" => args.profile = it.next().map(PathBuf::from),
             "--send" => args.send = it.next(),
+            "--install-autostart" => args.autostart = Some(true),
+            "--uninstall-autostart" => args.autostart = Some(false),
             other => {
                 eprintln!("unknown argument: {other}");
                 eprintln!(
-                    "usage: fan-daemon [--sim] [--no-apply] [--verbose] [--ticks N] [--profile path]\n       fan-daemon --probe            (dump sensors/controls read-only, then exit)\n       fan-daemon --send '{{\"cmd\":\"status\"}}'"
+                    "usage: fan-daemon [--sim] [--no-apply] [--verbose] [--ticks N] [--profile path]\n       fan-daemon --probe            (dump sensors/controls read-only, then exit)\n       fan-daemon --install-autostart | --uninstall-autostart\n       fan-daemon --send '{{\"cmd\":\"status\"}}'"
                 );
                 std::process::exit(2);
             }
@@ -429,6 +436,35 @@ fn describe(s: &ChannelStatus) -> String {
 fn main() {
     let args = parse_args();
 
+    // Autostart management: do it and exit, never as a side effect of running.
+    #[cfg(windows)]
+    if let Some(install) = args.autostart {
+        let r = if install { autostart::install() } else { autostart::uninstall() };
+        match r {
+            Ok(()) => {
+                println!(
+                    "start-with-Windows {} (task \"{}\")",
+                    if install { "ENABLED" } else { "disabled" },
+                    autostart::TASK_NAME
+                );
+                if install && autostart::conflicting_wpf_task() {
+                    eprintln!(
+                        "WARNING: the WPF app's \"{}\" task is also registered. Two controllers \
+                         writing the same headers is last-writer-wins — disable one:\n  \
+                         schtasks /Change /TN {} /DISABLE",
+                        autostart::WPF_TASK_NAME,
+                        autostart::WPF_TASK_NAME
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!("could not change autostart: {e}\n  (needs an elevated shell)");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     // Client mode: one request line to a running daemon, print the reply, done.
     if let Some(request) = &args.send {
         match ipc::send(request) {
@@ -497,6 +533,21 @@ fn main() {
     let mut profile = Profile::load_or_default(&profile_path);
     println!("profile: \"{}\" from {}", profile.name, profile_path.display());
     println!("backend: {}", hw.description());
+    #[cfg(windows)]
+    {
+        // Say the residency situation out loud: a port that cannot survive a
+        // reboot silently hands the machine back to the WPF app.
+        let mine = autostart::installed();
+        let theirs = autostart::conflicting_wpf_task();
+        println!(
+            "autostart: daemon {}{}",
+            if mine { "ON" } else { "off (--install-autostart to enable)" },
+            if theirs { ", WPF app's task ALSO registered" } else { "" }
+        );
+        if mine && theirs {
+            eprintln!("WARNING: both would start at logon and fight over the headers.");
+        }
+    }
     hw.update(); // one reading so auto-assign sees plausible values
     if auto_assign(&mut profile, &hw) && !read_only {
         if let Err(e) = profile.save(&profile_path) {

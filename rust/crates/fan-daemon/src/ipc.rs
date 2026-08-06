@@ -126,6 +126,9 @@ enum Request {
     Apply,
     Pause,
     Shutdown,
+    /// Register/remove the start-with-Windows task. The daemon already runs
+    /// elevated, so the UI can ask for this without elevating itself.
+    SetAutostart { enabled: bool },
 }
 
 fn respond(line: &str, shared: &Shared) -> serde_json::Value {
@@ -196,12 +199,19 @@ fn respond(line: &str, shared: &Shared) -> serde_json::Value {
                 .iter()
                 .map(|c| json!({ "id": c.id, "name": c.name, "rpm": hw.read_control_rpm(&c.id) }))
                 .collect();
+            #[cfg(windows)]
+            let (autostart, autostart_conflict) =
+                (crate::autostart::installed(), crate::autostart::conflicting_wpf_task());
+            #[cfg(not(windows))]
+            let (autostart, autostart_conflict) = (false, false);
             json!({
                 "ok": true,
                 "backend": hw.description(),
                 "simulated": hw.is_simulated(),
                 "config_path": shared.profile_path.to_string_lossy(),
                 "read_only": shared.read_only,
+                "autostart": autostart,
+                "autostart_conflict": autostart_conflict,
                 "sensors": sensors,
                 "controls": controls,
             })
@@ -229,6 +239,35 @@ fn respond(line: &str, shared: &Shared) -> serde_json::Value {
             shared.engine.lock().unwrap().stop_applying();
             shared.telemetry.lock().unwrap().event("paused via IPC (headers to BIOS)");
             json!({ "ok": true })
+        }
+        Request::SetAutostart { enabled } => {
+            #[cfg(windows)]
+            {
+                let r = if enabled {
+                    crate::autostart::install()
+                } else {
+                    crate::autostart::uninstall()
+                };
+                match r {
+                    Ok(()) => {
+                        shared.telemetry.lock().unwrap().event(&format!(
+                            "autostart {} via IPC",
+                            if enabled { "enabled" } else { "disabled" }
+                        ));
+                        json!({
+                            "ok": true,
+                            "autostart": crate::autostart::installed(),
+                            "autostart_conflict": crate::autostart::conflicting_wpf_task(),
+                        })
+                    }
+                    Err(e) => json!({ "ok": false, "error": e.to_string() }),
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = enabled;
+                json!({ "ok": false, "error": "autostart is Windows-only for now" })
+            }
         }
         Request::Shutdown => {
             shared.telemetry.lock().unwrap().event("shutdown requested via IPC");

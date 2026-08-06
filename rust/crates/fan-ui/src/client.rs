@@ -50,6 +50,10 @@ pub struct Inventory {
     pub simulated: bool,
     pub config_path: String,
     pub read_only: bool,
+    /// The daemon's start-with-Windows task is registered.
+    pub autostart: bool,
+    /// The WPF app's task is ALSO registered — both would fight at logon.
+    pub autostart_conflict: bool,
     pub sensors: Vec<SourceItem>,
     pub controls: Vec<SourceItem>,
 }
@@ -81,6 +85,7 @@ pub enum Cmd {
     /// Push edited settings; applied in place so engine state survives.
     Update(Box<Profile>),
     RefreshInventory,
+    SetAutostart(bool),
 }
 
 pub struct Link {
@@ -170,13 +175,16 @@ fn worker(ctx: eframe::egui::Context, state: Arc<Mutex<UiState>>, rx: Receiver<C
                 // A preset rewrites the whole profile daemon-side, so the UI
                 // must re-read it; an edit push is authoritative already.
                 let refetch_profile = matches!(cmd, Cmd::Preset(_));
-                let refresh_inventory = matches!(cmd, Cmd::RefreshInventory);
+                // Autostart changes what the inventory reports, so re-read it.
+                let refresh_inventory =
+                    matches!(cmd, Cmd::RefreshInventory | Cmd::SetAutostart(_));
                 let request = match cmd {
                     Cmd::Preset(name) => json!({"cmd": "preset", "name": name}),
                     Cmd::Apply => json!({"cmd": "apply"}),
                     Cmd::Pause => json!({"cmd": "pause"}),
                     Cmd::Update(profile) => json!({"cmd": "update_profile", "profile": profile}),
                     Cmd::RefreshInventory => json!({"cmd": "inventory"}),
+                    Cmd::SetAutostart(on) => json!({"cmd": "set_autostart", "enabled": on}),
                 };
                 let reply = run_call(&mut conn, &state, request);
                 if refresh_inventory {
@@ -281,6 +289,8 @@ fn apply_inventory_reply(st: &mut UiState, reply: Option<Value>) {
         simulated: r["simulated"].as_bool().unwrap_or(true),
         config_path: r["config_path"].as_str().unwrap_or_default().to_string(),
         read_only: r["read_only"].as_bool().unwrap_or(false),
+        autostart: r["autostart"].as_bool().unwrap_or(false),
+        autostart_conflict: r["autostart_conflict"].as_bool().unwrap_or(false),
         sensors: items("sensors", false),
         controls: items("controls", true),
     };
