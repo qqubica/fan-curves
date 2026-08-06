@@ -229,6 +229,66 @@ impl Profile {
         }
     }
 
+    /// Copy every setting from `src` onto this profile IN PLACE, keeping the
+    /// channel objects themselves. The engine keys its per-channel state
+    /// (filters, kick, probe) off channel indices, so this is what a UI edit
+    /// must use: `FanEngine::replace_profile` would drop the averaging window
+    /// and restart every timer, turning a slider nudge into a measurement
+    /// reset. Extra channels in `src` are ignored; missing ones are left alone.
+    pub fn apply_settings(&mut self, src: &Profile) {
+        self.name = src.name.clone();
+        self.autostart_enabled = src.autostart_enabled;
+        self.minimize_to_tray_on_close = src.minimize_to_tray_on_close;
+        self.instant_apply_enabled = src.instant_apply_enabled;
+        self.telemetry_logging_enabled = src.telemetry_logging_enabled;
+        self.high_priority_enabled = src.high_priority_enabled;
+        self.sensor_history_hours = src.sensor_history_hours;
+        self.idle_kick_enabled = src.idle_kick_enabled;
+        self.idle_kick_stopped_seconds = src.idle_kick_stopped_seconds;
+        self.idle_kick_percent = src.idle_kick_percent;
+        self.idle_kick_seconds = src.idle_kick_seconds;
+        self.stop_probe_enabled = src.stop_probe_enabled;
+        self.stop_probe_run_seconds = src.stop_probe_run_seconds;
+        self.stop_probe_seconds = src.stop_probe_seconds;
+        self.stop_probe_stable_range_c = src.stop_probe_stable_range_c;
+        self.stop_probe_retry_seconds = src.stop_probe_retry_seconds;
+        self.stop_probe_max_temp_c = src.stop_probe_max_temp_c;
+        self.safety_floor_enabled = src.safety_floor_enabled;
+        self.zero_snap_enabled = src.zero_snap_enabled;
+        self.zero_snap_percent = src.zero_snap_percent;
+        for (dst, s) in self.channels.iter_mut().zip(src.channels.iter()) {
+            dst.name = s.name.clone();
+            dst.control_ids = s.control_ids.clone();
+            dst.sensor_ids = s.sensor_ids.clone();
+            dst.enabled = s.enabled;
+            dst.min_percent = s.min_percent;
+            dst.points = s.points.clone();
+            dst.averaging_seconds = s.averaging_seconds;
+            dst.hysteresis_c = s.hysteresis_c;
+            dst.step_down_hold_seconds = s.step_down_hold_seconds;
+            dst.slew_up_percent_per_sec = s.slew_up_percent_per_sec;
+            dst.slew_down_percent_per_sec = s.slew_down_percent_per_sec;
+        }
+    }
+
+    /// A header obeys exactly ONE PWM value, so if two channels claim the same
+    /// id the engine writes both in order and the last silently wins — a fan
+    /// that "won't turn on" with nothing in the UI to explain it. Assigning a
+    /// header to a channel therefore takes it away from every other one.
+    /// Sensors are deliberately NOT exclusive: two channels may read one temp.
+    pub fn assign_control(&mut self, channel: usize, id: &str, assign: bool) {
+        // Drop it everywhere first — that covers unassigning, and makes
+        // assigning a move rather than a duplicate.
+        for ch in &mut self.channels {
+            ch.control_ids.retain(|c| c != id);
+        }
+        if assign {
+            if let Some(ch) = self.channels.get_mut(channel) {
+                ch.control_ids.push(id.to_string());
+            }
+        }
+    }
+
     /// Load `profile.json`, falling back to the default preset on a missing,
     /// corrupted, or channel-less file — same contract as the C# `LoadOrDefault`.
     pub fn load_or_default(path: &Path) -> Self {
@@ -327,6 +387,43 @@ mod tests {
         assert_eq!(p.channels[0].sensor_ids[0], "/amdcpu/0/temperature/2");
         assert_eq!(p.zero_snap_percent, 28.0);
         assert!(p.idle_kick_enabled);
+    }
+
+    #[test]
+    fn assign_control_is_exclusive_across_channels() {
+        let mut p = Profile::mac_book_like();
+        p.channels[0].control_ids = vec!["c0".into(), "c1".into()];
+        p.channels[1].control_ids = vec!["c2".into()];
+        // Giving the case channel a header the CPU channel holds must TAKE it.
+        p.assign_control(1, "c1", true);
+        assert_eq!(p.channels[0].control_ids, vec!["c0"]);
+        assert_eq!(p.channels[1].control_ids, vec!["c2", "c1"]);
+        // Re-assigning the same one is idempotent.
+        p.assign_control(1, "c1", true);
+        assert_eq!(p.channels[1].control_ids, vec!["c2", "c1"]);
+        // Unassigning drops it everywhere.
+        p.assign_control(1, "c1", false);
+        assert!(!p.channels.iter().any(|c| c.control_ids.iter().any(|i| i == "c1")));
+    }
+
+    #[test]
+    fn apply_settings_copies_everything_without_replacing_channels() {
+        let mut live = Profile::mac_book_like();
+        let mut edit = live.clone();
+        edit.zero_snap_percent = 28.0;
+        edit.idle_kick_enabled = true;
+        edit.channels[0].averaging_seconds = 45.0;
+        edit.channels[0].points = vec![CurvePoint::new(30.0, 15.0)];
+        edit.channels[1].sensor_ids = vec!["t9".into()];
+
+        live.apply_settings(&edit);
+
+        assert_eq!(live.zero_snap_percent, 28.0);
+        assert!(live.idle_kick_enabled);
+        assert_eq!(live.channels[0].averaging_seconds, 45.0);
+        assert_eq!(live.channels[0].points, vec![CurvePoint::new(30.0, 15.0)]);
+        assert_eq!(live.channels[1].sensor_ids, vec!["t9"]);
+        assert_eq!(live.channels.len(), 2);
     }
 
     #[test]

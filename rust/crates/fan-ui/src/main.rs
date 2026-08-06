@@ -11,6 +11,7 @@
 
 mod charts;
 mod client;
+mod devpanel;
 
 use eframe::egui::{
     Align2, Button, CentralPanel, Color32, Context, CornerRadius, FontId, Frame, Margin, RichText,
@@ -32,10 +33,15 @@ pub const DIM: Color32 = Color32::from_rgba_premultiplied(140, 140, 140, 140);
 pub const FAINT: Color32 = Color32::from_rgba_premultiplied(90, 90, 90, 90);
 pub const AMBER: Color32 = Color32::from_rgb(0xff, 0x9e, 0x5e);
 
+/// The two fixed window sizes, ported from the WPF app: simple and developer.
+const SIMPLE_SIZE: [f32; 2] = [1010.0, 660.0];
+const DEV_SIZE: [f32; 2] = [1336.0, 830.0];
+
 fn main() -> eframe::Result {
+    let dev = std::env::args().any(|a| a == "--dev");
     let options = eframe::NativeOptions {
         viewport: ViewportBuilder::default()
-            .with_inner_size([1010.0, 660.0])
+            .with_inner_size(if dev { DEV_SIZE } else { SIMPLE_SIZE })
             .with_position([100.0, 100.0])
             .with_resizable(false)
             .with_title("Fan Curves"),
@@ -54,7 +60,14 @@ fn main() -> eframe::Result {
             visuals.panel_fill = CANVAS;
             cc.egui_ctx.set_visuals(visuals);
             let link = client::start(cc.egui_ctx.clone());
-            Ok(Box::new(App { link, selected: 0 }))
+            Ok(Box::new(App {
+                link,
+                selected: 0,
+                dev,
+                draft: None,
+                draft_epoch: 0,
+                push_pending: false,
+            }))
         }),
     )
 }
@@ -62,16 +75,39 @@ fn main() -> eframe::Result {
 struct App {
     link: Link,
     selected: usize,
+    dev: bool,
+    /// The profile the UI edits. Seeded from the daemon and re-seeded whenever
+    /// the daemon's copy is replaced (preset switch, reconnect) — otherwise a
+    /// half-finished local edit would be clobbered every poll.
+    draft: Option<fan_core::Profile>,
+    draft_epoch: u64,
+    push_pending: bool,
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         // Snapshot the shared state; the lock is held only for the copy.
-        let snap: Snapshot = {
+        let (snap, remote_profile, remote_epoch, inventory, version) = {
             let st = self.link.state.lock().unwrap();
-            Snapshot::from(&*st, self.selected)
+            (
+                Snapshot::from(&st, self.selected),
+                st.profile.clone(),
+                st.profile_epoch,
+                st.inventory.clone(),
+                st.daemon_version.clone(),
+            )
         };
         self.selected = snap.selected;
+
+        // Re-seed the draft when the daemon's profile was replaced under us
+        // (first connect, preset switch) — never on an ordinary status poll,
+        // which would fight the user's in-flight edit.
+        if self.draft.is_none() || self.draft_epoch != remote_epoch {
+            if let Some(p) = remote_profile {
+                self.draft = Some(p);
+                self.draft_epoch = remote_epoch;
+            }
+        }
 
         CentralPanel::default()
             .frame(Frame::new().fill(CANVAS).inner_margin(Margin::same(14)))
@@ -81,19 +117,68 @@ impl eframe::App for App {
                 ui.horizontal_top(|ui| {
                     self.left_column(ui, &snap);
                     ui.add_space(12.0);
+
+                    // Developer column, between the hero and the charts.
+                    if self.dev {
+                        let mut edited = devpanel::Edited::default();
+                        if let Some(draft) = self.draft.as_mut() {
+                            // Explicit top-down layout: this sits inside a
+                            // horizontal parent, so the groups would otherwise
+                            // flow side by side instead of stacking.
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(devpanel::PANEL_WIDTH, ui.available_height()),
+                                eframe::egui::Layout::top_down(eframe::egui::Align::Min),
+                                |ui| {
+                                    edited = devpanel::draw(
+                                        ui,
+                                        draft,
+                                        snap.selected,
+                                        &inventory,
+                                        &version,
+                                    );
+                                },
+                            );
+                        }
+                        if edited.any {
+                            // A TUNING edit (response knobs, floor, curve)
+                            // renames the profile "Custom" and clears the
+                            // preset highlight — app-level switches do not.
+                            if edited.tuning {
+                                if let Some(d) = self.draft.as_mut() {
+                                    d.name = "Custom".into();
+                                }
+                            }
+                            self.push_pending = true;
+                        }
+                        ui.add_space(12.0);
+                    }
+
                     ui.vertical(|ui| {
                         let w = ui.available_width();
-                        let curve_h = ui.available_height() - 176.0;
+                        let strip_h = if self.dev { 190.0 } else { 0.0 };
+                        let curve_h = ui.available_height() - strip_h - 16.0;
                         let (rect, _) =
                             ui.allocate_exact_size(Vec2::new(w, curve_h), Sense::hover());
                         charts::draw_curve_chart(ui.painter(), rect, &snap);
-                        ui.add_space(10.0);
-                        let (rect, _) =
-                            ui.allocate_exact_size(Vec2::new(w, 160.0), Sense::hover());
-                        charts::draw_history_strip(ui.painter(), rect, &snap);
+                        // The history strip is developer-only, exactly as in
+                        // the WPF app — simple mode gives the space to the curve.
+                        if self.dev {
+                            ui.add_space(10.0);
+                            let (rect, _) =
+                                ui.allocate_exact_size(Vec2::new(w, strip_h - 10.0), Sense::hover());
+                            charts::draw_history_strip(ui.painter(), rect, &snap);
+                        }
                     });
                 });
             });
+
+        // One push per frame at most, and only when something actually moved.
+        if self.push_pending {
+            if let Some(draft) = &self.draft {
+                let _ = self.link.tx.send(Cmd::Update(Box::new(draft.clone())));
+            }
+            self.push_pending = false;
+        }
     }
 }
 
@@ -103,6 +188,7 @@ pub struct Snapshot {
     pub daemon_version: String,
     pub applying: bool,
     pub read_only: bool,
+    pub simulated: bool,
     pub profile_name: String,
     pub channels: Vec<ChannelStatus>,
     pub curve: Vec<fan_core::CurvePoint>,
@@ -119,6 +205,7 @@ impl Snapshot {
             daemon_version: st.daemon_version.clone(),
             applying: st.applying,
             read_only: st.read_only,
+            simulated: st.inventory.simulated,
             profile_name: st.profile_name.clone(),
             channels: st.channels.clone(),
             curve: st
@@ -153,6 +240,20 @@ impl App {
 
             ui.with_layout(eframe::egui::Layout::right_to_left(eframe::egui::Align::Center), |ui| {
                 let on = snap.connected;
+                // Mode toggle, like the WPF top-bar switch; the window resizes
+                // to the mode's fixed size (the app has no free resizing).
+                if ui
+                    .add(chip_button(if self.dev { "DEVELOPER" } else { "SIMPLE" }))
+                    .on_hover_text("Switch between simple and developer mode")
+                    .clicked()
+                {
+                    self.dev = !self.dev;
+                    let size = if self.dev { DEV_SIZE } else { SIMPLE_SIZE };
+                    ui.ctx().send_viewport_cmd(eframe::egui::ViewportCommand::InnerSize(
+                        Vec2::new(size[0], size[1]),
+                    ));
+                }
+                ui.add_space(10.0);
                 if snap.applying {
                     if ui.add_enabled(on, chip_button("PAUSE · BIOS CONTROL")).clicked() {
                         let _ = self.link.tx.send(Cmd::Pause);
@@ -212,7 +313,12 @@ impl App {
 
             ui.with_layout(eframe::egui::Layout::bottom_up(eframe::egui::Align::LEFT), |ui| {
                 let line = if snap.connected {
-                    format!("daemon v{} · simulation{}", snap.daemon_version, if snap.read_only { " · read-only" } else { "" })
+                    format!(
+                        "daemon v{}{}{}",
+                        snap.daemon_version,
+                        if snap.simulated { " · simulation" } else { "" },
+                        if snap.read_only { " · profile read-only" } else { "" }
+                    )
                 } else {
                     snap.last_error.clone().unwrap_or_else(|| "daemon unreachable".into())
                 };

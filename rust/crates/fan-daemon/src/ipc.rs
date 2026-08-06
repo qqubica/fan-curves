@@ -24,6 +24,7 @@ use interprocess::local_socket::{
 use serde::Deserialize;
 use serde_json::json;
 
+use fan_core::backend::SensorKind;
 use fan_core::{ChannelStatus, FanEngine, HardwareBackend as _, Profile};
 
 use crate::telemetry::TelemetryLog;
@@ -113,6 +114,14 @@ enum Request {
     Status,
     Profile,
     SetProfile { profile: Box<Profile> },
+    /// Apply an edited profile IN PLACE — the settings fingerprint picks the
+    /// change up next tick and instant-applies it, exactly like a slider in
+    /// the WPF app. Unlike `set_profile` this keeps engine state (averaging
+    /// windows, kick/probe clocks) so a knob tweak is not a measurement reset.
+    UpdateProfile { profile: Box<Profile> },
+    /// Everything the SOURCES panel needs: each sensor/control with its live
+    /// reading, so rows can lead with the temp/rpm like the WPF panel does.
+    Inventory,
     Preset { name: String },
     Apply,
     Pause,
@@ -157,6 +166,45 @@ fn respond(line: &str, shared: &Shared) -> serde_json::Value {
             let saved = save_if_allowed(shared, engine.profile());
             shared.telemetry.lock().unwrap().event("profile replaced via IPC");
             json!({ "ok": true, "saved": saved })
+        }
+        Request::UpdateProfile { profile } => {
+            if profile.channels.is_empty() {
+                return json!({ "ok": false, "error": "profile has no channels" });
+            }
+            let mut engine = shared.engine.lock().unwrap();
+            engine.profile_mut().apply_settings(&profile);
+            let saved = save_if_allowed(shared, engine.profile());
+            json!({ "ok": true, "saved": saved })
+        }
+        Request::Inventory => {
+            let engine = shared.engine.lock().unwrap();
+            let hw = engine.backend();
+            let sensors: Vec<_> = hw
+                .sensors()
+                .iter()
+                .map(|s| {
+                    json!({
+                        "id": s.id,
+                        "name": s.name,
+                        "kind": match s.kind { SensorKind::Temp => "temp", SensorKind::Rpm => "rpm" },
+                        "value": hw.read_value(&s.id),
+                    })
+                })
+                .collect();
+            let controls: Vec<_> = hw
+                .controls()
+                .iter()
+                .map(|c| json!({ "id": c.id, "name": c.name, "rpm": hw.read_control_rpm(&c.id) }))
+                .collect();
+            json!({
+                "ok": true,
+                "backend": hw.description(),
+                "simulated": hw.is_simulated(),
+                "config_path": shared.profile_path.to_string_lossy(),
+                "read_only": shared.read_only,
+                "sensors": sensors,
+                "controls": controls,
+            })
         }
         Request::Preset { name } => {
             let preset = match name.as_str() {

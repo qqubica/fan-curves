@@ -32,6 +32,26 @@ pub struct HistorySample {
     pub out: f64,
 }
 
+/// One row of the SOURCES panel.
+#[derive(Clone, Default)]
+pub struct SourceItem {
+    pub id: String,
+    pub name: String,
+    /// Live temperature (sensors) or rpm (controls); None = unreadable.
+    pub value: Option<f64>,
+    pub is_rpm: bool,
+}
+
+#[derive(Clone, Default)]
+pub struct Inventory {
+    pub backend: String,
+    pub simulated: bool,
+    pub config_path: String,
+    pub read_only: bool,
+    pub sensors: Vec<SourceItem>,
+    pub controls: Vec<SourceItem>,
+}
+
 #[derive(Default)]
 pub struct UiState {
     pub connected: bool,
@@ -40,16 +60,25 @@ pub struct UiState {
     pub profile_name: String,
     pub read_only: bool,
     pub channels: Vec<ChannelStatus>,
+    /// The live profile as last seen from the daemon. The UI edits its own
+    /// copy (`App::draft`) and pushes it; this is refreshed on connect, on a
+    /// preset switch, and whenever a push reports back.
     pub profile: Option<Profile>,
+    pub inventory: Inventory,
     pub history: Vec<VecDeque<HistorySample>>,
     pub last_error: Option<String>,
+    /// Bumped whenever `profile` is replaced from the daemon, so the UI knows
+    /// to re-seed its draft instead of clobbering a fresh remote state.
+    pub profile_epoch: u64,
 }
 
-#[derive(Clone, Copy)]
 pub enum Cmd {
     Preset(&'static str),
     Apply,
     Pause,
+    /// Push edited settings; applied in place so engine state survives.
+    Update(Box<Profile>),
+    RefreshInventory,
 }
 
 pub struct Link {
@@ -104,6 +133,7 @@ fn worker(ctx: eframe::egui::Context, state: Arc<Mutex<UiState>>, rx: Receiver<C
                 Ok(mut c) => {
                     let hello = c.call(json!({"cmd": "ping"})).ok();
                     let profile = c.call(json!({"cmd": "profile"})).ok();
+                    let inventory = c.call(json!({"cmd": "inventory"})).ok();
                     let mut st = state.lock().unwrap();
                     st.connected = true;
                     st.last_error = None;
@@ -112,6 +142,7 @@ fn worker(ctx: eframe::egui::Context, state: Arc<Mutex<UiState>>, rx: Receiver<C
                             h["version"].as_str().unwrap_or_default().to_string();
                     }
                     apply_profile_reply(&mut st, profile);
+                    apply_inventory_reply(&mut st, inventory);
                     drop(st);
                     conn = Some(c);
                     ctx.request_repaint();
@@ -134,13 +165,21 @@ fn worker(ctx: eframe::egui::Context, state: Arc<Mutex<UiState>>, rx: Receiver<C
         // The recv timeout is the 1 Hz status pacing; a command wakes us early.
         match rx.recv_timeout(Duration::from_millis(1000)) {
             Ok(cmd) => {
+                // A preset rewrites the whole profile daemon-side, so the UI
+                // must re-read it; an edit push is authoritative already.
+                let refetch_profile = matches!(cmd, Cmd::Preset(_));
+                let refresh_inventory = matches!(cmd, Cmd::RefreshInventory);
                 let request = match cmd {
                     Cmd::Preset(name) => json!({"cmd": "preset", "name": name}),
                     Cmd::Apply => json!({"cmd": "apply"}),
                     Cmd::Pause => json!({"cmd": "pause"}),
+                    Cmd::Update(profile) => json!({"cmd": "update_profile", "profile": profile}),
+                    Cmd::RefreshInventory => json!({"cmd": "inventory"}),
                 };
-                let profile_changed = matches!(cmd, Cmd::Preset(_));
-                if run_call(&mut conn, &state, request).is_some() && profile_changed {
+                let reply = run_call(&mut conn, &state, request);
+                if refresh_inventory {
+                    apply_inventory_reply(&mut state.lock().unwrap(), reply);
+                } else if reply.is_some() && refetch_profile {
                     let reply = run_call(&mut conn, &state, json!({"cmd": "profile"}));
                     apply_profile_reply(&mut state.lock().unwrap(), reply);
                 }
@@ -208,8 +247,36 @@ fn apply_profile_reply(st: &mut UiState, reply: Option<Value>) {
         st.read_only = r["read_only"].as_bool().unwrap_or(false);
         if let Ok(p) = serde_json::from_value::<Profile>(r["profile"].clone()) {
             st.profile = Some(p);
+            st.profile_epoch = st.profile_epoch.wrapping_add(1);
         }
     }
+}
+
+fn apply_inventory_reply(st: &mut UiState, reply: Option<Value>) {
+    let Some(r) = reply else { return };
+    let items = |key: &str, is_rpm: bool| -> Vec<SourceItem> {
+        r[key]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|v| SourceItem {
+                        id: v["id"].as_str().unwrap_or_default().to_string(),
+                        name: v["name"].as_str().unwrap_or_default().to_string(),
+                        value: v[if is_rpm { "rpm" } else { "value" }].as_f64(),
+                        is_rpm: is_rpm || v["kind"].as_str() == Some("rpm"),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    st.inventory = Inventory {
+        backend: r["backend"].as_str().unwrap_or_default().to_string(),
+        simulated: r["simulated"].as_bool().unwrap_or(true),
+        config_path: r["config_path"].as_str().unwrap_or_default().to_string(),
+        read_only: r["read_only"].as_bool().unwrap_or(false),
+        sensors: items("sensors", false),
+        controls: items("controls", true),
+    };
 }
 
 /// Best-effort: start `fan-daemon --sim` from the UI binary's directory.
