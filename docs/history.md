@@ -738,3 +738,39 @@ its window is open (the reason the UI is a separate process that exits).
 Not done: autostart. The Rust daemon has no scheduled task and no tray, so a
 reboot brings the WPF app back through its existing task — the intended safe
 default while the port is still new.
+
+## Rust UI phase 2: developer mode (2026-08-06 night)
+
+Kuba's feedback after the live handover: "the app is not feature complete
+comparing to the .NET version ... e.g. no developer mode". A full inventory of
+the WPF UI was extracted first (simple mode, every dev group with exact ranges
+/ steps / value formats / tooltips, curve-editor interactions, strip drawing
+and scrollback rules, chrome, and the Custom/undo state rules) and used as the
+port spec rather than working from memory — several ranges guessed beforehand
+were wrong (hysteresis is 0-8 not 0-10, ramp up 0.5-20, ramp down 0.5-10,
+step-down hold 0-60).
+
+Landed: all eleven groups in the original order, master-checkbox-as-header,
+45% dim when off but still editable, WPF label text and FormatAvg duration
+wording, the non-linear averaging notch mapping, the sensor-history notch list
+with the RAM estimate, and SOURCES with live per-row readings plus the
+one-header-one-channel exclusivity.
+
+Three supporting pieces were needed underneath. Profile::apply_settings copies
+settings IN PLACE — the existing set_profile path calls FanEngine::replace_
+profile, which clears the filters and would turn every slider nudge into an
+averaging-window reset. Profile::assign_control centralises header exclusivity
+(its first version had the unassign branch inverted; the unit test caught it).
+The daemon grew update_profile and inventory.
+
+Two egui layout lessons worth keeping: a child Ui inside a horizontal parent
+inherits horizontal flow, so the panel column needs an explicit
+allocate_ui_with_layout(top_down) or the groups tile sideways; and
+with_layout(right_to_left) inside a vertical Ui claims ALL remaining height,
+which stretched one group to the full window until the value labels were moved
+into a horizontal row.
+
+Still missing versus the WPF app, in priority order: curve editing (drag/add/
+remove) and undo/redo, why-chip parity in the chart corner, history scrollback
++ hover crosshair with the two-tier spill storage behind it, tray presence and
+the three-size window cycle.

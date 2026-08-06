@@ -91,6 +91,27 @@ the shipping app until the port reaches feature parity.
   lock; `--send <json>` is the built-in client. Service/autostart wiring
   deferred to the hardware-backend phase (autostarting a sim-only daemon is
   pointless).
+- **UI feature parity with the WPF app is TRACKED, not assumed.** Done:
+  simple mode + **developer mode** (`devpanel.rs`, all eleven groups with the
+  WPF labels/ranges/step snapping/value formats/tooltips, master-checkbox
+  headers, 45 % dim when off but still editable, SOURCES with live readings
+  and header exclusivity). **Still missing** (in priority order): curve
+  editing (drag / double-click add / right-click remove) and undo-redo,
+  why-chip parity in the chart corner with the WPF wordings, history
+  scrollback + hover crosshair (needs the two-tier spill storage first), tray
+  presence, and the three-size window cycle. Full inventory of the WPF UI —
+  every control, range and interaction rule — was extracted before porting;
+  work from it rather than from memory (guessed ranges were wrong).
+  - Edits go through **`update_profile`**, never `set_profile`: the latter
+    calls `replace_profile`, which clears the filters and turns a slider nudge
+    into an averaging-window reset.
+  - A **tuning** edit (curve, response knobs, floor value) renames the profile
+    "Custom"; app-level switches and sensor/header assignment do not.
+  - egui gotchas that cost time: a child `Ui` inside a horizontal parent
+    inherits horizontal flow (the panel column needs an explicit
+    `allocate_ui_with_layout(top_down)`), and `with_layout(right_to_left)`
+    inside a vertical `Ui` claims ALL remaining height — put value labels in a
+    `horizontal` row or the group stretches to fill the window.
 - **Phase 3 (done 2026-08-06): egui UI v1** (`crates/fan-ui`) — on-demand
   viewer/controller over the IPC socket: hero average numeral, channel
   selector, readouts + why-chip, staircase chart with amber live overlay,
