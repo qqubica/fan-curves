@@ -23,5 +23,5 @@ pub use engine::{ChannelStatus, FanEngine, OutputReason};
 pub use filter::ResponseFilter;
 pub use kick::IdleKick;
 pub use probe::StopProbe;
-pub use profile::{ChannelConfig, Profile};
+pub use profile::{ChannelConfig, ChannelTuning, Profile, TuningSnapshot};
 pub use sim::SimulatedBackend;

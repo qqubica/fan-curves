@@ -36,6 +36,8 @@ pub const AMBER: Color32 = Color32::from_rgb(0xff, 0x9e, 0x5e);
 /// The two fixed window sizes, ported from the WPF app: simple and developer.
 const SIMPLE_SIZE: [f32; 2] = [1010.0, 660.0];
 const DEV_SIZE: [f32; 2] = [1336.0, 830.0];
+/// Sidebar column width, from the WPF grid (`252 | * | Auto`).
+const SIDEBAR_WIDTH: f32 = 252.0;
 
 fn main() -> eframe::Result {
     let dev = std::env::args().any(|a| a == "--dev");
@@ -67,6 +69,10 @@ fn main() -> eframe::Result {
                 draft: None,
                 draft_epoch: 0,
                 push_pending: false,
+                drag: None,
+                baseline: None,
+                undo: Vec::new(),
+                redo: Vec::new(),
             }))
         }),
     )
@@ -82,7 +88,32 @@ struct App {
     draft: Option<fan_core::Profile>,
     draft_epoch: u64,
     push_pending: bool,
+    /// Index of the curve point being dragged, across frames.
+    drag: Option<usize>,
+    /// Point list as it was when the current gesture started — one drag has to
+    /// produce ONE undo entry, not one per mouse-move.
+    baseline: Option<(usize, Vec<fan_core::CurvePoint>, String)>,
+    undo: Vec<Edit>,
+    redo: Vec<Edit>,
 }
+
+/// Undo covers curve edits AND preset switches — a preset click overwrites
+/// every curve and every response knob, so leaving it unrecoverable was the
+/// thing that made the WPF app add `TuningEdit` in the first place.
+enum Edit {
+    Curve {
+        channel: usize,
+        before: Vec<fan_core::CurvePoint>,
+        after: Vec<fan_core::CurvePoint>,
+        before_name: String,
+    },
+    Tuning {
+        before: fan_core::TuningSnapshot,
+        after: fan_core::TuningSnapshot,
+    },
+}
+
+const UNDO_CAP: usize = 100;
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
@@ -109,40 +140,94 @@ impl eframe::App for App {
             }
         }
 
+        self.handle_shortcuts(ctx);
+
         CentralPanel::default()
             .frame(Frame::new().fill(CANVAS).inner_margin(Margin::same(14)))
             .show(ctx, |ui| {
-                self.top_bar(ui, &snap);
+                // Layout mirrors the WPF grid: sidebar 252 | charts * | dev 300.
+                self.title_bar(ui);
                 ui.add_space(10.0);
                 ui.horizontal_top(|ui| {
-                    self.left_column(ui, &snap);
-                    ui.add_space(12.0);
+                    let full_h = ui.available_height();
 
-                    // Developer column, between the hero and the charts.
+                    // --- sidebar
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(SIDEBAR_WIDTH, full_h),
+                        eframe::egui::Layout::top_down(eframe::egui::Align::Min),
+                        |ui| self.sidebar(ui, &snap),
+                    );
+                    ui.add_space(26.0);
+
+                    // --- dev panel LAST in the row, so reserve its width now
+                    let dev_w = if self.dev { devpanel::PANEL_WIDTH + 26.0 } else { 0.0 };
+                    let charts_w = (ui.available_width() - dev_w).max(200.0);
+
+                    // --- charts column: ONE card holding the channel header,
+                    // the curve, the hint and the history strip (WPF layout).
+                    let inner_w = charts_w - 36.0;
+                    // Allocate the exact region FIRST: a right-to-left layout
+                    // inside the card would otherwise claim the whole row,
+                    // including the space reserved for the dev panel.
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(charts_w, full_h),
+                        eframe::egui::Layout::top_down(eframe::egui::Align::Min),
+                        |ui| {
+                    card_frame().show(ui, |ui| {
+                        ui.set_width(inner_w);
+                        ui.set_height(full_h - 34.0);
+                        let strip_h = if self.dev { 156.0 } else { 0.0 };
+                        let hint_h = if self.dev { 22.0 } else { 0.0 };
+                        let curve_h = (full_h - strip_h - hint_h - 74.0).max(120.0);
+
+                        let snap = self.chart_card(ui, snap, inner_w, curve_h);
+
+                        if self.dev {
+                            ui.add_space(2.0);
+                            ui.label(
+                                RichText::new(
+                                    "Drag points · double-click adds · right-click removes · \
+                                     Ctrl+Z undo, Ctrl+Y redo. Each point starts a flat band.",
+                                )
+                                .font(FontId::proportional(10.0))
+                                .color(FAINT),
+                            );
+                            let (rect, _) =
+                                ui.allocate_exact_size(Vec2::new(inner_w, strip_h), Sense::hover());
+                            charts::draw_history_strip(ui.painter(), rect, &snap);
+                        }
+                    });
+                        },
+                    );
+
+                    // --- developer panel, on the RIGHT like the WPF one, and
+                    // ONE card rather than eleven stacked boxes.
                     if self.dev {
+                        ui.add_space(26.0);
                         let mut edited = devpanel::Edited::default();
                         if let Some(draft) = self.draft.as_mut() {
-                            // Explicit top-down layout: this sits inside a
-                            // horizontal parent, so the groups would otherwise
-                            // flow side by side instead of stacking.
                             ui.allocate_ui_with_layout(
-                                Vec2::new(devpanel::PANEL_WIDTH, ui.available_height()),
+                                Vec2::new(devpanel::PANEL_WIDTH, full_h),
                                 eframe::egui::Layout::top_down(eframe::egui::Align::Min),
                                 |ui| {
-                                    edited = devpanel::draw(
-                                        ui,
-                                        draft,
-                                        snap.selected,
-                                        &inventory,
-                                        &version,
-                                    );
+                                    card_frame().show(ui, |ui| {
+                                        ui.set_width(devpanel::PANEL_WIDTH - 36.0);
+                                        ui.set_height(full_h - 34.0);
+                                        edited = devpanel::draw(
+                                            ui,
+                                            draft,
+                                            self.selected,
+                                            &inventory,
+                                            &version,
+                                        );
+                                    });
                                 },
                             );
                         }
                         if edited.any {
-                            // A TUNING edit (response knobs, floor, curve)
-                            // renames the profile "Custom" and clears the
-                            // preset highlight — app-level switches do not.
+                            // A TUNING edit renames the profile "Custom" and
+                            // clears the preset highlight; app-level switches
+                            // deliberately do not.
                             if edited.tuning {
                                 if let Some(d) = self.draft.as_mut() {
                                     d.name = "Custom".into();
@@ -150,25 +235,7 @@ impl eframe::App for App {
                             }
                             self.push_pending = true;
                         }
-                        ui.add_space(12.0);
                     }
-
-                    ui.vertical(|ui| {
-                        let w = ui.available_width();
-                        let strip_h = if self.dev { 190.0 } else { 0.0 };
-                        let curve_h = ui.available_height() - strip_h - 16.0;
-                        let (rect, _) =
-                            ui.allocate_exact_size(Vec2::new(w, curve_h), Sense::hover());
-                        charts::draw_curve_chart(ui.painter(), rect, &snap);
-                        // The history strip is developer-only, exactly as in
-                        // the WPF app — simple mode gives the space to the curve.
-                        if self.dev {
-                            ui.add_space(10.0);
-                            let (rect, _) =
-                                ui.allocate_exact_size(Vec2::new(w, strip_h - 10.0), Sense::hover());
-                            charts::draw_history_strip(ui.painter(), rect, &snap);
-                        }
-                    });
                 });
             });
 
@@ -195,12 +262,26 @@ pub struct Snapshot {
     pub history: Vec<client::HistorySample>,
     pub last_error: Option<String>,
     pub selected: usize,
+    // Tuning the why-chip quotes back at the user, for the selected channel.
+    pub slew_up: f64,
+    pub slew_down: f64,
+    pub hysteresis_c: f64,
+    pub zero_snap_percent: f64,
+    pub averaging_seconds: f64,
 }
 
 impl Snapshot {
     fn from(st: &UiState, selected: usize) -> Self {
         let selected = if st.channels.is_empty() { 0 } else { selected.min(st.channels.len() - 1) };
+        let ch = st.profile.as_ref().and_then(|p| p.channels.get(selected));
         Self {
+            slew_up: ch.map_or(8.0, |c| c.slew_up_percent_per_sec),
+            slew_down: ch.map_or(8.0, |c| c.slew_down_percent_per_sec),
+            hysteresis_c: ch.map_or(3.0, |c| c.hysteresis_c),
+            averaging_seconds: ch.map_or(20.0, |c| c.averaging_seconds),
+            zero_snap_percent: st.profile.as_ref().map_or(20.0, |p| {
+                if p.zero_snap_enabled { p.zero_snap_percent } else { 0.0 }
+            }),
             connected: st.connected,
             daemon_version: st.daemon_version.clone(),
             applying: st.applying,
@@ -222,29 +303,151 @@ impl Snapshot {
 }
 
 impl App {
-    fn top_bar(&mut self, ui: &mut eframe::egui::Ui, snap: &Snapshot) {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("F A N   C U R V E S").font(FontId::proportional(12.0)).color(DIM));
-            ui.add_space(14.0);
-            // Status chip: the dot is the ONLY amber here, and only when live.
-            let (dot, text) = if !snap.connected {
-                (FAINT, "OFFLINE".to_string())
-            } else if snap.applying {
-                (AMBER, format!("DRIVING · {}", snap.profile_name))
+    /// Mouse editing of the selected channel's curve, plus the undo bookkeeping
+    /// that turns one gesture into one entry.
+    fn edit_curve(
+        &mut self,
+        ui: &eframe::egui::Ui,
+        response: &eframe::egui::Response,
+        rect: eframe::egui::Rect,
+        channel: usize,
+    ) {
+        let Some(draft) = self.draft.as_mut() else { return };
+        let Some(ch) = draft.channels.get_mut(channel) else { return };
+
+        // Remember the pre-gesture state before the first mutation of it.
+        if self.baseline.is_none() {
+            self.baseline = Some((channel, ch.points.clone(), draft.name.clone()));
+        }
+
+        let edit = charts::edit_curve(ui, response, rect, &mut ch.points, &mut self.drag);
+        if edit.changed {
+            self.push_pending = true;
+        }
+        if edit.committed {
+            let after = ch.points.clone();
+            if let Some((base_ch, before, before_name)) = self.baseline.take() {
+                if base_ch == channel && before != after {
+                    // A curve edit renames the profile "Custom" and clears the
+                    // redo branch, exactly like the WPF editor.
+                    draft.name = "Custom".into();
+                    self.undo.push(Edit::Curve { channel, before, after, before_name });
+                    if self.undo.len() > UNDO_CAP {
+                        self.undo.remove(0);
+                    }
+                    self.redo.clear();
+                    self.push_pending = true;
+                }
+            }
+        }
+        // Between gestures the baseline follows the live state.
+        if self.drag.is_none() && !edit.changed {
+            self.baseline = None;
+        }
+    }
+
+    /// Adopt a preset locally (so it is undoable) and tell the daemon.
+    fn adopt_preset(&mut self, name: &'static str) {
+        if let Some(draft) = self.draft.as_mut() {
+            let before = draft.capture_tuning();
+            let preset = if name == "quiet" {
+                fan_core::Profile::mac_book_like()
             } else {
-                (DIM, format!("PAUSED · {}", snap.profile_name))
+                fan_core::Profile::performance()
             };
-            let (rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-            ui.painter().circle_filled(rect.center(), 3.0, dot);
-            ui.label(RichText::new(text).font(FontId::proportional(11.0)).color(TEXT));
+            draft.adopt_tuning(&preset);
+            let after = draft.capture_tuning();
+            // Re-clicking the preset you are already on must push nothing.
+            if before != after {
+                self.undo.push(Edit::Tuning { before, after });
+                if self.undo.len() > UNDO_CAP {
+                    self.undo.remove(0);
+                }
+                self.redo.clear();
+            }
+            self.baseline = None;
+        }
+        let _ = self.link.tx.send(Cmd::Preset(name));
+    }
+
+    /// Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z.
+    fn handle_shortcuts(&mut self, ctx: &Context) {
+        use eframe::egui::{Key, Modifiers};
+        let (undo, redo) = ctx.input(|i| {
+            (
+                i.key_pressed(Key::Z) && i.modifiers.matches_logically(Modifiers::CTRL),
+                (i.key_pressed(Key::Y) && i.modifiers.matches_logically(Modifiers::CTRL))
+                    || (i.key_pressed(Key::Z)
+                        && i.modifiers.matches_logically(Modifiers::CTRL | Modifiers::SHIFT)),
+            )
+        });
+        if undo {
+            self.step_history(true);
+        } else if redo {
+            self.step_history(false);
+        }
+    }
+
+    fn step_history(&mut self, undo: bool) {
+        let Some(draft) = self.draft.as_mut() else { return };
+        let entry = if undo { self.undo.pop() } else { self.redo.pop() };
+        let Some(entry) = entry else { return };
+        let opposite = match entry {
+            Edit::Curve { channel, before, after, before_name } => {
+                let (target, name) = if undo {
+                    (before.clone(), before_name.clone())
+                } else {
+                    (after.clone(), "Custom".to_string())
+                };
+                if let Some(ch) = draft.channels.get_mut(channel) {
+                    ch.points = target;
+                }
+                draft.name = name;
+                self.selected = channel; // make the restore visible
+                Edit::Curve { channel, before, after, before_name }
+            }
+            Edit::Tuning { before, after } => {
+                // Re-capture first, so behaviour-slider edits made AFTER the
+                // preset switch survive the round trip instead of vanishing.
+                let live = draft.capture_tuning();
+                draft.apply_tuning(if undo { &before } else { &after });
+                if undo {
+                    Edit::Tuning { before, after: live }
+                } else {
+                    Edit::Tuning { before: live, after }
+                }
+            }
+        };
+        if undo {
+            self.redo.push(opposite);
+        } else {
+            self.undo.push(opposite);
+        }
+        self.baseline = None;
+        self.push_pending = true;
+    }
+
+    /// Title bar: fan glyph, name, and the mode toggle — the WPF caption row.
+    fn title_bar(&mut self, ui: &mut eframe::egui::Ui) {
+        ui.horizontal(|ui| {
+            // Fan glyph: three blades + hub. It only spins in the WPF app; here
+            // it is static, because the repaint rules forbid a perpetual
+            // animation and this UI paints once per engine tick.
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+            let c = rect.center();
+            for k in 0..3 {
+                let a = std::f32::consts::TAU * (k as f32) / 3.0;
+                let dir = Vec2::new(a.sin(), -a.cos());
+                ui.painter().circle_filled(c + dir * 5.2, 2.6, Color32::from_white_alpha(217));
+            }
+            ui.painter().circle_filled(c, 2.1, Color32::from_white_alpha(217));
+            ui.add_space(6.0);
+            ui.label(RichText::new("Fan Curves").font(FontId::proportional(13.0)).color(TEXT));
 
             ui.with_layout(eframe::egui::Layout::right_to_left(eframe::egui::Align::Center), |ui| {
-                let on = snap.connected;
-                // Mode toggle, like the WPF top-bar switch; the window resizes
-                // to the mode's fixed size (the app has no free resizing).
                 if ui
-                    .add(chip_button(if self.dev { "DEVELOPER" } else { "SIMPLE" }))
-                    .on_hover_text("Switch between simple and developer mode")
+                    .add(chip_button("Developer"))
+                    .on_hover_text("Show the developer panel, the history strip and curve editing")
                     .clicked()
                 {
                     self.dev = !self.dev;
@@ -253,79 +456,282 @@ impl App {
                         Vec2::new(size[0], size[1]),
                     ));
                 }
-                ui.add_space(10.0);
-                if snap.applying {
-                    if ui.add_enabled(on, chip_button("PAUSE · BIOS CONTROL")).clicked() {
-                        let _ = self.link.tx.send(Cmd::Pause);
-                    }
-                } else if ui.add_enabled(on, chip_button("APPLY CURVES")).clicked() {
-                    let _ = self.link.tx.send(Cmd::Apply);
-                }
-                ui.add_space(10.0);
-                if ui.add_enabled(on, chip_button("PERFORMANCE")).clicked() {
-                    let _ = self.link.tx.send(Cmd::Preset("performance"));
-                }
-                if ui.add_enabled(on, chip_button("QUIET · MACBOOK-LIKE")).clicked() {
-                    let _ = self.link.tx.send(Cmd::Preset("quiet"));
-                }
-                ui.label(RichText::new("PRESETS").font(FontId::proportional(10.0)).color(FAINT));
             });
         });
     }
 
-    fn left_column(&mut self, ui: &mut eframe::egui::Ui, snap: &Snapshot) {
-        ui.vertical(|ui| {
-            ui.set_width(230.0);
+    /// Sidebar: hero, status chip, preset cards, pause — the WPF column order.
+    fn sidebar(&mut self, ui: &mut eframe::egui::Ui, snap: &Snapshot) {
+        let ch = snap.channels.get(snap.selected);
 
-            let ch = snap.channels.get(snap.selected);
+        // Hero label: which channel, and the window that actually drives it.
+        let label = match ch {
+            Some(c) => format!("{} · {} AVG", c.name, format_avg(snap.averaging_seconds)),
+            None => "NO CHANNEL".to_string(),
+        };
+        ui.label(
+            RichText::new(label.to_uppercase())
+                .font(FontId::proportional(10.0))
+                .color(FAINT),
+        );
 
-            // Hero numeral: the rolling average — the thing that drives the steps.
-            let avg = ch.map(|c| c.effective_temp).unwrap_or(f64::NAN);
-            let hero = if avg.is_nan() { "--".to_string() } else { format!("{avg:.1}") };
-            ui.label(RichText::new(hero).font(FontId::proportional(64.0)).color(TEXT));
-            ui.label(RichText::new("AVERAGE  °C").font(FontId::proportional(10.0)).color(FAINT));
-            ui.add_space(14.0);
+        // Hero numeral: integer big, fraction small — the rolling average.
+        let avg = ch.map(|c| c.effective_temp).unwrap_or(f64::NAN);
+        let avg = if avg.is_nan() { ch.and_then(|c| c.raw_temp).unwrap_or(f64::NAN) } else { avg };
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            if avg.is_nan() {
+                ui.label(RichText::new("—").font(FontId::proportional(58.0)).color(TEXT));
+            } else {
+                let whole = avg.trunc();
+                let frac = ((avg - whole) * 10.0).round().abs() as i64;
+                ui.label(RichText::new(format!("{whole:.0}")).font(FontId::proportional(58.0)).color(TEXT));
+                ui.label(
+                    RichText::new(format!(".{frac}°"))
+                        .font(FontId::proportional(26.0))
+                        .color(Color32::from_white_alpha(102)),
+                );
+            }
+        });
 
-            for (i, c) in snap.channels.iter().enumerate() {
-                let selected = i == snap.selected;
-                let label = RichText::new(&c.name).font(FontId::proportional(13.0)).color(if selected {
-                    TEXT
-                } else {
-                    DIM
+        // Status chip: pill + dot, the dot amber only while genuinely live.
+        let (dot, text) = if !snap.connected {
+            (FAINT, "Daemon not running".to_string())
+        } else if !snap.applying {
+            (Color32::from_white_alpha(102), "Paused — fans on the BIOS curve".to_string())
+        } else if ch.map_or(true, |c| c.raw_temp.is_none()) {
+            (AMBER, "No temp sensor — assign in Developer mode".to_string())
+        } else if snap.simulated {
+            (AMBER, "Simulation — demo data".to_string())
+        } else {
+            (AMBER, "Curves active".to_string())
+        };
+        ui.add_space(6.0);
+        Frame::new()
+            .fill(Color32::from_white_alpha(10))
+            .stroke(Stroke::new(1.0, Color32::from_white_alpha(20)))
+            .corner_radius(CornerRadius::same(255)) // pill (u8 radius, so max out)
+            .inner_margin(Margin::symmetric(10, 6))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(Vec2::splat(7.0), Sense::hover());
+                    ui.painter().circle_filled(r.center(), 3.5, dot);
+                    ui.label(
+                        RichText::new(text).font(FontId::proportional(11.0)).color(Color32::from_white_alpha(179)),
+                    );
                 });
-                if ui.selectable_label(selected, label).clicked() {
-                    self.selected = i;
-                }
-            }
-            ui.add_space(14.0);
-
-            if let Some(c) = ch {
-                readout(ui, "now", &c.raw_temp.map_or("--".into(), |t| format!("{t:.1} °C")));
-                readout(ui, "fan", &format!("{:.0} %", c.output_percent));
-                readout(ui, "target", &format!("{:.0} %", c.target_percent));
-                readout(ui, "rpm", &c.rpm.map_or("--".into(), |r| format!("{r:.0}")));
-                ui.add_space(10.0);
-                let why = describe(c);
-                if !why.is_empty() {
-                    ui.label(RichText::new(why).font(FontId::proportional(11.0)).color(DIM));
-                }
-            }
-
-            ui.with_layout(eframe::egui::Layout::bottom_up(eframe::egui::Align::LEFT), |ui| {
-                let line = if snap.connected {
-                    format!(
-                        "daemon v{}{}{}",
-                        snap.daemon_version,
-                        if snap.simulated { " · simulation" } else { "" },
-                        if snap.read_only { " · profile read-only" } else { "" }
-                    )
-                } else {
-                    snap.last_error.clone().unwrap_or_else(|| "daemon unreachable".into())
-                };
-                ui.label(RichText::new(line).font(FontId::proportional(10.0)).color(FAINT));
             });
+
+        ui.add_space(32.0);
+        ui.label(RichText::new("P R O F I L E").font(FontId::proportional(10.0)).color(FAINT));
+        ui.add_space(10.0);
+
+        let quiet_on = snap.profile_name == "Quiet (MacBook-like)";
+        let perf_on = snap.profile_name == "Performance";
+        if preset_card(ui, "Quiet", "MacBook-like — silent floor, unhurried ramps", quiet_on) {
+            self.adopt_preset("quiet");
+        }
+        ui.add_space(8.0);
+        if preset_card(ui, "Performance", "Cooling first — earlier, steeper steps", perf_on) {
+            self.adopt_preset("performance");
+        }
+        if !quiet_on && !perf_on {
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new("Custom curve — tuned by hand")
+                    .font(FontId::proportional(11.0))
+                    .color(Color32::from_white_alpha(102)),
+            );
+        }
+
+        ui.add_space(18.0);
+        let pause_label = if snap.applying { "Pause — fans to BIOS" } else { "Resume curves" };
+        let button = Button::new(
+            RichText::new(pause_label)
+                .font(FontId::proportional(12.0))
+                .color(if snap.applying { TEXT } else { Color32::from_rgb(0x0b, 0x0b, 0x0e) }),
+        )
+        .fill(if snap.applying { CARD } else { Color32::from_white_alpha(235) })
+        .stroke(Stroke::new(1.0, HAIRLINE))
+        .corner_radius(CornerRadius::same(6))
+        .min_size(Vec2::new(ui.available_width(), 34.0));
+        if ui.add_enabled(snap.connected, button).clicked() {
+            let _ = self
+                .link
+                .tx
+                .send(if snap.applying { Cmd::Pause } else { Cmd::Apply });
+        }
+
+        // Footer pinned to the bottom of the sidebar.
+        ui.with_layout(eframe::egui::Layout::bottom_up(eframe::egui::Align::LEFT), |ui| {
+            let line = if snap.connected {
+                format!(
+                    "daemon v{}{}{}",
+                    snap.daemon_version,
+                    if snap.simulated { " · simulation" } else { "" },
+                    if snap.read_only { " · profile read-only" } else { "" }
+                )
+            } else {
+                snap.last_error.clone().unwrap_or_else(|| "daemon unreachable".into())
+            };
+            ui.label(RichText::new(line).font(FontId::proportional(10.0)).color(FAINT));
         });
     }
+
+    /// The chart card: channel segments + live detail in the header, then the
+    /// curve editor. Returns the snapshot with any same-frame edit applied.
+    fn chart_card(
+        &mut self,
+        ui: &mut eframe::egui::Ui,
+        snap: Snapshot,
+        width: f32,
+        curve_h: f32,
+    ) -> Snapshot {
+        // Header row: segmented channel control, SIM tag, detail readout.
+        ui.horizontal(|ui| {
+            Frame::new()
+                .fill(Color32::from_white_alpha(10))
+                .stroke(Stroke::new(1.0, Color32::from_white_alpha(18)))
+                .corner_radius(CornerRadius::same(11))
+                .inner_margin(Margin::same(3))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for (i, c) in snap.channels.iter().enumerate() {
+                            let on = i == snap.selected;
+                            let segment = match (c.effective_temp.is_nan(), c.raw_temp) {
+                                (false, _) => format!("{:.0}° · {:.0}%", c.effective_temp, c.output_percent),
+                                (true, Some(r)) => format!("{r:.0}° · {:.0}%", c.output_percent),
+                                _ => "—".to_string(),
+                            };
+                            let button = Button::new(
+                                RichText::new(format!("{}   {}", c.name, segment))
+                                    .font(FontId::proportional(12.0))
+                                    .color(if on { TEXT } else { DIM }),
+                            )
+                            .fill(if on { Color32::from_white_alpha(26) } else { Color32::TRANSPARENT })
+                            .stroke(Stroke::NONE)
+                            .corner_radius(CornerRadius::same(8));
+                            if ui.add(button).clicked() {
+                                self.selected = i;
+                            }
+                        }
+                    });
+                });
+
+            if snap.simulated {
+                ui.add_space(8.0);
+                ui.label(RichText::new("S I M").font(FontId::proportional(9.0)).color(DIM));
+            }
+
+            // Detail line, right-aligned: raw temp (dev), rpm, preview note.
+            ui.with_layout(eframe::egui::Layout::right_to_left(eframe::egui::Align::Center), |ui| {
+                if let Some(c) = snap.channels.get(snap.selected) {
+                    let mut parts: Vec<String> = Vec::new();
+                    if c.raw_temp.is_none() {
+                        parts.push("no temp sensor".into());
+                    } else if self.dev {
+                        parts.push(format!("now {:.1}°", c.raw_temp.unwrap_or(f64::NAN)));
+                    }
+                    if let Some(r) = c.rpm {
+                        parts.push(format!("{r:.0} rpm"));
+                    }
+                    if !c.applied {
+                        parts.push("preview — no fan header".into());
+                    }
+                    ui.label(
+                        RichText::new(parts.join(" · "))
+                            .font(FontId::monospace(11.5))
+                            .color(DIM),
+                    );
+                }
+            });
+        });
+        ui.add_space(4.0);
+
+        // Curve chart — editable in developer mode only.
+        let sense = if self.dev { Sense::click_and_drag() } else { Sense::hover() };
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(width, curve_h), sense);
+        if self.dev {
+            self.edit_curve(ui, &response, rect, snap.selected);
+        }
+        // An edit made this frame must be drawn this frame.
+        let mut snap = snap;
+        if let Some(d) = self.draft.as_ref() {
+            if let Some(c) = d.channels.get(snap.selected) {
+                snap.curve = c.points.clone();
+            }
+        }
+        charts::draw_curve_chart(ui.painter(), rect, &snap);
+        snap
+    }
+}
+
+/// A selectable preset card: title + subtitle, ring when active.
+fn preset_card(ui: &mut eframe::egui::Ui, title: &str, subtitle: &str, on: bool) -> bool {
+    let width = ui.available_width();
+    let response = Frame::new()
+        .fill(if on { Color32::from_white_alpha(16) } else { CARD })
+        .stroke(Stroke::new(1.0, if on { Color32::from_white_alpha(66) } else { HAIRLINE }))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_width(width - 26.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(title)
+                        .font(FontId::proportional(13.0))
+                        .color(if on { TEXT } else { DIM }),
+                );
+                if on {
+                    ui.with_layout(
+                        eframe::egui::Layout::right_to_left(eframe::egui::Align::Center),
+                        |ui| {
+                            // Drawn, not typed: the default font has no U+2713
+                            // and renders it as a tofu box.
+                            let (r, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                            let c = r.center();
+                            let stroke = Stroke::new(1.6, TEXT);
+                            ui.painter().line_segment(
+                                [c + Vec2::new(-4.5, 0.0), c + Vec2::new(-1.0, 3.5)],
+                                stroke,
+                            );
+                            ui.painter().line_segment(
+                                [c + Vec2::new(-1.0, 3.5), c + Vec2::new(5.0, -3.5)],
+                                stroke,
+                            );
+                        },
+                    );
+                }
+            });
+            ui.label(
+                RichText::new(subtitle)
+                    .font(FontId::proportional(11.0))
+                    .color(Color32::from_white_alpha(128)),
+            );
+        })
+        .response;
+    response.interact(Sense::click()).clicked()
+}
+
+/// "45 s" / "2 min" / "1 min 30 s" — the WPF FormatAvg.
+fn format_avg(secs: f64) -> String {
+    let s = secs.round() as i64;
+    if s < 60 {
+        format!("{s} s")
+    } else if s % 60 == 0 {
+        format!("{} min", s / 60)
+    } else {
+        format!("{} min {} s", s / 60, s % 60)
+    }
+}
+
+/// The app's card surface: near-black fill, hairline edge, generous radius.
+fn card_frame() -> Frame {
+    Frame::new()
+        .fill(CARD)
+        .stroke(Stroke::new(1.0, HAIRLINE))
+        .corner_radius(CornerRadius::same(16))
+        .inner_margin(Margin::same(16))
 }
 
 fn chip_button(text: &str) -> Button<'_> {

@@ -94,8 +94,23 @@ fn label_value_row(ui: &mut Ui, label: &str, value: &str) {
     });
 }
 
+/// Letter-spaced micro-label, the panel's header style ("S A F E T Y  F L O O R").
+pub fn tracked(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() * 2);
+    for (i, c) in text.chars().enumerate() {
+        if i > 0 {
+            out.push(if c == ' ' { ' ' } else { '\u{2009}' });
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// A titled group. `switch` makes the header a master checkbox; the body dims
 /// to 45 % when the switch is off but stays interactive.
+///
+/// No frame of its own: the whole panel is ONE card (as in the WPF app), and
+/// per-group boxes would read as eleven stacked panels instead of one.
 fn group<R>(
     ui: &mut Ui,
     title: &str,
@@ -103,42 +118,33 @@ fn group<R>(
     switch: Option<&mut bool>,
     body: impl FnOnce(&mut Ui) -> R,
 ) -> R {
-    let mut changed_header = false;
     let enabled = switch.as_ref().map(|s| **s).unwrap_or(true);
-    Frame::new()
-        .fill(CARD)
-        .stroke(Stroke::new(1.0, HAIRLINE))
-        .corner_radius(CornerRadius::same(5))
-        .inner_margin(Margin::symmetric(10, 8))
-        .outer_margin(Margin { bottom: 8, ..Default::default() })
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            let header = RichText::new(title).font(FontId::proportional(10.0)).color(TEXT);
-            match switch {
-                Some(flag) => {
-                    if ui.add(Checkbox::new(flag, header)).changed() {
-                        changed_header = true;
-                    }
-                }
-                None => {
-                    ui.label(header);
-                }
+    let header = RichText::new(tracked(title))
+        .font(FontId::proportional(9.5))
+        .color(if enabled { TEXT } else { DIM });
+    match switch {
+        Some(flag) => {
+            let r = ui.add(Checkbox::new(flag, header));
+            if !tooltip.is_empty() {
+                r.on_hover_text(tooltip);
             }
-            let _ = tooltip; // per-widget tooltips carry the explanations
-            ui.add_space(4.0);
-            let r = ui
-                .scope(|ui| {
-                    // Dim, don't disable — the WPF rule.
-                    if !enabled {
-                        ui.set_opacity(0.45);
-                    }
-                    body(ui)
-                })
-                .inner;
-            let _ = changed_header;
-            r
+        }
+        None => {
+            ui.label(header);
+        }
+    }
+    ui.add_space(5.0);
+    let out = ui
+        .scope(|ui| {
+            // Dim, don't disable — settings stay reachable with the switch off.
+            if !enabled {
+                ui.set_opacity(0.45);
+            }
+            body(ui)
         })
-        .inner
+        .inner;
+    ui.add_space(14.0);
+    out
 }
 
 /// How a knob's value is written out.
@@ -324,7 +330,7 @@ pub fn draw(
         // ---- INSTANT APPLY (bare header checkbox)
         let mut instant = profile.instant_apply_enabled;
         if ui
-            .add(Checkbox::new(&mut instant, RichText::new("INSTANT APPLY").font(FontId::proportional(10.0)).color(TEXT)))
+            .add(Checkbox::new(&mut instant, RichText::new(tracked("INSTANT APPLY")).font(FontId::proportional(9.5)).color(TEXT)))
             .on_hover_text(
                 "A setting you change here is adopted on the very next tick: no step-down hold to \
                  wait out, no slew glide - the fan jumps to what the new setting asks for. Off, the \
@@ -408,7 +414,7 @@ pub fn draw(
         // ---- app plumbing
         let mut logging = profile.telemetry_logging_enabled;
         if ui
-            .add(Checkbox::new(&mut logging, RichText::new("REVIEW LOGGING").font(FontId::proportional(10.0)).color(TEXT)))
+            .add(Checkbox::new(&mut logging, RichText::new(tracked("REVIEW LOGGING")).font(FontId::proportional(9.5)).color(TEXT)))
             .on_hover_text(
                 "The review log: one CSV row per channel per tick (every controller input and \
                  output, daily file, 7 days kept) plus behavior.txt, which records only the \
@@ -422,7 +428,7 @@ pub fn draw(
         }
         let mut priority = profile.high_priority_enabled;
         if ui
-            .add(Checkbox::new(&mut priority, RichText::new("HIGH PROCESS PRIORITY").font(FontId::proportional(10.0)).color(TEXT)))
+            .add(Checkbox::new(&mut priority, RichText::new(tracked("HIGH PROCESS PRIORITY")).font(FontId::proportional(9.5)).color(TEXT)))
             .on_hover_text(
                 "Run the daemon at High priority so a fully loaded CPU cannot starve the engine \
                  tick. Costs a few % of one core.",

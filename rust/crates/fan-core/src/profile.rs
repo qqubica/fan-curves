@@ -51,6 +51,27 @@ impl Default for ChannelConfig {
     }
 }
 
+/// One channel's share of a [`TuningSnapshot`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChannelTuning {
+    pub points: Vec<CurvePoint>,
+    pub averaging_seconds: f64,
+    pub hysteresis_c: f64,
+    pub step_down_hold_seconds: f64,
+    pub slew_up_percent_per_sec: f64,
+    pub slew_down_percent_per_sec: f64,
+    pub min_percent: f64,
+}
+
+/// A profile's curve + behaviour tuning, detached from the live objects. What
+/// a preset overwrites and what an undo restores are this ONE list, so the two
+/// cannot drift apart.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TuningSnapshot {
+    pub name: String,
+    pub channels: Vec<ChannelTuning>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "PascalCase")]
 pub struct Profile {
@@ -211,14 +232,34 @@ impl Profile {
         }
     }
 
-    /// Copy curve + behaviour tuning from a preset while keeping this profile's
-    /// sensor/header assignments and app-level settings (those describe the
-    /// machine, not the preset) — port of the C# `AdoptTuning`.
-    pub fn adopt_tuning(&mut self, preset: &Profile) {
-        self.name = preset.name.clone();
-        for i in 0..self.channels.len().min(preset.channels.len()) {
-            let src = &preset.channels[i];
-            let dst = &mut self.channels[i];
+    /// Everything a preset switch overwrites, detached from the live objects —
+    /// so an undo can hand the pre-switch state straight back. Sensor/header
+    /// assignments and every app-level switch are deliberately OUTSIDE this:
+    /// they describe the machine, not the tuning.
+    pub fn capture_tuning(&self) -> TuningSnapshot {
+        TuningSnapshot {
+            name: self.name.clone(),
+            channels: self
+                .channels
+                .iter()
+                .map(|c| ChannelTuning {
+                    points: c.points.clone(),
+                    averaging_seconds: c.averaging_seconds,
+                    hysteresis_c: c.hysteresis_c,
+                    step_down_hold_seconds: c.step_down_hold_seconds,
+                    slew_up_percent_per_sec: c.slew_up_percent_per_sec,
+                    slew_down_percent_per_sec: c.slew_down_percent_per_sec,
+                    min_percent: c.min_percent,
+                })
+                .collect(),
+        }
+    }
+
+    /// Restore a [`capture_tuning`] snapshot. Channels are matched by index,
+    /// up to the shorter of the two lists.
+    pub fn apply_tuning(&mut self, snapshot: &TuningSnapshot) {
+        self.name = snapshot.name.clone();
+        for (dst, src) in self.channels.iter_mut().zip(snapshot.channels.iter()) {
             dst.points = src.points.clone();
             dst.averaging_seconds = src.averaging_seconds;
             dst.hysteresis_c = src.hysteresis_c;
@@ -227,6 +268,15 @@ impl Profile {
             dst.slew_down_percent_per_sec = src.slew_down_percent_per_sec;
             dst.min_percent = src.min_percent;
         }
+    }
+
+    /// Copy curve + behaviour tuning from a preset while keeping this profile's
+    /// sensor/header assignments and app-level settings (those describe the
+    /// machine, not the preset) — port of the C# `AdoptTuning`.
+    /// `AdoptTuning(preset)` is `ApplyTuning(preset.CaptureTuning())` — one
+    /// definition of "what a preset overwrites", shared with undo.
+    pub fn adopt_tuning(&mut self, preset: &Profile) {
+        self.apply_tuning(&preset.capture_tuning());
     }
 
     /// Copy every setting from `src` onto this profile IN PLACE, keeping the
@@ -387,6 +437,30 @@ mod tests {
         assert_eq!(p.channels[0].sensor_ids[0], "/amdcpu/0/temperature/2");
         assert_eq!(p.zero_snap_percent, 28.0);
         assert!(p.idle_kick_enabled);
+    }
+
+    #[test]
+    fn tuning_snapshot_round_trips_and_compares_by_value() {
+        let quiet = Profile::mac_book_like();
+        let before = quiet.capture_tuning();
+
+        let mut p = quiet.clone();
+        p.channels[0].sensor_ids = vec!["keep-me".into()];
+        p.adopt_tuning(&Profile::performance());
+        assert_eq!(p.name, "Performance");
+        assert_eq!(p.channels[0].min_percent, 30.0);
+        assert_eq!(p.channels[0].sensor_ids, vec!["keep-me"]); // machine survives
+
+        // Undo: the snapshot restores tuning without touching assignments.
+        p.apply_tuning(&before);
+        assert_eq!(p.name, "Quiet (MacBook-like)");
+        assert_eq!(p.channels[0].averaging_seconds, 90.0);
+        assert_eq!(p.channels[0].points, quiet.channels[0].points);
+        assert_eq!(p.channels[0].sensor_ids, vec!["keep-me"]);
+
+        // Value equality, not reference: a re-captured copy must match, so
+        // re-clicking the preset you are already on pushes no undo entry.
+        assert_eq!(p.capture_tuning(), before);
     }
 
     #[test]
