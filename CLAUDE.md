@@ -143,7 +143,23 @@ the shipping app until the port reaches feature parity.
     reads **0xFF on this board — every channel already "manual" from the
     BIOS**, so the `mode | (1<<i)` step is a no-op here and the restore
     correctly leaves the bit set rather than clearing state the firmware owns.
+  - **The IPC pipe needs an explicit security descriptor** (found 2026-08-06
+    during the first live handover): the daemon runs ELEVATED and the UI is a
+    normal user process, so the default DACL on a high-integrity named pipe
+    locks the UI out entirely ("access denied", UI shows OFFLINE and its
+    auto-spawned sim daemon can't bind either). `ipc::bind` now creates the
+    pipe with `D:(A;;GA;;;IU)` — generic-all for Interactive Users (whoever is
+    logged in at the console; not Everyone, so a service or remote session
+    cannot command the fans).
   - Never run both control loops at once: last writer wins per header.
+  - **Live handover verified 2026-08-06** (Kuba's ask "run it and close the
+    .NET version"): exit.signal stopped the WPF app, the Rust daemon took the
+    same profile and drove the real headers through the full MacBook sequence
+    — 40% → 25 s step-down hold → hysteresis → slew ramp to 20%, both NH-D15
+    fans at ~330/373 rpm, exactly what the C# app produced at the same duty.
+    The daemon has **no autostart and no tray**: after a reboot the scheduled
+    task starts the WPF app again, which is the intended safe default until
+    the port takes over for real.
 - **Phase 5 (done 2026-08-06): Linux hwmon backend** (`fan-core/src/hwmon.rs`)
   — sysfs enumeration, millidegree temps, tach, pwm 0–255 writes with
   `pwmN_enable` saved on first write and restored on release (the SetDefault

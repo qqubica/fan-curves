@@ -709,3 +709,32 @@ bit and rpm settled it in one run:
 Windows backend is now verified end to end (detect, reads, writes, handback).
 Still untested: the daemon actually holding the headers for a sustained period,
 which needs the WPF app stopped first.
+
+### First live handover: the Rust daemon takes the fans (2026-08-06 evening)
+
+Kuba's ask, "run it and close the .NET version". exit.signal stopped the WPF
+app (headers to BIOS), then the Rust daemon started elevated on the real
+backend, loaded the same profile.json, auto-assigned the identical sensors and
+headers, and drove the full MacBook sequence on real hardware: 40% at 64.8 deg
+avg, step-down hold 25 s, hysteresis, slew ramp down to 20%, both NH-D15 fans
+at ~330/373 rpm — the same speeds the C# app produced at the same duty. Real
+telemetry-*.csv and behavior.txt rows written in the shared schema, and
+profile.json was NOT modified (read-only default held).
+
+One real bug surfaced only in this configuration: the elevated daemon's named
+pipe was unreachable from a non-elevated client (access denied), so the UI —
+which is deliberately a normal user process — showed OFFLINE and its
+auto-spawned fallback daemon could not bind either. A high-integrity process's
+default pipe DACL excludes medium-integrity clients. Fixed by creating the
+listener with an explicit descriptor, SDDL D:(A;;GA;;;IU): generic-all for
+Interactive Users, i.e. whoever is logged in at the console, rather than
+Everyone (a fan controller should not take orders from a service account or a
+remote session). After the fix the non-elevated UI connected immediately and
+showed live hardware: 60.7 deg average, 20%, 329 rpm.
+
+Footprint in the live configuration: daemon 6.5 MB working set, UI 105 MB while
+its window is open (the reason the UI is a separate process that exits).
+
+Not done: autostart. The Rust daemon has no scheduled task and no tray, so a
+reboot brings the WPF app back through its existing task — the intended safe
+default while the port is still new.

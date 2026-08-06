@@ -43,9 +43,40 @@ pub struct Shared {
     pub stop: AtomicBool,
 }
 
+/// The daemon runs ELEVATED (Super I/O access needs it) while the UI is a
+/// normal user process, and a named pipe created by a high-integrity process
+/// gets a default DACL a medium-integrity client cannot open — the UI would
+/// see nothing but "access denied". So on Windows the pipe is created with an
+/// explicit descriptor granting the interactive user full access:
+///   D:(A;;GA;;;IU)  — allow, generic-all, Interactive Users
+/// Interactive (rather than Everyone) keeps it to whoever is logged in at the
+/// console; a service account or remote session cannot command the fans.
+#[cfg(windows)]
+fn listener_options<'a>(name: interprocess::local_socket::Name<'a>) -> ListenerOptions<'a> {
+    use interprocess::os::windows::local_socket::ListenerOptionsExt;
+    use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+
+    let opts = ListenerOptions::new().name(name);
+    let sddl = widestring::U16CString::from_str("D:(A;;GA;;;IU)").expect("static SDDL");
+    match SecurityDescriptor::deserialize(&sddl) {
+        Ok(sd) => opts.security_descriptor(sd),
+        // Without it the daemon still runs; only a non-elevated UI is locked out.
+        Err(e) => {
+            eprintln!("could not build the pipe security descriptor ({e}); \
+                       a non-elevated UI will not be able to connect");
+            opts
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn listener_options<'a>(name: interprocess::local_socket::Name<'a>) -> ListenerOptions<'a> {
+    ListenerOptions::new().name(name)
+}
+
 pub fn bind() -> std::io::Result<Listener> {
     let name = SOCKET_NAME.to_ns_name::<GenericNamespaced>()?;
-    ListenerOptions::new().name(name).create_sync()
+    listener_options(name).create_sync()
 }
 
 pub fn serve(listener: Listener, shared: Arc<Shared>) {
