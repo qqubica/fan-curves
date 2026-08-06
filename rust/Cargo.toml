@@ -7,3 +7,13 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/qqubica/fan-curves"
+
+# Minimal-footprint release builds (the port's reason to exist). `panic` stays
+# "unwind" ON PURPOSE: a panicking daemon must still unwind through
+# FanEngine::drop and hand every header back to the BIOS — `panic = "abort"`
+# would freeze the Super I/O at the last written PWM, the one failure mode the
+# C# engine treats as worse than crashing.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

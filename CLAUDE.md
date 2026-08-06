@@ -66,6 +66,21 @@ the shipping app until the port reaches feature parity.
 - Toolchain (installed 2026-08-06): rustup + VS Build Tools via winget. cargo
   is NOT on PATH in this harness's shells — use
   `& "$env:USERPROFILE\.cargo\bin\cargo.exe"` from `rust/`.
+- **Footprint rules** (the port's reason to exist): release profile runs fat
+  LTO + `codegen-units 1` + symbol strip, but `panic` stays **"unwind" on
+  purpose** — a panicking daemon must unwind through `FanEngine::drop` so the
+  headers go back to the BIOS; `panic = "abort"` would freeze the Super I/O at
+  the last written PWM (the failure the C# engine treats as worse than dying).
+  The daemon prints CHANGES ONLY by default (fan ON/OFF, target steps, reason
+  transitions minus pure None↔Ramp flips — behavior.txt vocabulary);
+  `--verbose` restores the per-tick line. No async runtime — one thread and a
+  jittered sleep is the whole scheduler.
+- **UI performance rules for the egui phase**, translated from the WPF render
+  rules ahead of time so they bind when the UI is built: repaint via
+  `request_repaint()` once per engine tick only (egui otherwise repaints on
+  input); any perpetual animation (the fan glyph) capped at ≤ 20 fps; while
+  hidden/minimized feed histories only, paint nothing; the UI is a separate
+  process that fully exits on close — the daemon is the only resident part.
 
 ## Layout
 

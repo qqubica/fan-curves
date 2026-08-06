@@ -22,22 +22,26 @@ use fan_core::{ChannelStatus, FanEngine, HardwareBackend, OutputReason, Profile,
 struct Args {
     sim: bool,
     apply: bool,
+    verbose: bool,
     ticks: Option<u64>,
     profile: Option<PathBuf>,
 }
 
 fn parse_args() -> Args {
-    let mut args = Args { sim: false, apply: true, ticks: None, profile: None };
+    let mut args = Args { sim: false, apply: true, verbose: false, ticks: None, profile: None };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--sim" => args.sim = true,
             "--no-apply" => args.apply = false,
+            "--verbose" => args.verbose = true,
             "--ticks" => args.ticks = it.next().and_then(|v| v.parse().ok()),
             "--profile" => args.profile = it.next().map(PathBuf::from),
             other => {
                 eprintln!("unknown argument: {other}");
-                eprintln!("usage: fan-daemon [--sim] [--no-apply] [--ticks N] [--profile path]");
+                eprintln!(
+                    "usage: fan-daemon [--sim] [--no-apply] [--verbose] [--ticks N] [--profile path]"
+                );
                 std::process::exit(2);
             }
         }
@@ -155,6 +159,83 @@ fn auto_assign<B: HardwareBackend>(profile: &mut Profile, hw: &B) -> bool {
     changed
 }
 
+/// Last tick's state per channel, for change-only output — a daemon must not
+/// spend steady-state work narrating "nothing happened" every second (same
+/// philosophy as the WPF app's behavior log: CHANGES only).
+struct Prev {
+    applied: bool,
+    on: bool,
+    target: f64,
+    reason: OutputReason,
+}
+
+fn is_ramp(r: OutputReason) -> bool {
+    matches!(r, OutputReason::RampUp | OutputReason::RampDown)
+}
+
+/// None↔Ramp transitions are implied by the target line that precedes every
+/// ramp — logging them too is noise (mirrors the C# IsPureRampFlip rule).
+fn is_pure_ramp_flip(a: OutputReason, b: OutputReason) -> bool {
+    (a == OutputReason::None && is_ramp(b)) || (is_ramp(a) && b == OutputReason::None)
+}
+
+/// The moment's vitals, appended to every change line.
+fn context(s: &ChannelStatus) -> String {
+    let mut out = format!("out {:.0}%", s.output_percent);
+    if !s.effective_temp.is_nan() {
+        out.push_str(&format!(" · avg {:.1}°", s.effective_temp));
+    }
+    if let Some(raw) = s.raw_temp {
+        out.push_str(&format!(" · now {raw:.1}°"));
+    }
+    out
+}
+
+fn log_transitions(now: f64, s: &ChannelStatus, prev: Option<&Prev>) {
+    let Some(p) = prev else {
+        println!(
+            "[{now:8.1}s] {:<12} {} — {}",
+            s.name,
+            if s.applied { "driving" } else { "monitoring (not applying)" },
+            context(s)
+        );
+        return;
+    };
+    if s.applied != p.applied {
+        println!(
+            "[{now:8.1}s] {:<12} {} — {}",
+            s.name,
+            if s.applied { "now driving" } else { "released to BIOS" },
+            context(s)
+        );
+    }
+    let on = s.output_percent > 0.01;
+    if on != p.on {
+        println!(
+            "[{now:8.1}s] {:<12} fan {} — {}",
+            s.name,
+            if on { "ON" } else { "OFF" },
+            context(s)
+        );
+    }
+    if (s.target_percent - p.target).abs() > 0.5 {
+        let why = describe(s);
+        println!(
+            "[{now:8.1}s] {:<12} target {:.0}% → {:.0}%{} — {}",
+            s.name,
+            p.target,
+            s.target_percent,
+            if why.is_empty() { String::new() } else { format!(" [{why}]") },
+            context(s)
+        );
+    }
+    if s.reason != p.reason && !is_pure_ramp_flip(p.reason, s.reason) {
+        let why = describe(s);
+        let why = if why.is_empty() { "steady on the curve".to_string() } else { why };
+        println!("[{now:8.1}s] {:<12} → {why} — {}", s.name, context(s));
+    }
+}
+
 /// Same vocabulary as the why-chip / behavior log.
 fn describe(s: &ChannelStatus) -> String {
     match s.reason {
@@ -218,26 +299,40 @@ fn main() {
     let start = Instant::now();
     let mut ticks = 0u64;
 
+    let mut prev: Vec<Option<Prev>> = Vec::new();
     while !stop.load(Ordering::SeqCst) {
         let now = start.elapsed().as_secs_f64();
         let statuses = engine.tick(now);
 
-        let line = statuses
-            .iter()
-            .map(|s| {
-                let why = describe(s);
-                format!(
-                    "{}: now {} avg {} → {:>3.0}%{}",
-                    s.name,
-                    s.raw_temp.map_or("--".into(), |t| format!("{t:.1}°")),
-                    if s.effective_temp.is_nan() { "--".into() } else { format!("{:.1}°", s.effective_temp) },
-                    s.output_percent,
-                    if why.is_empty() { String::new() } else { format!(" ({why})") },
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("  |  ");
-        println!("[{now:8.1}s] {line}");
+        if args.verbose {
+            let line = statuses
+                .iter()
+                .map(|s| {
+                    let why = describe(s);
+                    format!(
+                        "{}: now {} avg {} → {:>3.0}%{}",
+                        s.name,
+                        s.raw_temp.map_or("--".into(), |t| format!("{t:.1}°")),
+                        if s.effective_temp.is_nan() { "--".into() } else { format!("{:.1}°", s.effective_temp) },
+                        s.output_percent,
+                        if why.is_empty() { String::new() } else { format!(" ({why})") },
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("  |  ");
+            println!("[{now:8.1}s] {line}");
+        } else {
+            prev.resize_with(statuses.len(), || None);
+            for (s, p) in statuses.iter().zip(prev.iter_mut()) {
+                log_transitions(now, s, p.as_ref());
+                *p = Some(Prev {
+                    applied: s.applied,
+                    on: s.output_percent > 0.01,
+                    target: s.target_percent,
+                    reason: s.reason,
+                });
+            }
+        }
 
         ticks += 1;
         if let Some(limit) = args.ticks {

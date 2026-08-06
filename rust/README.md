@@ -15,8 +15,12 @@ on-demand UI split across Windows and Linux.
   tests replay any timeline deterministically.
 - `crates/fan-daemon` — headless engine loop: jittered ~1 s tick, profile
   loading/auto-assign, clean handback of every header to the BIOS on exit
-  (engine `Drop`) and Ctrl+C. Flags: `--sim`, `--ticks N`, `--profile <path>`,
-  `--no-apply`. Only the simulated backend exists so far.
+  (engine `Drop`) and Ctrl+C. Prints output CHANGES only (fan on/off, target
+  steps, reason transitions); `--verbose` adds a line per tick. Flags: `--sim`,
+  `--ticks N`, `--profile <path>`, `--no-apply`, `--verbose`. Only the
+  simulated backend exists so far. Release builds use fat LTO + stripped
+  symbols; panic stays `unwind` so a panic still returns the headers to the
+  BIOS through `Drop`.
 - `parity-harness` — C# console app referencing the real `FanCurves.Core`; it
   generates golden per-tick traces into `crates/fan-core/tests/golden/`.
 
