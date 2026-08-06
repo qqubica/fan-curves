@@ -895,3 +895,32 @@ NaN surviving quantization as a gap rather than becoming a real reading.
 Remaining and deliberately NOT done: a tray icon with close-to-tray (residency
 belongs to the daemon in this architecture, so the tray has no job — the window
 is disposable), and custom borderless chrome (cosmetic).
+
+## Rust port: tray launcher (2026-08-07)
+
+Kuba asked for "a tray purely as a launcher", which is the right shape for this
+architecture: the daemon is resident and the UI is disposable, so there is
+nothing to minimise INTO the tray — it is a place for the app to live in the
+notification area and a way to open the window.
+
+Own process, and NON-ELEVATED deliberately. The daemon holds administrator for
+Super I/O access, and any process it spawned would inherit that token — the UI
+would silently run as admin, which also defeats the point of the pipe DACL work
+that lets a normal-privilege UI talk to the elevated daemon. A separate normal
+process launches a normal UI.
+
+Hand-rolled Shell_NotifyIcon over windows-sys instead of a tray crate, keeping
+it at 313 KB / ~10 MB: message-only window, WM_APP callback, popup menu,
+5 s tooltip refresh reusing the same temps-to-percent wording as the WPF tray.
+Double-click opens the UI; the menu offers open, pause/resume straight over
+IPC, and close-tray — which explicitly does NOT stop the daemon, so closing it
+never touches the fans.
+
+The icon rasteriser moved from fan-ui into fan-core so the window icon and the
+tray icon come from one definition rather than two copies of the same geometry.
+
+Verification note: the process runs and Shell_NotifyIcon accepted the icon (it
+exits with an error otherwise), but Windows 11 files new tray icons into the
+overflow flyout, and a scripted click on the chevron did not land — so the icon
+was not visually confirmed in the notification area. Drag it out of the
+overflow to pin it.

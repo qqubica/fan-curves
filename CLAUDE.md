@@ -110,9 +110,17 @@ the shipping app until the port reaches feature parity.
   anchors on ABSOLUTE indices so incoming ticks never move a scrolled window
   and CLEAR strands an anchor harmlessly; wheel ≈1 min/notch, 10× with Shift,
   drag with a fractional remainder, double-click / LIVE back to now).
-  **Still missing, both deliberate**: no tray / close-to-tray (residency
-  belongs to the DAEMON here, so the tray has no job — the window is
-  disposable), and custom borderless chrome (cosmetic).
+- **Tray = launcher only** (`crates/fan-tray`, Windows): the daemon is the
+  resident part and the UI is disposable, so there is nothing to minimise INTO
+  the tray. Runs **non-elevated on purpose** — the daemon has admin, and
+  anything IT spawned would inherit that token and silently run the UI
+  elevated. Hand-rolled `Shell_NotifyIcon` over `windows-sys` (313 KB, ~10 MB).
+  Double-click opens the UI; menu = open / pause-resume over IPC / close tray,
+  and closing the tray does NOT stop the daemon. Icon comes from
+  `fan_core::icon` so tray and window cannot drift.
+  Windows 11 files new tray icons into the overflow flyout — drag it onto the
+  taskbar to pin it.
+  **Still missing, deliberate**: custom borderless chrome (cosmetic).
 - **Autostart** (`fan-daemon/src/autostart.rs`): Task Scheduler logon task
   `FanCurvesDaemon`, `/RL HIGHEST` (a Run key cannot elevate, and the daemon
   needs admin) — its own name so it and the WPF app's `FanCurves` task can be
