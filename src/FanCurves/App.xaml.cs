@@ -155,9 +155,7 @@ public partial class App : Application
         var healTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
         healTimer.Tick += (_, _) =>
         {
-            bool powerAvailable = hw.Sensors.Any(s => s.Kind == "power");
-            if (profile.Channels.All(c => c.SensorIds.Count > 0 &&
-                    (!powerAvailable || c.PowerSensorIds.Count > 0))) { healTimer.Stop(); return; }
+            if (profile.Channels.All(c => c.SensorIds.Count > 0)) { healTimer.Stop(); return; }
             AssignEmptyChannels(profile, hw);
         };
         healTimer.Start();
@@ -235,7 +233,6 @@ public partial class App : Application
             // Drop sensors this backend doesn't know or that read garbage right now
             // (unknown IDs read null), so a bad pick heals on the next launch.
             changed |= ch.SensorIds.RemoveAll(id => !Plausible(hw.ReadValue(id))) > 0;
-            changed |= ch.PowerSensorIds.RemoveAll(id => !PlausibleWatts(hw.ReadValue(id))) > 0;
             changed |= ch.ControlIds.RemoveAll(id => !knownControls.Contains(id)) > 0;
 
             if (ch.ControlIds.Count == 0)
@@ -261,22 +258,6 @@ public partial class App : Application
     // "invalid") under names like "CPU" — never trust a sensor by name alone.
     private static bool Plausible(double? v) => v is > 5 and < 115;
 
-    // Package power can read 0 W for the first update cycles (like Tctl) — the heal
-    // timer keeps retrying until a real draw shows up.
-    private static bool PlausibleWatts(double? v) => v is > 0.5 and < 2000;
-
-    // The CPU package sensor is "Package" (AMD) / "CPU Package" (Intel); graphics
-    // cards report "GPU Package"/"GPU Power". Matching the GPU marker first keeps
-    // a bare "Package" needle from grabbing the graphics card.
-    private static string? FindPowerSensor(IHardwareBackend hw, bool gpu)
-    {
-        var candidates = hw.Sensors.Where(s => s.Kind == "power" &&
-            s.Name.Contains("GPU", StringComparison.OrdinalIgnoreCase) == gpu &&
-            PlausibleWatts(hw.ReadValue(s.Id))).ToList();
-        return (candidates.FirstOrDefault(s => s.Name.Contains("Package", StringComparison.OrdinalIgnoreCase))
-            ?? candidates.FirstOrDefault())?.Id;
-    }
-
     // Needle order is a preference ranking: the real CPU die sensor first
     // (AMD "Tctl", Intel "CPU Package"), generic "CPU"-named ones last.
     private static string? FindSensor(IHardwareBackend hw, params string[] needles)
@@ -300,8 +281,6 @@ public partial class App : Application
     {
         string? cpuTemp = FindSensor(hw, "Tctl", "CPU Package", "CPU");
         string? gpuTemp = FindSensor(hw, "GPU Core", "GPU Hot Spot", "GPU");
-        string? cpuPower = FindPowerSensor(hw, gpu: false);
-        string? gpuPower = FindPowerSensor(hw, gpu: true);
         bool changed = false;
 
         foreach (var ch in profile.Channels.Where(c => c.SensorIds.Count == 0))
@@ -311,16 +290,6 @@ public partial class App : Application
             if (cpuTemp != null) ids.Add(cpuTemp);
             if (!isCpu && gpuTemp != null && !ids.Contains(gpuTemp)) ids.Add(gpuTemp);
             if (ids.Count > 0) { ch.SensorIds = ids; changed = true; }
-        }
-        // CPU channel budgets on package power; the case channel on the whole
-        // system's draw (CPU + GPU) — that is the heat its fans must exhaust.
-        foreach (var ch in profile.Channels.Where(c => c.PowerSensorIds.Count == 0))
-        {
-            bool isCpu = ch.Name.Contains("CPU", StringComparison.OrdinalIgnoreCase);
-            var ids = new List<string>();
-            if (cpuPower != null) ids.Add(cpuPower);
-            if (!isCpu && gpuPower != null && !ids.Contains(gpuPower)) ids.Add(gpuPower);
-            if (ids.Count > 0) { ch.PowerSensorIds = ids; changed = true; }
         }
         if (changed) profile.Save();
     }

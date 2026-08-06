@@ -4,10 +4,9 @@ namespace FanCurves.Core;
 /// Deterministic-ish fake PC with real thermodynamics: the CPU heatsink integrates
 /// package watts through a fan-dependent cooling resistance (so written PWM actually
 /// changes the temperature), the die rides a power-proportional delta above the sink,
-/// power sensors report the draw, and fans' RPM follows the written PWM with lag.
-/// Spikes (browser tab, compile burst) and sustained loads (game/AI) come and go.
-/// Lets the whole app — curve editing, engine, thermal-budget control, visualization —
-/// run honestly on a machine with no controllable fans.
+/// and fans' RPM follows the written PWM with lag. Spikes (browser tab, compile burst)
+/// and sustained loads (game/AI) come and go. Lets the whole app — curve editing,
+/// engine, visualization — run honestly on a machine with no controllable fans.
 /// </summary>
 public class SimulatedBackend : IHardwareBackend
 {
@@ -27,8 +26,6 @@ public class SimulatedBackend : IHardwareBackend
         new("sim/cpu", "CPU (Tctl/Tdie)", "temp"),
         new("sim/gpu", "GPU core", "temp"),
         new("sim/mb",  "Motherboard", "temp"),
-        new("sim/cpu-pwr", "CPU Package", "power"),
-        new("sim/gpu-pwr", "GPU Package", "power"),
     };
 
     public IReadOnlyList<HwControl> Controls { get; } = new List<HwControl>
@@ -88,8 +85,6 @@ public class SimulatedBackend : IHardwareBackend
         "sim/cpu" => _cpu,
         "sim/gpu" => _gpu,
         "sim/mb" => _mb,
-        "sim/cpu-pwr" => _pCpu,
-        "sim/gpu-pwr" => _pGpu,
         _ => null,
     };
 

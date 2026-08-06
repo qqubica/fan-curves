@@ -6,11 +6,11 @@ using System.Windows.Media;
 namespace FanCurves;
 
 /// <summary>
-/// Scroll state shared by the two strips so they pan through the day as ONE timeline.
+/// Scroll state of the history strip, panning through the day as one timeline.
 /// Live (no anchor) the window follows the newest samples straight from the in-memory
 /// ring; scrolled back, the window is anchored to absolute sample indices and served
 /// from the channel's spill file through a one-window cache (so hover redraws don't
-/// re-read the disk). Owned by MainWindow; both strips point at the same instance.
+/// re-read the disk). Owned by MainWindow.
 /// </summary>
 public class HistoryViewport
 {
@@ -105,13 +105,12 @@ public class HistoryViewport
 }
 
 /// <summary>
-/// Shared skeleton of the rolling strips under the curve chart (thermal history and
-/// thermal budget): identical padding to <see cref="CurveEditor"/> so every plot lines
-/// up vertically, the letter-spaced strip title, the legend, the shared time axis
-/// (wall-clock ticks; the right edge reads "now" while live, the window-end time while
-/// scrolled) and the hover crosshair. Scrolling — mouse wheel (Shift = 10×), drag, and
-/// double-click back to live — goes through the shared <see cref="HistoryViewport"/>.
-/// Subclasses add their own scales, traces and hover chip.
+/// Skeleton of the rolling history strip under the curve chart: identical padding to
+/// <see cref="CurveEditor"/> so the plots line up vertically, the letter-spaced strip
+/// title, the legend, the time axis (wall-clock ticks; the right edge reads "now"
+/// while live, the window-end time while scrolled) and the hover crosshair. Scrolling
+/// — mouse wheel (Shift = 10×), drag, and double-click back to live — goes through
+/// the <see cref="HistoryViewport"/>. The subclass adds its scales, traces and chip.
 /// </summary>
 public abstract class StripChart : FrameworkElement
 {
@@ -146,7 +145,6 @@ public abstract class StripChart : FrameworkElement
     protected static readonly Pen LegendDashPen = Paint.WhitePen(0x66, 1, Paint.Dash);
     protected static readonly Pen FaintDashPen = Paint.WhitePen(0x40, 1, Paint.Dash);
     protected static readonly Pen BrightPen = Paint.WhitePen(0xf0, 2, rounded: true);
-    protected static readonly Pen DottedRefPen = Paint.WhitePen(0x2e, 1, Paint.Dots);
 
     private HistoryViewport? _viewport;
 
@@ -299,14 +297,6 @@ public abstract class StripChart : FrameworkElement
         }
         geo.Freeze();
         dc.DrawGeometry(brush, null, geo);
-    }
-
-    /// <summary>Text seated on the card colour, so a reference label stays readable
-    /// where a trace or a dashed line runs underneath it.</summary>
-    protected void DrawSeatedText(DrawingContext dc, FormattedText t, Point at)
-    {
-        dc.DrawRectangle(CardBrush, null, new Rect(at.X - 2, at.Y, t.Width + 4, t.Height));
-        dc.DrawText(t, at);
     }
 
     /// <summary>Sample index under the cursor, or null when the pointer is off the trace.</summary>

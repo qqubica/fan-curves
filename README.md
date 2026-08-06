@@ -37,52 +37,6 @@ FanCurves does the same for a desktop:
 - **Stopped-fan kick** (optional, off by default): periodically spins stopped
   fans for a few seconds to keep bearings moving.
 
-## Thermal-budget control (power, not temperature)
-
-On channels with a power sensor (CPU package power is auto-assigned), FanCurves
-goes one step further than averaging temperature — it controls from **power
-draw** and treats the heatsink's thermal mass as a spendable credit:
-
-- **Power averaged over a minute** is the true measure of how much heat the
-  cooler must ultimately move; temperature is just where that heat happens to
-  be right now.
-- The app **learns your cooler's thermal mass** C (J/°C), its cooling
-  resistance at each fan speed, and its idle baseline — continuously, from
-  normal use, persisted in the profile. Knowing C it knows the energy credit
-  left before the die gets hot: `E = C · (T_ceiling − T_now)`.
-- **A short burst (a 30 s compile) never moves the fan** — its joules soak into
-  heatsink metal, and the credit comfortably covers them.
-- The fan **ramps only when the prediction says the buffer is running low**
-  (default: under 45 s of headroom left), and it steps straight to the curve
-  level whose equilibrium temperature sits back under the ceiling.
-- After the load ends the power average collapses within a minute, so fans
-  **step back down minutes earlier** than any temperature average would allow.
-- **Fuse — silence never at the price of throttling**: a parallel hard override
-  watches the raw die temperature every tick. At the override threshold
-  (default 90 °C) the channel's own temperature curve takes over *instantly*,
-  with no slew limiting, and keeps the floor until the die cools off. A wrong
-  or still-learning model can cost you some silence, never your CPU.
-
-The temperature staircase you edit stays meaningful: it supplies the ladder of
-allowed fan speeds and the fallback curve for the override. Power control can
-be turned off per app (Developer mode), and channels without a power sensor
-simply keep the temperature behaviour above.
-
-### Control modes
-
-The Developer panel's CONTROL MODE switch picks how the two sides combine:
-
-- **Temp** — classic temperature-only staircase control.
-- **Power** — the thermal-budget controller above drives power-sensing channels.
-- **Auto** (default) — both run at once and the higher demand wins: the
-  temperature staircase is a guaranteed floor, the power side may ramp earlier.
-- **Curve** — a second, fully deterministic staircase you draw in **watts**:
-  the sustained power average picks the step directly, run through the same
-  averaging/hysteresis/hold/slew filter as the temperature side — no predictive
-  layer, what you draw is what runs. The temperature curve stays as a safety
-  floor and the fuse still applies. Flip the chart between the two staircases
-  with the CURVE °C/W toggle above it; both are editable the same way.
-
 ## Download & run
 
 Grab the latest zip from [Releases](../../releases), unzip anywhere, run
@@ -110,21 +64,14 @@ the BIOS.
   takes the switch back (Ctrl+Y reapplies it).
 - **Developer** (top-bar toggle or `--dev`): edit curve points by dragging
   (double-click to add, right-click to remove, Ctrl+Z/Y undo/redo), tune the
-  averaging window / hysteresis / hold / slew per channel, configure
-  thermal-budget control down to its internals (power averaging, ramp lead,
-  override temperature, buffer ceiling, sustained aim, trend / warming-rate /
-  live-draw windows, fuse release — with live readouts of draw, buffer,
-  predicted headroom and the learned cooler model, which you can freeze or
-  reset), assign temperature /
-  power sensors and headers manually, and watch two 10-minute strips: thermal
-  history (average temp, raw temp, commanded fan %, the budget ceiling, and a
-  marker for every fan stop/start) and the thermal budget itself — power draw
-  and its sustained average against the predicted headroom and the ramp-lead
-  threshold that triggers a step up, with any fuse periods shaded. The strips
-  scroll back through the last ~24 h (scroll wheel — hold Shift for 10× — or
-  drag; double-click or the LIVE button returns to now) without holding the day
-  in RAM: older samples spill to a temp file that disappears with the app, and
-  the time axis and hover chips show the wall-clock time of each measurement.
+  averaging window / hysteresis / hold / slew per channel, assign temperature
+  sensors and fan headers manually, and watch a 10-minute history strip —
+  average temp, raw temp, commanded fan %, and a marker for every fan
+  stop/start. The strip scrolls back through the last ~24 h (scroll wheel —
+  hold Shift for 10× — or drag; double-click or the LIVE button returns to
+  now) without holding the day in RAM: older samples spill to a temp file that
+  disappears with the app, and the time axis and hover chips show the
+  wall-clock time of each measurement.
 
 ![FanCurves — developer mode](docs/screenshot-dev.png)
 

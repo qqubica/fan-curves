@@ -6,29 +6,19 @@ using System.Windows.Media;
 namespace FanCurves;
 
 /// <summary>
-/// One engine tick's worth of a channel's state, stamped with the wall-clock time of the
-/// measurement. The temperature/output fields feed the history strip; the rest is
-/// thermal-budget telemetry for the budget strip (defaults apply on channels the budget
-/// controller does not drive).
+/// One engine tick's worth of a channel's state, stamped with the wall-clock time of
+/// the measurement — the history strip's sample.
 /// </summary>
 public readonly record struct HistorySample(
     DateTime Time,                  // wall clock at the tick — chips and the axis print it
     double? RawTemp,
     double EffectiveTemp,
-    double OutputPercent,
-    double? Watts = null,           // instantaneous channel draw
-    double? WattsAvg = null,        // sustained average — the demand signal
-    double BudgetJoules = 0,        // energy credit left before the ceiling
-    double TauSeconds = double.PositiveInfinity, // predicted headroom
-    double DemandLevel = 0,         // ladder level the power average asks for
-    double CeilingC = 0,            // budget ceiling in force
-    double AimC = 0,                // sustained aim in force — headroom is measured to it
-    bool Override = false);         // fuse latched (raw die at/over the override temp)
+    double OutputPercent);
 
 /// <summary>
 /// Two-tier per-channel history: a fixed ring of the last <see cref="Capacity"/> samples
 /// (one strip window, ~10 min at the engine's jittered ~1 s tick) in memory, plus a
-/// binary spill file in the temp directory holding ~24 h so the strips can scroll back
+/// binary spill file in the temp directory holding ~24 h so the strip can scroll back
 /// without keeping the day in RAM. The file is opened with DeleteOnClose, so it
 /// disappears with the process even on a crash; if it cannot be opened (or a write
 /// fails) the history quietly degrades to the RAM-only ring.
@@ -38,16 +28,14 @@ public class ChannelHistory : IDisposable
     public const int Capacity = 600;
 
     // Records are quantized integers, not doubles — the signals carry nowhere near
-    // double precision and the strips display even less: temps/watts/percent in
-    // tenths (int16), headroom in whole seconds (uint16, 0xFFFF = ∞), joules whole
-    // (int32), time in whole seconds since Epoch (uint32; the ring keeps the exact
-    // DateTime for the live window). 26 B/record ≈ 2.2 MB per channel per day.
-    private const int RecordSize = 26;
+    // double precision and the strip displays even less: temps/percent in tenths
+    // (int16), time in whole seconds since Epoch (uint32; the ring keeps the exact
+    // DateTime for the live window). 10 B/record ≈ 0.9 MB per channel per day.
+    private const int RecordSize = 10;
     private const long DiskRetention = 86_400;      // ~24 h at the ~1 s tick
-    private const long CompactAt = DiskRetention * 2; // rewrite cost is ~2 MB, ~once a day
+    private const long CompactAt = DiskRetention * 2; // rewrite cost is ~1 MB, ~once a day
     private static readonly DateTime Epoch = new(2020, 1, 1);
     private const short NullI16 = short.MinValue;   // "no value" for the nullable tenths fields
-    private const ushort InfTau = ushort.MaxValue;  // headroom ∞ (or anything ≥ ~18 h)
 
     private readonly HistorySample[] _buf = new HistorySample[Capacity];
     private int _next, _count;
@@ -190,9 +178,7 @@ public class ChannelHistory : IDisposable
         _fileStart += drop;
     }
 
-    // Layout: 0 time u32 · 4 raw i16 · 6 avg i16 · 8 out% i16 · 10 W i16 · 12 Wavg i16
-    //         · 14 joules i32 · 18 tau u16 · 20 demand u8 · 21 ceiling i16 · 23 aim i16
-    //         · 25 flags u8 — tenths fields are value ×10.
+    // Layout: 0 time u32 · 4 raw i16 · 6 avg i16 · 8 out% i16 — tenths fields are value ×10.
     private static void Encode(in HistorySample s, byte[] b)
     {
         double secs = (s.Time - Epoch).TotalSeconds;
@@ -200,38 +186,13 @@ public class ChannelHistory : IDisposable
         WriteTenths(b, 4, s.RawTemp);
         WriteTenths(b, 6, double.IsNaN(s.EffectiveTemp) ? null : s.EffectiveTemp);
         WriteTenths(b, 8, s.OutputPercent);
-        WriteTenths(b, 10, s.Watts);
-        WriteTenths(b, 12, s.WattsAvg);
-        BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(14),
-            (int)Math.Clamp(s.BudgetJoules, int.MinValue, int.MaxValue));
-        double tau = s.TauSeconds;
-        BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(18),
-            double.IsNaN(tau) ? (ushort)0
-            : tau >= InfTau ? InfTau
-            : (ushort)Math.Clamp(Math.Round(tau), 0, InfTau - 1));
-        b[20] = (byte)Math.Clamp(Math.Round(s.DemandLevel), 0, 255);
-        WriteTenths(b, 21, s.CeilingC);
-        WriteTenths(b, 23, s.AimC);
-        b[25] = s.Override ? (byte)1 : (byte)0;
     }
 
-    private static HistorySample Decode(ReadOnlySpan<byte> b)
-    {
-        ushort tau = BinaryPrimitives.ReadUInt16LittleEndian(b.Slice(18));
-        return new HistorySample(
-            Epoch.AddSeconds(BinaryPrimitives.ReadUInt32LittleEndian(b)),
-            ReadTenths(b, 4),
-            ReadTenths(b, 6) ?? double.NaN,
-            ReadTenths(b, 8) ?? 0,
-            ReadTenths(b, 10),
-            ReadTenths(b, 12),
-            BinaryPrimitives.ReadInt32LittleEndian(b.Slice(14)),
-            tau == InfTau ? double.PositiveInfinity : tau,
-            b[20],
-            ReadTenths(b, 21) ?? 0,
-            ReadTenths(b, 23) ?? 0,
-            b[25] != 0);
-    }
+    private static HistorySample Decode(ReadOnlySpan<byte> b) => new(
+        Epoch.AddSeconds(BinaryPrimitives.ReadUInt32LittleEndian(b)),
+        ReadTenths(b, 4),
+        ReadTenths(b, 6) ?? double.NaN,
+        ReadTenths(b, 8) ?? 0);
 
     private static void WriteTenths(byte[] b, int off, double? v) =>
         BinaryPrimitives.WriteInt16LittleEndian(b.AsSpan(off),
@@ -260,7 +221,6 @@ public class HistoryChart : StripChart
 
     // Frozen paints (see Paint); the shared vocabulary pens live in StripChart.
     private static readonly Pen LegendFanPen = Paint.WhitePen(0x8c, 1.5);
-    private static readonly Pen AimPen = Paint.WhitePen(0x20, 1, Paint.Dots);
     private static readonly Pen FanPen = Paint.WhitePen(0x66, 1.5);
     private static readonly Pen OnMarkPen = Paint.WhitePen(0x8c, 1);
     private static readonly Pen OffMarkPen = Paint.WhitePen(0x46, 1);
@@ -302,22 +262,6 @@ public class HistoryChart : StripChart
         var h = Win;
         int count = WinCount;
         if (count == 0) return;
-
-        // Budget ceiling (power control only): the temperature the thermal credit is
-        // measured against — the trace approaching it is what makes the fans step up.
-        // (its label goes on last, over the traces)
-        double ceiling = h[count - 1].CeilingC;
-        if (ceiling > 0)
-            dc.DrawLine(DottedRefPen,
-                new Point(r.Left, YForTemp(ceiling)), new Point(r.Right, YForTemp(ceiling)));
-
-        // Sustained aim (power control only): the line the controller actually defends —
-        // headroom counts down to it and the fans engage before the trend settles past it.
-        // Dimmer than the ceiling; skipped when the margins make the two coincide.
-        double aim = h[count - 1].AimC;
-        if (aim > 0 && aim < ceiling - 0.5)
-            dc.DrawLine(AimPen,
-                new Point(r.Left, YForTemp(aim)), new Point(r.Right, YForTemp(aim)));
 
         // Fan % trace: soft under-fill + a quiet line (same treatment as the curve's band fill).
         DrawUnderFill(dc, count, i => YForPct(h[i].OutputPercent), TraceFill);
@@ -388,19 +332,6 @@ public class HistoryChart : StripChart
                 dc.DrawText(t, tp);
                 lastLabelRight = tp.X + t.Width + 3;
             }
-        }
-
-        if (ceiling > 0)
-        {
-            var t = Label(Inv($"ceiling {ceiling:0}°"), RefLabelBrush, 9.5);
-            DrawSeatedText(dc, t, new Point(r.Left + 4, YForTemp(ceiling) - t.Height - 1));
-        }
-        if (aim > 0 && aim < ceiling - 0.5)
-        {
-            // Below its line (the ceiling label sits above its own), so the two never
-            // collide even when the margins put the lines a few pixels apart.
-            var t = Label(Inv($"aim {aim:0}°"), RefLabelBrush, 9.5);
-            DrawSeatedText(dc, t, new Point(r.Left + 4, YForTemp(aim) + 2));
         }
 
         // The newest sample is live thermal state — the one place amber is allowed here.

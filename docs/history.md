@@ -515,3 +515,63 @@ confirmed on PWM: an already-spinning P14 sustains rotation down to ~5% duty
 (the 5%-duty samples split all-four-spinning vs all-four-stopped, i.e. history
 dependence, not header variance), while from a dead stop nothing starts below
 break-away (~27%).
+
+## 2026-08-06 — power/budget control removed; the app is temperature-only again
+
+Kuba's ask: "Remove all modes except for the temperature mode." Everything the
+power side had grown since 2026-07-25 was deleted wholesale rather than hidden —
+the modes ceased to exist, and `ResponseFilter` on the temperature staircase is
+once again the only control path (plus the courtesy features it always had:
+safety floor, zero snap, stop probe, idle kick, instant apply).
+
+Removed (code lives in git history before this date):
+
+- **`PowerBudget.cs`** — `ThermalModel` (learned mass / R anchors / base, with
+  the learning guardrails) and `PowerBudgetController` (thermal-budget control:
+  heatsink credit, aim-referenced headroom with model + slope prongs, StepUpHold
+  branding with sustained forgiveness, the futility probe + experiment latch,
+  downward relief, the power floor line, the Auto floor guard, and the
+  hard-override fuse).
+- **Power-curve ("Curve") mode** — the watts staircase (`PowerPoint`,
+  `ChannelConfig.PowerPoints`, `FanCurve.FromPower` + the axis-generic bounds),
+  its `ResponseFilter` instance in the watts dimension, the per-channel
+  `FuseState` in the engine, and `CurveEditor`'s power axis + `CURVE °C/W`
+  toggle.
+- **The CONTROL MODE switch** (`ControlMode` enum, the `PowerControlEnabled`
+  JSON bridge) and every power profile setting: averaging/hysteresis/lead,
+  override + release, ceiling/aim margins, trend/slope/now windows, learning,
+  futility, floor guard, relief, power floor.
+- **UI**: the dev panel's right column (POWER CONTROL, AUTO FLOOR GUARD,
+  FUTILITY PROBE, DOWNWARD RELIEF, POWER FLOOR, HARD OVERRIDE, BUDGET
+  INTERNALS, LEARNED MODEL + reset button) — the panel is single-column 300 px
+  again and the dev window shrank 1568×830 → 1336×830; the budget strip
+  (`BudgetChart.cs`) — the history strip is the only strip, and the freed row
+  goes to the curve editor; the ceiling/aim reference lines in the history
+  strip; the power reference lines + right-hand watts scale in the curve chart;
+  the power-sensor SOURCES list; the why-chip reasons StepUpHold / BudgetHold /
+  BudgetRamp / HardOverride / PowerCurve.
+- **Telemetry**: the CSV dropped trend_c, watts, watts_avg, budget_kj,
+  headroom_s, demand_pct, ceiling_c, aim_c, slope_cps, base_c, r_cpw, mass_jpc
+  (12 of 24 columns); the settings line dropped the power tokens; the day's
+  real CSV was deleted so the header matches (documented schema-change rule).
+  The history spill record shrank 26 → 10 bytes (~0.9 MB/channel/day).
+- **Backends**: power sensors are no longer enumerated (LhmBackend's
+  `SensorType.Power` case, the sim's `sim/cpu-pwr`/`sim/gpu-pwr`); AutoAssign
+  no longer wires package power. The sim keeps its honest thermal plant — only
+  the sensors went.
+- The stop probe's power-demand gate went with `DemandLevel`; its protection
+  against trial-stopping a die-limited load falls to the "No trials above"
+  temperature ceiling (default 78°, well under a clamped die), which is exactly
+  what Temperature mode relied on before this change too.
+
+One deliberate tuning consequence: the Quiet preset's CPU staircase used to cap
+at 50% ("sustained-load speed comes from the power side in Auto"). With the
+power side gone that cap would be the ceiling forever, so the preset grafts the
+original v0.1.0 temperature-only top steps above Kuba's hand-tuned low/mid
+bands: 20:0 · 50:10 · 55:20 · 62:40 (his) + 70:50 · 76:65 · 84:81 · 88:90 ·
+92:100 (v0.1.0). Kuba's live profile.json was not touched — at removal time it
+held a hand-made high-duty test curve (90% from ~21–24° avg, floors/snap/probe
+off), presumably part of the chassis-header EC investigation.
+
+Saved profiles keep loading: only fields were deleted, none renamed, so the
+orphaned power values are ignored and dropped on the next save.

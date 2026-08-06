@@ -16,7 +16,7 @@ public partial class MainWindow : Window
     private readonly Profile _profile;
     private readonly List<ChannelVm> _channelVms = new();
     private readonly List<ChannelHistory> _histories = new(); // parallel to _channelVms
-    private readonly HistoryViewport _viewport = new();       // one scroll state, both strips
+    private readonly HistoryViewport _viewport = new();       // scroll state of the strip
     private bool _loadingUi; // guard so slider init doesn't write back into the config
     private bool _devMode;
     private bool _exiting;
@@ -28,42 +28,18 @@ public partial class MainWindow : Window
     // a curve edit (drag / add / remove — the baselines below hold the last known points
     // per channel so a CurveChanged can be diffed into a before/after pair) or a preset
     // switch, which rewrites every channel's tuning and so stores whole-profile snapshots.
-    // Power-curve edits ride the same stack: Power=true, and the snapshot lists carry
-    // watts in the TempC slot (internal only — never serialized that way).
     private abstract record Edit;
-    private sealed record CurveEdit(ChannelConfig Channel, bool Power,
+    private sealed record CurveEdit(ChannelConfig Channel,
         List<CurvePoint> Before, List<CurvePoint> After, string BeforeName) : Edit;
     private sealed record TuningEdit(TuningSnapshot Before, TuningSnapshot After) : Edit;
     private readonly List<Edit> _undoStack = new();
     private readonly List<Edit> _redoStack = new();
     private readonly Dictionary<ChannelConfig, List<CurvePoint>> _pointsBaseline = new();
-    private readonly Dictionary<ChannelConfig, List<CurvePoint>> _powerBaseline = new();
-
-    private static List<CurvePoint> SnapPoints(ChannelConfig ch, bool power) => power
-        ? ch.PowerPoints.Select(p => new CurvePoint(p.Watts, p.Percent)).ToList()
-        : ch.Points.ToList();
-
-    private static void RestorePoints(ChannelConfig ch, bool power, List<CurvePoint> pts)
-    {
-        if (power)
-        {
-            ch.PowerPoints.Clear();
-            ch.PowerPoints.AddRange(pts.Select(p => new PowerPoint(p.TempC, p.Percent)));
-        }
-        else
-        {
-            ch.Points.Clear();
-            ch.Points.AddRange(pts);
-        }
-    }
 
     // Live readouts in the dev panel's source lists: temp before each sensor name,
-    // watts before each power sensor, rpm before each fan header name. Rebuilt with
-    // the lists, refreshed per tick.
+    // rpm before each fan header name. Rebuilt with the lists, refreshed per tick.
     private readonly List<(TextBlock Value, string Id)> _sensorReadouts = new();
-    private readonly List<(TextBlock Value, string Id)> _powerReadouts = new();
     private readonly List<(TextBlock Value, string Id)> _controlReadouts = new();
-    private int _ticksSinceModelSave; // learned thermal model → profile.json every ~5 min
 
     private static string Inv(FormattableString f) => FormattableString.Invariant(f);
 
@@ -93,9 +69,6 @@ public partial class MainWindow : Window
         : s % 60 == 0 ? Inv($"{s / 60:0} min")
         : Inv($"{Math.Floor(s / 60):0} min {s % 60:0} s");
 
-    private static string FormatTau(double s) =>
-        double.IsInfinity(s) || s > 1800 ? "∞" : FormatAvg(Math.Max(0, s));
-
     public MainWindow(IHardwareBackend hw, FanEngine engine, Profile profile,
         bool devMode = false)
     {
@@ -123,14 +96,8 @@ public partial class MainWindow : Window
         StopProbeCheck.IsChecked = profile.StopProbeEnabled;
         SafetyFloorCheck.IsChecked = profile.SafetyFloorEnabled;
         InstantApplyCheck.IsChecked = profile.InstantApplyEnabled;
-        FloorGuardCheck.IsChecked = profile.FloorGuardEnabled;
-        FutilityCheck.IsChecked = profile.FutilityProbeEnabled;
         TelemetryCheck.IsChecked = profile.TelemetryLoggingEnabled;
         HighPriorityCheck.IsChecked = profile.HighPriorityEnabled;
-        ReliefCheck.IsChecked = profile.ReliefEnabled;
-        PowerFloorCheck.IsChecked = profile.PowerFloorEnabled;
-        ModeSwitch.SelectedIndex = (int)profile.ControlMode;
-        LearnCheck.IsChecked = profile.ThermalLearningEnabled;
         _loadingUi = true;
         KickIdleSlider.Value = profile.IdleKickStoppedSeconds;
         KickSpeedSlider.Value = profile.IdleKickPercent;
@@ -141,28 +108,12 @@ public partial class MainWindow : Window
         ProbeBandSlider.Value = profile.StopProbeStableRangeC;
         ProbeRetrySlider.Value = profile.StopProbeRetrySeconds;
         ProbeMaxTempSlider.Value = profile.StopProbeMaxTempC;
-        PowerAvgSlider.Value = profile.PowerAveragingSeconds;
-        PowerHystSlider.Value = profile.PowerCurveHysteresisW;
-        RampLeadSlider.Value = profile.RampLeadSeconds;
-        ReliefMaxSlider.Value = profile.ReliefMaxWatts;
-        PowerFloor100Slider.Value = profile.PowerFloorPercentAt100W;
-        PowerFloor200Slider.Value = profile.PowerFloorPercentAt200W;
-        OverrideSlider.Value = profile.OverrideTempC;
-        CeilingMarginSlider.Value = profile.BudgetCeilingMarginC;
-        SteadyMarginSlider.Value = profile.SteadyTargetMarginC;
-        TrendWindowSlider.Value = profile.PowerTrendSeconds;
-        SlopeWindowSlider.Value = profile.PowerSlopeSeconds;
-        PowerNowSlider.Value = profile.PowerNowSeconds;
-        ReleaseDropSlider.Value = profile.OverrideReleaseC;
-        ReleaseHoldSlider.Value = profile.OverrideReleaseSeconds;
         SensorHistorySlider.Value = SensorHistoryHoursToNotch(profile.SensorHistoryHours);
         _loadingUi = false;
         UpdateSensorHistoryLabel();
         UpdateKickLabels();
         UpdateZeroSnapLabel();
         UpdateStopProbeLabels();
-        UpdatePowerLabels();
-        UpdateBudgetLabels();
         UpdateFeatureGroupDim();
         SimTag.Visibility = hw.IsSimulated ? Visibility.Visible : Visibility.Collapsed;
 
@@ -171,10 +122,8 @@ public partial class MainWindow : Window
             _channelVms.Add(new ChannelVm(ch));
             _histories.Add(new ChannelHistory());
             _pointsBaseline[ch] = ch.Points.ToList();
-            _powerBaseline[ch] = SnapPoints(ch, power: true);
         }
         HistoryView.Viewport = _viewport;
-        BudgetView.Viewport = _viewport;
         // Scrolled back = not live: the LIVE jump-back button appears next to CLEAR.
         _viewport.Changed += () => LiveButton.Visibility =
             _devMode && !_viewport.Live ? Visibility.Visible : Visibility.Collapsed;
@@ -278,9 +227,9 @@ public partial class MainWindow : Window
     {
         _sizeMode = SizeMode.Fixed;
         var wa0 = Chrome.WorkAreaDip(this);
-        // Developer mode adds the two-column panel and stacks two strips under the
+        // Developer mode adds the settings panel and the history strip under the
         // curve — wider and taller, unless the screen is too small for it.
-        Width = _devMode ? Math.Min(1568, wa0.Width) : 1010;
+        Width = _devMode ? Math.Min(1336, wa0.Width) : 1010;
         Height = _devMode ? Math.Min(830, wa0.Height) : 660;
         var wa = Chrome.WorkAreaDip(this);
         Left = Math.Max(wa.Left, Math.Min(Left, wa.Right - Width));
@@ -349,10 +298,7 @@ public partial class MainWindow : Window
     private void ResetCurveBaselines()
     {
         foreach (var ch in _profile.Channels)
-        {
             _pointsBaseline[ch] = ch.Points.ToList();
-            _powerBaseline[ch] = SnapPoints(ch, power: true);
-        }
     }
 
     private void UpdatePresetHighlight()
@@ -368,16 +314,14 @@ public partial class MainWindow : Window
     {
         var ch = Editor.Channel;
         if (ch == null) return;
-        bool power = Editor.PowerAxis;
-        var baseline = power ? _powerBaseline : _pointsBaseline;
-        var current = SnapPoints(ch, power);
-        var before = baseline.TryGetValue(ch, out var b) ? b : current;
+        var current = ch.Points.ToList();
+        var before = _pointsBaseline.TryGetValue(ch, out var b) ? b : current;
         if (before.SequenceEqual(current)) return; // e.g. a click on a point with no drag
 
-        _undoStack.Add(new CurveEdit(ch, power, before, current, _profile.Name));
+        _undoStack.Add(new CurveEdit(ch, before, current, _profile.Name));
         if (_undoStack.Count > 100) _undoStack.RemoveAt(0);
         _redoStack.Clear();
-        baseline[ch] = current;
+        _pointsBaseline[ch] = current;
 
         _profile.Name = "Custom";
         _profile.Save();
@@ -435,29 +379,17 @@ public partial class MainWindow : Window
     private void ApplyCurveEdit(CurveEdit edit, List<CurvePoint> points, string name)
     {
         var ch = edit.Channel;
-        RestorePoints(ch, edit.Power, points);
-        (edit.Power ? _powerBaseline : _pointsBaseline)[ch] = points.ToList();
+        ch.Points.Clear();
+        ch.Points.AddRange(points);
+        _pointsBaseline[ch] = points.ToList();
         _profile.Name = name;
         _profile.Save();
 
-        // Bring the affected channel — and the axis the edit lives on — on screen
-        // so the restore is visible.
+        // Bring the affected channel on screen so the restore is visible.
         int i = _channelVms.FindIndex(vm => vm.Config == ch);
         if (i >= 0 && ChannelList.SelectedIndex != i) ChannelList.SelectedIndex = i;
-        if (_devMode && Editor.PowerAxis != edit.Power) SetCurveAxis(edit.Power);
         Editor.InvalidateVisual();
         UpdatePresetHighlight();
-    }
-
-    // ---- Curve axis (°C ↔ W) ----
-
-    private void OnToggleCurveAxis(object sender, RoutedEventArgs e) =>
-        SetCurveAxis(!Editor.PowerAxis);
-
-    private void SetCurveAxis(bool power)
-    {
-        Editor.PowerAxis = power;
-        Tracked.SetText(CurveAxisText, power ? "CURVE W" : "CURVE °C");
     }
 
     // ---- Developer mode ----
@@ -470,13 +402,10 @@ public partial class MainWindow : Window
         Editor.IsReadOnly = !_devMode;
         Editor.ShowRaw = _devMode;
         HistoryView.Visibility = _devMode ? Visibility.Visible : Visibility.Collapsed;
-        BudgetView.Visibility = _devMode ? Visibility.Visible : Visibility.Collapsed;
         ClearHistoryButton.Visibility = _devMode ? Visibility.Visible : Visibility.Collapsed;
         LiveButton.Visibility = _devMode && !_viewport.Live ? Visibility.Visible : Visibility.Collapsed;
-        CurveAxisButton.Visibility = _devMode ? Visibility.Visible : Visibility.Collapsed;
-        if (!_devMode) SetCurveAxis(false); // simple mode always shows the temp curve
         DevButton.Tag = _devMode ? "on" : null;
-        // Developer mode needs room for the panel and the two strips; the floating
+        // Developer mode needs room for the panel and the history strip; the floating
         // window grows in both directions rather than squeezing the curve editor
         // (EnterFixed keeps the grown window inside the work area).
         if (_sizeMode == SizeMode.Fixed) EnterFixed();
@@ -489,11 +418,8 @@ public partial class MainWindow : Window
         var ch = SelectedChannel;
         Editor.Channel = ch;
         int idx = ChannelList.SelectedIndex;
-        // Switching channel drops any scroll-back anchor — the strips land on live data.
+        // Switching channel drops any scroll-back anchor — the strip lands on live data.
         _viewport.History = idx >= 0 && idx < _histories.Count ? _histories[idx] : null;
-        BudgetView.LeadSeconds = _profile.RampLeadSeconds;
-        BudgetView.NoPowerNote = BudgetNote();
-        BudgetView.Refresh();
         if (ch == null) return;
 
         _loadingUi = true;
@@ -508,11 +434,6 @@ public partial class MainWindow : Window
         UpdateParamLabels(ch);
         UpdateHero();
         UpdateDetail();
-        // The three power readouts are per-channel — repaint them now instead of
-        // leaving the previous channel's numbers up until the next tick.
-        UpdatePowerInfo();
-        UpdateBudgetInfo();
-        UpdateModelInfo();
     }
 
     private void RebuildSourceChecks(ChannelConfig ch)
@@ -527,22 +448,6 @@ public partial class MainWindow : Window
             cb.Unchecked += (_, _) => { ch.SensorIds.Remove(s.Id); _profile.Save(); };
             SensorChecks.Items.Add(cb);
         }
-        PowerChecks.Items.Clear();
-        _powerReadouts.Clear();
-        foreach (var s in _hw.Sensors.Where(s => s.Kind == "power"))
-        {
-            var cb = new CheckBox { Content = SourceLabel(s.Name, 44, out var val), IsChecked = ch.PowerSensorIds.Contains(s.Id), Tag = s.Id };
-            _powerReadouts.Add((val, s.Id));
-            cb.Checked += (_, _) => { if (!ch.PowerSensorIds.Contains(s.Id)) ch.PowerSensorIds.Add(s.Id); _profile.Save(); };
-            cb.Unchecked += (_, _) => { ch.PowerSensorIds.Remove(s.Id); _profile.Save(); };
-            PowerChecks.Items.Add(cb);
-        }
-        if (!_hw.Sensors.Any(s => s.Kind == "power"))
-            PowerChecks.Items.Add(new TextBlock
-            {
-                Text = "No power sensors on this backend.",
-                Foreground = Paint.White(0x8c),
-            });
         ControlChecks.Items.Clear();
         _controlReadouts.Clear();
         foreach (var c in _hw.Controls)
@@ -615,8 +520,6 @@ public partial class MainWindow : Window
     {
         foreach (var (tb, id) in _sensorReadouts)
             tb.Text = _hw.ReadValue(id) is double v ? Inv($"{v:0.0}°") : "—";
-        foreach (var (tb, id) in _powerReadouts)
-            tb.Text = _hw.ReadValue(id) is double w ? Inv($"{w:0} W") : "—";
         foreach (var (tb, id) in _controlReadouts)
             tb.Text = _hw.ReadControlRpm(id) is double r ? Inv($"{r:0} rpm") : "—";
     }
@@ -661,17 +564,7 @@ public partial class MainWindow : Window
             {
                 var t = statuses[i];
                 _histories[i].Add(new HistorySample(
-                    DateTime.Now, t.RawTemp, t.EffectiveTemp, t.OutputPercent,
-                    t.Watts, t.WattsAvg, t.BudgetJoules, t.TauSeconds, t.DemandLevel,
-                    t.CeilingC, t.AimC, t.Reason == OutputReason.HardOverride));
-            }
-
-            // The thermal model learns continuously; park it in profile.json every
-            // ~5 min so a restart doesn't forget the day's learning.
-            if (_profile.ControlMode != ControlMode.Temperature && ++_ticksSinceModelSave >= 300)
-            {
-                _ticksSinceModelSave = 0;
-                _profile.Save();
+                    DateTime.Now, t.RawTemp, t.EffectiveTemp, t.OutputPercent));
             }
 
             // Tray tooltip: rebuilt per tick, but the Win32 update only goes out when
@@ -704,37 +597,13 @@ public partial class MainWindow : Window
 
         var s = SelectedStatus;
         if (s != null)
-        {
-            // The curve chart's watts scale ranges over the same 10-min live window
-            // as the budget strip, so the two right-hand scales agree and the power
-            // lines don't jump with every sample (the ring IS the live window; the
-            // curve chart's overlay stays live even while the strips are scrolled).
-            double wattsPeak = 0;
-            int si = ChannelList.SelectedIndex;
-            var hist = si >= 0 && si < _histories.Count ? _histories[si] : null;
-            for (int i = 0; hist != null && i < hist.Count; i++)
-            {
-                if (hist[i].Watts is double hw) wattsPeak = Math.Max(wattsPeak, hw);
-                if (hist[i].WattsAvg is double ha) wattsPeak = Math.Max(wattsPeak, ha);
-            }
-            Editor.UpdateLive(s.RawTemp, s.EffectiveTemp, s.OutputPercent,
-                s.Watts, s.WattsAvg, wattsPeak);
-        }
+            Editor.UpdateLive(s.RawTemp, s.EffectiveTemp, s.OutputPercent);
         HistoryView.Refresh();
-        BudgetView.LeadSeconds = _profile.RampLeadSeconds;
-        BudgetView.NoPowerNote = BudgetNote();
-        BudgetView.Refresh();
 
         UpdateHero();
         UpdateDetail();
         UpdateChip();
-        if (_devMode)
-        {
-            RefreshSourceReadouts();
-            UpdatePowerInfo();
-            UpdateBudgetInfo();
-            UpdateModelInfo();
-        }
+        if (_devMode) RefreshSourceReadouts();
     }
 
     /// <summary>Big numeral: the selected channel's rolling average (what drives the steps).</summary>
@@ -764,7 +633,6 @@ public partial class MainWindow : Window
         var parts = new List<string>();
         if (s.RawTemp == null) parts.Add("no temp sensor");
         else if (_devMode) parts.Add(Inv($"now {s.RawTemp:0.0}°"));
-        if (_devMode && s.Watts is double w) parts.Add(Inv($"{w:0} W"));
         if (s.Rpm is double r) parts.Add(Inv($"{r:0} rpm"));
         if (!s.Applied) parts.Add("preview — no fan header");
         DetailText.Text = string.Join(" · ", parts);
@@ -786,8 +654,6 @@ public partial class MainWindow : Window
                 Inv($"ramping down to {s.TargetPercent:0}% · {ch.SlewDownPercentPerSec:0.#} %/s"),
             OutputReason.StepDownHold =>
                 Inv($"holding {s.OutputPercent:0}% · steps down to {s.ReasonLevel:0}% in {Math.Ceiling(s.ReasonSeconds):0} s"),
-            OutputReason.StepUpHold =>
-                Inv($"sustained {s.WattsAvg ?? 0:0} W needs more · steps up to {s.ReasonLevel:0}% in {Math.Ceiling(s.ReasonSeconds):0} s"),
             OutputReason.Hysteresis =>
                 Inv($"holding {s.OutputPercent:0}% · avg not yet {ch.HysteresisC:0.#}° below the step"),
             OutputReason.ZeroSnap =>
@@ -796,15 +662,6 @@ public partial class MainWindow : Window
                 Inv($"safety floor {s.OutputPercent:0}% · curve asks {s.ReasonLevel:0}%"),
             OutputReason.IdleKick => "idle kick · spinning the stopped fan briefly",
             OutputReason.StopProbe => "trial stop · resumes the moment the temp rises",
-            OutputReason.BudgetHold =>
-                Inv($"thermal buffer {s.BudgetJoules / 1000:0.0} kJ · temp curve asks {s.ReasonLevel:0}% — not needed yet"),
-            OutputReason.BudgetRamp => s.OutputPercent + 0.5 < s.TargetPercent
-                ? Inv($"buffer low · {FormatTau(s.ReasonSeconds)} headroom — ramping to {s.TargetPercent:0}%")
-                : Inv($"sustained {s.WattsAvg ?? 0:0} W needs {s.TargetPercent:0}% · temp curve asks {s.ReasonLevel:0}%"),
-            OutputReason.HardOverride =>
-                Inv($"OVERRIDE · die {s.RawTemp ?? 0:0}° ≥ {_profile.OverrideTempC:0}° — temp curve direct, no slew"),
-            OutputReason.PowerCurve =>
-                Inv($"power curve: avg {s.WattsAvg ?? 0:0} W → {s.TargetPercent:0}% · temp curve asks {s.ReasonLevel:0}%"),
             _ => null,
         };
         WhyChip.Visibility = why == null ? Visibility.Collapsed : Visibility.Visible;
@@ -864,11 +721,6 @@ public partial class MainWindow : Window
         ZeroSnapGroup.Opacity = ZeroSnapCheck.IsChecked == true ? 1.0 : 0.45;
         StopProbeGroup.Opacity = StopProbeCheck.IsChecked == true ? 1.0 : 0.45;
         SafetyFloorGroup.Opacity = SafetyFloorCheck.IsChecked == true ? 1.0 : 0.45;
-        // Relief can only arm behind the futility latch, so the probe being off makes it
-        // inactive too — show that rather than leaving a live-looking slider.
-        ReliefGroup.Opacity = ReliefCheck.IsChecked == true && FutilityCheck.IsChecked == true
-            ? 1.0 : 0.45;
-        PowerFloorGroup.Opacity = PowerFloorCheck.IsChecked == true ? 1.0 : 0.45;
     }
 
     private void OnIdleKickCheckChanged(object sender, RoutedEventArgs e)
@@ -942,21 +794,6 @@ public partial class MainWindow : Window
         _profile.Save();
     }
 
-    private void OnFloorGuardCheckChanged(object sender, RoutedEventArgs e)
-    {
-        if (!IsLoaded) return; // constructor sets IsChecked from the profile
-        _profile.FloorGuardEnabled = FloorGuardCheck.IsChecked == true;
-        _profile.Save();
-    }
-
-    private void OnFutilityCheckChanged(object sender, RoutedEventArgs e)
-    {
-        if (!IsLoaded) return; // constructor sets IsChecked from the profile
-        _profile.FutilityProbeEnabled = FutilityCheck.IsChecked == true;
-        _profile.Save();
-        UpdateFeatureGroupDim(); // relief only arms behind the latch — show it dimmed
-    }
-
     private void OnTelemetryCheckChanged(object sender, RoutedEventArgs e)
     {
         if (!IsLoaded) return; // constructor sets IsChecked from the profile
@@ -997,22 +834,6 @@ public partial class MainWindow : Window
         App.ApplyProcessPriority(_profile.HighPriorityEnabled);
     }
 
-    private void OnReliefCheckChanged(object sender, RoutedEventArgs e)
-    {
-        if (!IsLoaded) return; // constructor sets IsChecked from the profile
-        _profile.ReliefEnabled = ReliefCheck.IsChecked == true;
-        _profile.Save();
-        UpdateFeatureGroupDim();
-    }
-
-    private void OnPowerFloorCheckChanged(object sender, RoutedEventArgs e)
-    {
-        if (!IsLoaded) return; // constructor sets IsChecked from the profile
-        _profile.PowerFloorEnabled = PowerFloorCheck.IsChecked == true;
-        _profile.Save();
-        UpdateFeatureGroupDim();
-    }
-
     private void OnStopProbeParamChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
         // Fires mid-XAML-parse (setting Minimum) and from the constructor — both guarded.
@@ -1035,14 +856,7 @@ public partial class MainWindow : Window
         ProbeMaxTempValue.Text = Inv($"{_profile.StopProbeMaxTempC:0} °C");
     }
 
-    private void OnModeChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (!IsLoaded) return; // constructor selects the segment from the profile
-        _profile.ControlMode = (ControlMode)Math.Max(0, ModeSwitch.SelectedIndex);
-        _profile.Save();
-    }
-
-    /// <summary>Wipe the history (ring + spill file) on every channel; both strips start fresh.</summary>
+    /// <summary>Wipe the history (ring + spill file) on every channel; the strip starts fresh.</summary>
     private void OnClearHistory(object sender, RoutedEventArgs e)
     {
         foreach (var h in _histories) h.Clear();
@@ -1050,161 +864,8 @@ public partial class MainWindow : Window
         _viewport.Invalidate();   // the cached window still holds the wiped samples
     }
 
-    /// <summary>Jump the scrolled-back strips home to the live right edge.</summary>
+    /// <summary>Jump the scrolled-back strip home to the live right edge.</summary>
     private void OnJumpToLive(object sender, RoutedEventArgs e) => _viewport.JumpToLive();
-
-    /// <summary>Why the budget strip may be empty — depends on the control mode.</summary>
-    private string BudgetNote() =>
-        _profile.ControlMode == ControlMode.Temperature
-            ? "temperature mode — power side off"
-            : "no power sensor on this channel — temperature control";
-
-    private void OnPowerParamChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
-    {
-        // Fires mid-XAML-parse (setting Minimum) and from the constructor — both guarded.
-        if (!IsLoaded || _loadingUi) return;
-        _profile.PowerAveragingSeconds = PowerAvgSlider.Value;
-        _profile.PowerCurveHysteresisW = PowerHystSlider.Value;
-        _profile.RampLeadSeconds = RampLeadSlider.Value;
-        _profile.ReliefMaxWatts = ReliefMaxSlider.Value;
-        _profile.PowerFloorPercentAt100W = PowerFloor100Slider.Value;
-        _profile.PowerFloorPercentAt200W = PowerFloor200Slider.Value;
-        _profile.OverrideTempC = OverrideSlider.Value;
-        UpdatePowerLabels();
-        // The budget strip draws the lead as its trigger line — move it with the slider.
-        BudgetView.LeadSeconds = _profile.RampLeadSeconds;
-        BudgetView.Refresh();
-        _profile.Save();
-    }
-
-    private void UpdatePowerLabels()
-    {
-        PowerAvgValue.Text = FormatAvg(_profile.PowerAveragingSeconds);
-        PowerHystValue.Text = Inv($"{_profile.PowerCurveHysteresisW:0} W");
-        RampLeadValue.Text = FormatAvg(_profile.RampLeadSeconds);
-        ReliefMaxValue.Text = Inv($"{_profile.ReliefMaxWatts:0} W");
-        PowerFloor100Value.Text = Inv($"{_profile.PowerFloorPercentAt100W:0} %");
-        PowerFloor200Value.Text = Inv($"{_profile.PowerFloorPercentAt200W:0} %");
-        OverrideValue.Text = Inv($"{_profile.OverrideTempC:0} °C");
-    }
-
-    private void OnBudgetParamChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
-    {
-        // Fires mid-XAML-parse (setting Minimum) and from the constructor — both guarded.
-        if (!IsLoaded || _loadingUi) return;
-        _profile.BudgetCeilingMarginC = CeilingMarginSlider.Value;
-        _profile.SteadyTargetMarginC = SteadyMarginSlider.Value;
-        _profile.PowerTrendSeconds = TrendWindowSlider.Value;
-        _profile.PowerSlopeSeconds = SlopeWindowSlider.Value;
-        _profile.PowerNowSeconds = PowerNowSlider.Value;
-        _profile.OverrideReleaseC = ReleaseDropSlider.Value;
-        _profile.OverrideReleaseSeconds = ReleaseHoldSlider.Value;
-        UpdateBudgetLabels();
-        _profile.Save();
-    }
-
-    private void UpdateBudgetLabels()
-    {
-        CeilingMarginValue.Text = Inv($"{_profile.BudgetCeilingMarginC:0.#} °C");
-        SteadyMarginValue.Text = Inv($"{_profile.SteadyTargetMarginC:0.#} °C");
-        TrendWindowValue.Text = FormatAvg(_profile.PowerTrendSeconds);
-        SlopeWindowValue.Text = FormatAvg(_profile.PowerSlopeSeconds);
-        PowerNowValue.Text = FormatAvg(_profile.PowerNowSeconds);
-        ReleaseDropValue.Text = Inv($"{_profile.OverrideReleaseC:0.#} °C");
-        ReleaseHoldValue.Text = Inv($"{_profile.OverrideReleaseSeconds:0} s");
-    }
-
-    private void OnLearnCheckChanged(object sender, RoutedEventArgs e)
-    {
-        if (!IsLoaded) return; // constructor sets IsChecked from the profile
-        _profile.ThermalLearningEnabled = LearnCheck.IsChecked == true;
-        _profile.Save();
-    }
-
-    /// <summary>Forget the learned physics on every channel — live and persisted.</summary>
-    private void OnResetThermalModel(object sender, RoutedEventArgs e)
-    {
-        _engine.ResetThermalModels();
-        _profile.Save();
-        UpdateModelInfo();
-        // Not visible in the settings snapshot (learned values aren't tuning), so mark it.
-        App.Telemetry?.Event("learned thermal model reset to seeds");
-    }
-
-    /// <summary>Live line under the power sliders: draw, buffer and predicted headroom of
-    /// the selected channel (or why power control is not active for it).</summary>
-    private void UpdatePowerInfo()
-    {
-        var s = SelectedStatus;
-        PowerInfoText.Text =
-            s == null ? "" :
-            _profile.ControlMode == ControlMode.Temperature ? "temperature mode — power side off" :
-            s.Watts is not double w ? "temperature control — no power sensor assigned" :
-            _profile.ControlMode == ControlMode.PowerCurve ?
-                Inv($"draw {w:0} W · avg {s.WattsAvg ?? 0:0} W\npower curve asks {s.DemandLevel:0}%") :
-            Inv($"draw {w:0} W · avg {s.WattsAvg ?? 0:0} W\nbuffer {s.BudgetJoules / 1000:0.0} kJ · needs {s.DemandLevel:0}%\nheadroom {FormatTau(s.TauSeconds)}");
-    }
-
-    /// <summary>Where the ceiling and the sustained aim actually sit, and how the sink
-    /// trend is moving toward them — the numbers the sliders above shift.</summary>
-    private void UpdateBudgetInfo()
-    {
-        var s = SelectedStatus;
-        if (s?.Watts is not double || _profile.ControlMode == ControlMode.Temperature)
-        {
-            BudgetInfoText.Text = "";
-            HeadroomInfoText.Text = "";
-            return;
-        }
-        if (_profile.ControlMode == ControlMode.PowerCurve)
-        {
-            // The watts staircase drives directly; the predictive machinery these
-            // numbers describe is off (only the fuse remains).
-            BudgetInfoText.Text = "curve mode — predictive\nbudget layer off (fuse stays)";
-            HeadroomInfoText.Text = "";
-            return;
-        }
-        double aim = _profile.OverrideTempC -
-            Math.Max(_profile.SteadyTargetMarginC, _profile.BudgetCeilingMarginC);
-        string trend = double.IsNaN(s.TrendTempC) ? "—" : Inv($"{s.TrendTempC:0.0}°");
-        BudgetInfoText.Text =
-            Inv($"ceiling {s.CeilingC:0}° · aim {aim:0}°\ntrend {trend} {(s.SlopeCPerSec < 0 ? "−" : "+")}{Math.Abs(s.SlopeCPerSec):0.00} °C/s");
-        // The aim-referenced headroom's inputs on one line — the sliders it reads live
-        // in three sections (lead here above, hysteresis per channel under BEHAVIOUR,
-        // the windows in this one). Quiet gate = trend + slope windows: how long the
-        // draw must be steady before headroom may count down at all.
-        double band = SelectedChannel?.HysteresisC ?? 1.5;
-        // One $-string: concatenated interpolated strings lose the FormattableString conversion.
-        HeadroomInfoText.Text = Inv($"headroom: lead {FormatMss(_profile.RampLeadSeconds)} · ±{band:0.#}°\navg {_profile.PowerAveragingSeconds:0} s · quiet gate {_profile.PowerTrendSeconds + _profile.PowerSlopeSeconds:0} s");
-    }
-
-    /// <summary>Compact m:ss for the readout lines (the strips' chip vocabulary).</summary>
-    private static string FormatMss(double s) =>
-        s < 60 ? Inv($"{s:0} s") : Inv($"{(int)s / 60}:{(int)s % 60:00}");
-
-    /// <summary>What the controller has worked out about the selected channel's cooler:
-    /// thermal mass, idle baseline and the cooling-resistance anchors.</summary>
-    private void UpdateModelInfo()
-    {
-        var ch = SelectedChannel;
-        var s = SelectedStatus;
-        if (ch == null) { ModelInfoText.Text = ""; return; }
-        var r = ch.LearnedResistances;
-        if (ch.LearnedThermalMassJPerC <= 0 || r.Count != ThermalModel.AnchorPercents.Length)
-        {
-            ModelInfoText.Text = "nothing learned yet — seed values in use";
-            return;
-        }
-        // Short lines on purpose: the panel is 272 px wide and the mono font wraps
-        // mid-token, so anything longer than ~36 characters comes out broken.
-        string now = s?.Watts is double && s.ResistanceCPerW > 0
-            ? Inv($"\nnow {s.ResistanceCPerW:0.00} °C/W at {s.OutputPercent:0}% fan")
-            : "";
-        ModelInfoText.Text =
-            Inv($"mass {ch.LearnedThermalMassJPerC:0} J/°C · base {ch.LearnedBaseTempC:0.0}°{now}") +
-            "\nR at 0 20 40 60 80 100% fan:\n  " +
-            string.Join(" ", r.Select(v => v.ToString("0.00", CultureInfo.InvariantCulture)));
-    }
 
     private void OnAutostartCheckChanged(object sender, RoutedEventArgs e)
     {

@@ -9,11 +9,10 @@ namespace FanCurves.Core;
 /// %AppData%\FanCurves\logs\:
 ///
 ///  - telemetry-YYYY-MM-DD.csv — one row per channel per engine tick with every input
-///    the controller reads (raw/avg/trend temp, draw, sustained draw) and every output
-///    it publishes (commanded %, target %, why-chip reason, headroom, demand, ceiling,
-///    aim, learned model values). Rotated daily; the last 7 days are kept.
-///  - behavior.txt — human-readable CHANGES only: fan start/stop, target ladder steps,
-///    why-chip reason transitions, fuse latch/release, driving/released-to-BIOS flips,
+///    the controller reads (raw/avg temp) and every output it publishes (commanded %,
+///    target %, why-chip reason). Rotated daily; the last 7 days are kept.
+///  - behavior.txt — human-readable CHANGES only: fan start/stop, target steps,
+///    why-chip reason transitions, driving/released-to-BIOS flips,
 ///    and a full settings line whenever any tuning knob (or the curve) changes, so a
 ///    behavior complaint can always be matched to the settings in force at that moment.
 ///
@@ -144,8 +143,6 @@ public class TelemetryLog : IDisposable
         sb.Append(Inv($"out {s.OutputPercent:0}%"));
         if (!double.IsNaN(s.EffectiveTemp)) sb.Append(Inv($" · avg {s.EffectiveTemp:0.0}°"));
         if (s.RawTemp is double raw) sb.Append(Inv($" · now {raw:0.0}°"));
-        if (s.WattsAvg is double wa) sb.Append(Inv($" · {wa:0} W avg"));
-        if (!double.IsInfinity(s.TauSeconds)) sb.Append($" · headroom {Seconds(s.TauSeconds)}");
         return sb.ToString();
     }
 
@@ -155,21 +152,13 @@ public class TelemetryLog : IDisposable
         OutputReason.RampUp => Inv($"ramping up to {s.TargetPercent:0}%"),
         OutputReason.RampDown => Inv($"ramping down to {s.TargetPercent:0}%"),
         OutputReason.StepDownHold => Inv($"step down to {s.ReasonLevel:0}% in {s.ReasonSeconds:0} s"),
-        OutputReason.StepUpHold => Inv($"step up to {s.ReasonLevel:0}% in {s.ReasonSeconds:0} s"),
         OutputReason.Hysteresis => "hysteresis hold",
         OutputReason.ZeroSnap => Inv($"zero snap (curve asks {s.ReasonLevel:0}%)"),
         OutputReason.MinFloor => Inv($"safety floor (curve asks {s.ReasonLevel:0}%)"),
         OutputReason.IdleKick => "idle kick",
         OutputReason.StopProbe => "stop probe (trial stop)",
-        OutputReason.BudgetHold => Inv($"budget hold (curve asks {s.ReasonLevel:0}%, headroom {Seconds(s.ReasonSeconds)})"),
-        OutputReason.BudgetRamp => Inv($"budget ramp (curve asks {s.ReasonLevel:0}%, headroom {Seconds(s.ReasonSeconds)})"),
-        OutputReason.HardOverride => Inv($"FUSE — raw-temp curve direct ({s.ReasonLevel:0}%)"),
-        OutputReason.PowerCurve => Inv($"power curve (temp curve asks {s.ReasonLevel:0}%)"),
         _ => "steady on the curve",
     };
-
-    private static string Seconds(double s) =>
-        double.IsInfinity(s) || double.IsNaN(s) ? "∞" : Inv($"{s:0} s");
 
     private void WriteBehavior(string line)
     {
@@ -183,7 +172,7 @@ public class TelemetryLog : IDisposable
     private static string SettingsLine(Profile p)
     {
         var sb = new StringBuilder();
-        sb.Append(Inv($"profile \"{p.Name}\" · mode {p.ControlMode}"));
+        sb.Append(Inv($"profile \"{p.Name}\""));
         sb.Append(Inv($" · snap {(p.ZeroSnapEnabled ? Inv($"<{p.ZeroSnapPercent:0}%") : "off")}"));
         sb.Append(p.IdleKickEnabled
             ? Inv($" · kick {p.IdleKickStoppedSeconds:0}s/{p.IdleKickPercent:0}%/{p.IdleKickSeconds:0}s")
@@ -191,18 +180,7 @@ public class TelemetryLog : IDisposable
         sb.Append(p.StopProbeEnabled
             ? Inv($" · probe {p.StopProbeRunSeconds:0}s/{p.StopProbeSeconds:0}s/{p.StopProbeStableRangeC:0.#}°/{p.StopProbeRetrySeconds:0}s/<{p.StopProbeMaxTempC:0}°")
             : " · probe off");
-        sb.Append(Inv($" · pwrAvg {p.PowerAveragingSeconds:0}s · pwrHyst {p.PowerCurveHysteresisW:0}W · lead {p.RampLeadSeconds:0}s"));
-        sb.Append($" · futility {(p.FutilityProbeEnabled ? "on" : "off")}");
-        sb.Append($" · floorGuard {(p.FloorGuardEnabled ? "on" : "off")}");
         sb.Append($" · instantApply {(p.InstantApplyEnabled ? "on" : "off")}");
-        sb.Append(p.ReliefEnabled ? Inv($" · relief <{p.ReliefMaxWatts:0}W") : " · relief off");
-        sb.Append(p.PowerFloorEnabled
-            ? Inv($" · pfloor {p.PowerFloorPercentAt100W:0}%@100W/{p.PowerFloorPercentAt200W:0}%@200W")
-            : " · pfloor off");
-        sb.Append(Inv($" · fuse {p.OverrideTempC:0}° (release −{p.OverrideReleaseC:0}°/{p.OverrideReleaseSeconds:0}s)"));
-        sb.Append(Inv($" · ceilM {p.BudgetCeilingMarginC:0}° · aimM {p.SteadyTargetMarginC:0}°"));
-        sb.Append(Inv($" · trend {p.PowerTrendSeconds:0}s · slope {p.PowerSlopeSeconds:0}s · now {p.PowerNowSeconds:0}s"));
-        sb.Append($" · learn {(p.ThermalLearningEnabled ? "on" : "off")}");
         foreach (var ch in p.Channels)
         {
             sb.Append(Inv($" | {ch.Name}: min {(p.SafetyFloorEnabled ? Inv($"{ch.MinPercent:0}%") : "off")} · avg {ch.AveragingSeconds:0}s"));
@@ -210,12 +188,6 @@ public class TelemetryLog : IDisposable
             sb.Append(Inv($" · slew {ch.SlewUpPercentPerSec:0}/{ch.SlewDownPercentPerSec:0}"));
             sb.Append(" · curve ");
             sb.Append(string.Join(' ', ch.Points.Select(pt => Inv($"{pt.TempC:0}:{pt.Percent:0}"))));
-            if (ch.PowerPoints.Count > 0)
-            {
-                sb.Append(" · pwrCurve ");
-                sb.Append(string.Join(' ', ch.PowerPoints.Select(pt => Inv($"{pt.Watts:0}:{pt.Percent:0}"))));
-            }
-            if (ch.PowerSensorIds.Count > 0) sb.Append(Inv($" · pwr[{ch.PowerSensorIds.Count}]"));
         }
         return sb.ToString();
     }
@@ -224,8 +196,7 @@ public class TelemetryLog : IDisposable
 
     private const string CsvHeader =
         "time,channel,applied,out_pct,target_pct,reason,reason_level,reason_s," +
-        "raw_c,avg_c,trend_c,rpm,watts,watts_avg,budget_kj,headroom_s,demand_pct," +
-        "ceiling_c,aim_c,slope_cps,base_c,r_cpw,mass_jpc,rpm_per_header";
+        "raw_c,avg_c,rpm,rpm_per_header";
 
     private static string CsvRow(DateTime now, ChannelStatus s) => string.Join(',',
         now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
@@ -238,19 +209,7 @@ public class TelemetryLog : IDisposable
         N(s.ReasonSeconds, "0.#"),
         N(s.RawTemp, "0.0"),
         N(s.EffectiveTemp, "0.0"),
-        N(s.TrendTempC, "0.0"),
         N(s.Rpm, "0"),
-        N(s.Watts, "0.0"),
-        N(s.WattsAvg, "0.0"),
-        N(s.BudgetJoules / 1000, "0.00"),
-        N(s.TauSeconds, "0"),
-        N(s.DemandLevel, "0.#"),
-        N(s.CeilingC, "0.#"),
-        N(s.AimC, "0.#"),
-        N(s.SlopeCPerSec, "0.####"),
-        N(s.BaseTempC, "0.0"),
-        N(s.ResistanceCPerW, "0.###"),
-        N(s.MassJPerC, "0"),
         // "|"-joined so the cell survives a comma-separated row; one entry per
         // assigned header, in ControlIds order.
         s.Rpms is null ? "" : string.Join('|', s.Rpms.Select(r => N(r, "0"))));
