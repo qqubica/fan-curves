@@ -519,7 +519,7 @@ pub fn draw_history_strip(painter: &Painter, rect: Rect, snap: &Snapshot) {
             if on {
                 if let Some(o) = last_off.take() {
                     last_label_right =
-                        draw_stopped_span(painter, plot, x(o), x(i), visible[i].t - visible[o].t, true, last_label_right);
+                        draw_stopped_span(painter, plot, x(o), x(i), visible[i].wall - visible[o].wall, true, last_label_right);
                 }
             }
         }
@@ -531,7 +531,7 @@ pub fn draw_history_strip(painter: &Painter, rect: Rect, snap: &Snapshot) {
                     plot,
                     x(o),
                     x(count - 1),
-                    visible[count - 1].t - visible[o].t,
+                    visible[count - 1].wall - visible[o].wall,
                     false,
                     last_label_right,
                 );
@@ -569,7 +569,7 @@ pub fn draw_history_strip(painter: &Painter, rect: Rect, snap: &Snapshot) {
                 }
                 let a = |v: f64| if v.is_nan() { "—".to_string() } else { format!("{v:.1}°") };
                 let clock_s = clock(s.wall, snap.utc_offset_secs);
-                let ago = ago_text(visible[count - 1].t - s.t, i == count - 1);
+                let ago = ago_text(visible[count - 1].wall - s.wall, i == count - 1);
                 let raw = s.raw.map_or("—".to_string(), |r| format!("{r:.1}°"));
                 hover_chip(
                     painter,

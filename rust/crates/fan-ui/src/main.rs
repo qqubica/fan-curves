@@ -12,8 +12,9 @@
 mod charts;
 mod client;
 mod devpanel;
-mod history;
 mod icon;
+
+use fan_core::history;
 
 use eframe::egui::{
     Align2, Button, CentralPanel, Checkbox, Color32, Context, CornerRadius, FontId, Frame, Margin,
@@ -238,10 +239,11 @@ impl eframe::App for App {
                                             )
                                             .clicked()
                                         {
-                                            let mut st = self.link.state.lock().unwrap();
-                                            for h in st.history.iter_mut() {
-                                                h.clear();
-                                            }
+                                            // Daemon-side too: the daemon is
+                                            // where history lives, and a
+                                            // mirror-only clear would refill
+                                            // on the next launch.
+                                            let _ = self.link.tx.send(Cmd::ClearHistory);
                                             self.viewport.to_live();
                                         }
                                     },

@@ -10,6 +10,7 @@ pub mod backend;
 pub mod curve;
 pub mod engine;
 pub mod filter;
+pub mod history;
 pub mod hwmon;
 pub mod icon;
 pub mod kick;
@@ -19,6 +20,16 @@ pub mod rng;
 pub mod sim;
 
 pub use backend::{HardwareBackend, HwControl, HwSensor};
+
+/// Name of the daemon's local IPC socket (named pipe on Windows). One place,
+/// shared by the daemon, the UI and the tray, so the three cannot drift apart.
+/// `FAN_CURVES_SOCKET` overrides it — that is what lets a development
+/// daemon+UI pair run beside the live stack without the two cross-talking
+/// (the bind doubles as the single-instance lock, so a second daemon on the
+/// DEFAULT name refuses to start at all).
+pub fn ipc_socket_name() -> String {
+    std::env::var("FAN_CURVES_SOCKET").unwrap_or_else(|_| "fan-curves-daemon.sock".into())
+}
 pub use curve::{CurvePoint, FanCurve};
 pub use engine::{ChannelStatus, FanEngine, OutputReason};
 pub use filter::ResponseFilter;

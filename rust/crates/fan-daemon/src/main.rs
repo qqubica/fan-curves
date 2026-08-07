@@ -580,6 +580,7 @@ fn main() {
     let shared = Arc::new(Shared {
         engine: Mutex::new(engine),
         latest: Mutex::new(Vec::new()),
+        history: Mutex::new(Vec::new()),
         // Sim runs get the -sim log filenames, exactly like the WPF dev flows.
         telemetry: Mutex::new(TelemetryLog::new(config_dir(), !real, utc_offset_secs)),
         profile_path,
@@ -616,6 +617,26 @@ fn main() {
             (statuses, engine.profile().clone(), engine.profile().telemetry_logging_enabled)
         };
         *shared.latest.lock().unwrap() = statuses.clone();
+
+        // Record the tick into the strip history — the daemon is the resident
+        // process, so this is what lets a freshly opened UI show the past
+        // 10 minutes (and scroll back further) instead of starting empty.
+        {
+            let wall = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            let mut history = shared.history.lock().unwrap();
+            history.resize_with(statuses.len(), Default::default);
+            for (h, s) in history.iter_mut().zip(&statuses) {
+                h.push(fan_core::history::HistorySample {
+                    wall,
+                    avg: s.effective_temp,
+                    raw: s.raw_temp,
+                    out: s.output_percent,
+                });
+            }
+        }
 
         if args.verbose {
             let line = statuses

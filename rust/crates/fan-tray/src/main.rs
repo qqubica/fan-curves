@@ -39,7 +39,6 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use interprocess::local_socket::traits::Stream as _;
 use interprocess::local_socket::{GenericNamespaced, Stream, ToNsName};
 
-const SOCKET_NAME: &str = "fan-curves-daemon.sock";
 const WM_TRAY: u32 = WM_APP + 1;
 const ID_OPEN: usize = 1;
 const ID_PAUSE: usize = 2;
@@ -58,7 +57,7 @@ fn wide(s: &str) -> Vec<u16> {
 // ---- daemon IPC (one short call, no persistent connection) ----
 
 fn call(request: &str) -> Option<serde_json::Value> {
-    let name = SOCKET_NAME.to_ns_name::<GenericNamespaced>().ok()?;
+    let name = fan_core::ipc_socket_name().to_ns_name::<GenericNamespaced>().ok()?;
     let conn = Stream::connect(name).ok()?;
     let (recv, send) = conn.split();
     let mut w = BufWriter::new(send);

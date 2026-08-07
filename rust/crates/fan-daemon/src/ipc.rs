@@ -5,6 +5,12 @@
 //! Commands:
 //!   {"cmd":"ping"}                     → {"ok":true,"version":"…","simulated":true}
 //!   {"cmd":"status"}                   → applying + profile name + latest tick statuses
+//!                                        + per-channel history {first,total} so a client
+//!                                        knows how far behind its mirror is
+//!   {"cmd":"history","channel":N,"start":S,"count":C} → up to C samples from absolute
+//!                                        index S (clamped to what is retained; the reply
+//!                                        says where the samples really start)
+//!   {"cmd":"clear_history"}            → wipe every channel's recorded history
 //!   {"cmd":"profile"}                  → the full profile (PascalCase, same schema as profile.json)
 //!   {"cmd":"set_profile","profile":…}  → replace + save (unless the daemon is read-only)
 //!   {"cmd":"preset","name":"quiet"|"performance"} → adopt tuning, keep assignments
@@ -25,17 +31,25 @@ use serde::Deserialize;
 use serde_json::json;
 
 use fan_core::backend::SensorKind;
+use fan_core::history::ChannelHistory;
 use fan_core::{ChannelStatus, FanEngine, HardwareBackend as _, Profile};
 
 use crate::telemetry::TelemetryLog;
 use crate::Backend;
 
-pub const SOCKET_NAME: &str = "fan-curves-daemon.sock";
+/// The most samples one `history` reply will carry (~110 KB of JSON); a
+/// backfilling client loops until it has caught up.
+const HISTORY_CHUNK: usize = 4096;
 
 /// Everything the tick loop and the IPC handlers share.
 pub struct Shared {
     pub engine: Mutex<FanEngine<Backend>>,
     pub latest: Mutex<Vec<ChannelStatus>>,
+    /// Per-channel strip history, recorded every tick. The daemon is the only
+    /// resident process, so this is the only place a sample can survive while
+    /// no UI window is open — the UI backfills its mirror from here on connect
+    /// instead of starting the strip from scratch.
+    pub history: Mutex<Vec<ChannelHistory>>,
     pub telemetry: Mutex<TelemetryLog>,
     pub profile_path: std::path::PathBuf,
     pub read_only: bool,
@@ -76,7 +90,7 @@ fn listener_options<'a>(name: interprocess::local_socket::Name<'a>) -> ListenerO
 }
 
 pub fn bind() -> std::io::Result<Listener> {
-    let name = SOCKET_NAME.to_ns_name::<GenericNamespaced>()?;
+    let name = fan_core::ipc_socket_name().to_ns_name::<GenericNamespaced>()?;
     listener_options(name).create_sync()
 }
 
@@ -122,6 +136,11 @@ enum Request {
     /// Everything the SOURCES panel needs: each sensor/control with its live
     /// reading, so rows can lead with the temp/rpm like the WPF panel does.
     Inventory,
+    /// A range of recorded strip samples, addressed by ABSOLUTE sample index
+    /// (the same indices a scrolled viewport anchors on — they never rewind).
+    History { channel: usize, start: usize, count: usize },
+    /// Wipe the recorded history on every channel (the strip's CLEAR).
+    ClearHistory,
     Preset { name: String },
     Apply,
     Pause,
@@ -149,12 +168,56 @@ fn respond(line: &str, shared: &Shared) -> serde_json::Value {
         Request::Status => {
             let engine = shared.engine.lock().unwrap();
             let latest = shared.latest.lock().unwrap();
+            // Per-channel retention bounds, so a mirroring client can tell how
+            // far behind it is and fetch exactly the missing range.
+            let history: Vec<_> = shared
+                .history
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|h| json!({ "first": h.first_available(), "total": h.total() }))
+                .collect();
             json!({
                 "ok": true,
                 "applying": engine.applying(),
                 "profile_name": engine.profile().name,
                 "channels": *latest,
+                "history": history,
             })
+        }
+        Request::History { channel, start, count } => {
+            let mut history = shared.history.lock().unwrap();
+            let Some(h) = history.get_mut(channel) else {
+                return json!({ "ok": false, "error": format!("no channel {channel}") });
+            };
+            let (start, samples) = h.read(start, count.min(HISTORY_CHUNK));
+            // Compact rows, not objects: a 24 h backfill is ~86k samples and
+            // the field names would triple the bytes on the pipe.
+            let rows: Vec<_> = samples
+                .iter()
+                .map(|s| {
+                    json!([
+                        s.wall,
+                        if s.avg.is_nan() { serde_json::Value::Null } else { json!(s.avg) },
+                        s.raw,
+                        s.out,
+                    ])
+                })
+                .collect();
+            json!({
+                "ok": true,
+                "start": start,
+                "first": h.first_available(),
+                "total": h.total(),
+                "samples": rows,
+            })
+        }
+        Request::ClearHistory => {
+            for h in shared.history.lock().unwrap().iter_mut() {
+                h.clear();
+            }
+            shared.telemetry.lock().unwrap().event("history cleared via IPC");
+            json!({ "ok": true })
         }
         Request::Profile => {
             let engine = shared.engine.lock().unwrap();
@@ -284,9 +347,97 @@ fn save_if_allowed(shared: &Shared, profile: &Profile) -> bool {
     profile.save(&shared.profile_path).is_ok()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fan_core::history::HistorySample;
+    use fan_core::SimulatedBackend;
+
+    fn test_shared() -> Shared {
+        let dir = std::env::temp_dir().join("FanCurvesIpcTest");
+        Shared {
+            engine: Mutex::new(FanEngine::new(
+                Backend::Sim(SimulatedBackend::new()),
+                Profile::mac_book_like(),
+            )),
+            latest: Mutex::new(Vec::new()),
+            history: Mutex::new(Vec::new()),
+            telemetry: Mutex::new(TelemetryLog::new(dir.clone(), true, 0)),
+            profile_path: dir.join("profile.json"),
+            read_only: true,
+            stop: AtomicBool::new(false),
+        }
+    }
+
+    fn sample(i: usize) -> HistorySample {
+        HistorySample {
+            wall: 1_700_000_000.0 + i as f64,
+            avg: 40.0 + (i % 10) as f64 / 10.0,
+            raw: Some(41.5),
+            out: if i % 2 == 0 { 20.0 } else { 0.0 },
+        }
+    }
+
+    #[test]
+    fn status_history_and_clear_round_trip() {
+        let s = test_shared();
+        {
+            let mut h = s.history.lock().unwrap();
+            h.resize_with(2, Default::default);
+            for i in 0..5000 {
+                h[0].push(sample(i));
+            }
+            // A gap: channel 0 sample 100 has no readings at all.
+            h[1].push(HistorySample { wall: 1_700_000_000.0, avg: f64::NAN, raw: None, out: 0.0 });
+        }
+
+        // status carries per-channel retention bounds.
+        let r = respond(r#"{"cmd":"status"}"#, &s);
+        assert_eq!(r["ok"], true);
+        assert_eq!(r["history"][0]["first"], 0);
+        assert_eq!(r["history"][0]["total"], 5000);
+        assert_eq!(r["history"][1]["total"], 1);
+
+        // Ranged fetch from the spill, exact position, compact rows.
+        let r = respond(r#"{"cmd":"history","channel":0,"start":10,"count":50}"#, &s);
+        assert_eq!(r["ok"], true);
+        assert_eq!(r["start"], 10);
+        let rows = r["samples"].as_array().unwrap();
+        assert_eq!(rows.len(), 50);
+        assert_eq!(rows[0][0].as_f64().unwrap(), 1_700_000_010.0);
+        assert!((rows[0][1].as_f64().unwrap() - sample(10).avg).abs() < 0.051);
+        assert_eq!(rows[0][3].as_f64().unwrap(), 20.0);
+
+        // An oversized request is capped at the chunk size, not refused.
+        let r = respond(r#"{"cmd":"history","channel":0,"start":0,"count":100000}"#, &s);
+        assert_eq!(r["samples"].as_array().unwrap().len(), HISTORY_CHUNK);
+
+        // Missing readings come back as JSON nulls.
+        let r = respond(r#"{"cmd":"history","channel":1,"start":0,"count":10}"#, &s);
+        let rows = r["samples"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0][1].is_null());
+        assert!(rows[0][2].is_null());
+
+        // Unknown channel is an error, not a panic.
+        let r = respond(r#"{"cmd":"history","channel":9,"start":0,"count":1}"#, &s);
+        assert_eq!(r["ok"], false);
+
+        // clear_history moves every channel's floor to its total.
+        let r = respond(r#"{"cmd":"clear_history"}"#, &s);
+        assert_eq!(r["ok"], true);
+        let r = respond(r#"{"cmd":"status"}"#, &s);
+        assert_eq!(r["history"][0]["first"], 5000);
+        assert_eq!(r["history"][0]["total"], 5000);
+        let r = respond(r#"{"cmd":"history","channel":0,"start":0,"count":10}"#, &s);
+        assert_eq!(r["start"], 5000);
+        assert!(r["samples"].as_array().unwrap().is_empty());
+    }
+}
+
 /// Client side: send one request line, print the one response line (`--send`).
 pub fn send(request: &str) -> std::io::Result<String> {
-    let name = SOCKET_NAME.to_ns_name::<GenericNamespaced>()?;
+    let name = fan_core::ipc_socket_name().to_ns_name::<GenericNamespaced>()?;
     let conn = Stream::connect(name)?;
     let (recv, send_half) = conn.split();
     let mut writer = BufWriter::new(send_half);

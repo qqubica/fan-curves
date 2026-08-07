@@ -1,31 +1,51 @@
 //! Two-tier per-channel history: a small exact ring for the live window, and a
 //! quantized spill file for everything older — the port of `ChannelHistory`.
 //!
+//! Lives in fan-core because BOTH processes keep one: the daemon records a
+//! sample per engine tick around the clock (it is the resident part, so it is
+//! the only place history can accumulate while no window is open), and the UI
+//! keeps a local mirror it backfills from the daemon over IPC so the strip is
+//! populated the moment the window opens.
+//!
 //! Keeping hours of samples in RAM is what made the C# app fat once already, so
 //! only [`RING`] samples (the live window) stay in memory at full precision.
 //! Everything is also appended to a fixed-size binary record on disk, which is
 //! what scrollback reads. The disk copy is lossy — tenths of a degree/percent,
-//! whole seconds — deliberately below display resolution.
+//! whole seconds — deliberately below display resolution. The spill is capped
+//! at ~24 h by compaction (the WPF app's once-a-day-at-2× rule), which is what
+//! keeps a daemon that runs for weeks from growing a file forever.
 //!
 //! The file vanishes with the process (delete-on-close on Windows, unlinked
 //! immediately on Unix), so a crash cannot leave it behind. Any file error
 //! silently degrades to the RAM-only ring: history is a convenience, and it
-//! must never take the UI down.
+//! must never take the engine or the UI down.
 
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 
-use crate::client::HistorySample;
-
 /// Live window, ~10 min at the ~1 s tick.
 pub const RING: usize = 600;
+/// Spill retention, ~24 h at the ~1 s tick. Compaction keeps the newest this
+/// many and runs when the file holds twice that, so it costs one rewrite a day.
+pub const KEEP: usize = 86_400;
 /// Bytes per spilled sample: u32 time + three i16 tenths.
 const RECORD: usize = 10;
 /// Seconds from the Unix epoch to 2020-01-01, so the u32 stamp lasts.
 const EPOCH_2020: f64 = 1_577_836_800.0;
 /// Sentinel for "no reading" in a quantized field.
 const NULL_TENTHS: i16 = i16::MIN;
+
+/// One strip sample. `wall` is unix seconds — differences give "how long ago",
+/// and the hover chip formats it as a clock with the caller's UTC offset.
+#[derive(Clone, Copy, Debug)]
+pub struct HistorySample {
+    pub wall: f64,
+    /// Rolling average — NaN when the channel has no reading.
+    pub avg: f64,
+    pub raw: Option<f64>,
+    pub out: f64,
+}
 
 fn to_tenths(v: f64) -> i16 {
     if v.is_nan() {
@@ -50,7 +70,8 @@ pub struct ChannelHistory {
     /// Absolute index of the next sample — never rewinds, so a scrolled
     /// viewport keeps pointing at the same data across a compaction.
     total: usize,
-    /// Absolute index of the oldest sample still on disk (CLEAR moves this up).
+    /// Absolute index of the oldest sample still on disk (CLEAR and compaction
+    /// move this up).
     first: usize,
 }
 
@@ -104,6 +125,30 @@ impl ChannelHistory {
                 self.spill = None;
             }
         }
+        if self.total - self.first > 2 * KEEP {
+            self.compact();
+        }
+    }
+
+    /// Drop everything older than [`KEEP`] by rewriting the spill with only the
+    /// newest records. Absolute indices are preserved — `first` moves up.
+    fn compact(&mut self) {
+        let keep_from = self.total - KEEP;
+        let Some(f) = self.spill.as_mut() else {
+            self.first = keep_from;
+            return;
+        };
+        let offset = (keep_from - self.first) as u64 * RECORD as u64;
+        let mut tail = Vec::new();
+        let ok = f.seek(SeekFrom::Start(offset)).is_ok()
+            && f.read_to_end(&mut tail).is_ok()
+            && f.seek(SeekFrom::Start(0)).is_ok()
+            && f.write_all(&tail).is_ok()
+            && f.set_len(tail.len() as u64).is_ok();
+        if !ok {
+            self.spill = None; // degrade to the ring; never take the caller down
+        }
+        self.first = keep_from;
     }
 
     /// Wipe everything. Absolute indices keep counting so any live viewport
@@ -137,7 +182,7 @@ impl ChannelHistory {
         }
         let Some(f) = self.spill.as_mut() else { return Vec::new() };
         // The file starts at absolute index 0 of the CURRENT file (cleared
-        // files restart), so offset by what CLEAR discarded.
+        // files restart), so offset by what CLEAR/compaction discarded.
         let offset = (start - self.first) as u64 * RECORD as u64;
         let mut buf = vec![0u8; n * RECORD];
         if f.seek(SeekFrom::Start(offset)).is_err() || f.read_exact(&mut buf).is_err() {
@@ -149,10 +194,37 @@ impl ChannelHistory {
                 let avg = from_tenths(i16::from_le_bytes([r[4], r[5]]));
                 let raw = from_tenths(i16::from_le_bytes([r[6], r[7]]));
                 let out = from_tenths(i16::from_le_bytes([r[8], r[9]]));
-                let wall = EPOCH_2020 + t as f64;
-                HistorySample { t: wall, wall, avg, raw: (!raw.is_nan()).then_some(raw), out }
+                HistorySample { wall: EPOCH_2020 + t as f64, avg, raw: (!raw.is_nan()).then_some(raw), out }
             })
             .collect()
+    }
+
+    /// `count` samples FROM absolute index `start` — the IPC serving read. The
+    /// range is clamped to what is actually available (a caller asking for
+    /// discarded or RAM-degraded territory is bumped forward, never stalled),
+    /// and the returned index says where the samples really begin. Ranges
+    /// inside the ring are served exact with no disk I/O — the steady-state
+    /// one-sample catch-up never touches the file.
+    pub fn read(&mut self, start: usize, count: usize) -> (usize, Vec<HistorySample>) {
+        let ring_start = self.total - self.ring.len();
+        let floor = if self.spill.is_some() { self.first } else { ring_start.max(self.first) };
+        let start = start.max(floor).min(self.total);
+        let count = count.min(self.total - start);
+        if count == 0 {
+            return (start, Vec::new());
+        }
+        if start >= ring_start {
+            let off = start - ring_start;
+            return (start, self.ring.iter().skip(off).take(count).copied().collect());
+        }
+        let w = self.window_at(start + count, count);
+        if w.len() == count {
+            return (start, w);
+        }
+        // The spill failed under us: serve whatever the ring still covers.
+        let start = ring_start.min(self.total);
+        let count = self.total - start;
+        (start, self.ring.iter().take(count).copied().collect())
     }
 }
 
@@ -257,7 +329,6 @@ mod tests {
 
     fn sample(i: usize) -> HistorySample {
         HistorySample {
-            t: i as f64,
             wall: EPOCH_2020 + i as f64,
             avg: 40.0 + (i % 10) as f64 / 10.0,
             raw: Some(41.0),
@@ -338,5 +409,65 @@ mod tests {
         assert!(w[5].avg.is_nan(), "a missing average must stay missing");
         assert!(w[5].raw.is_none());
         assert!(!w[4].avg.is_nan());
+    }
+
+    #[test]
+    fn read_serves_ranges_and_clamps_to_available() {
+        let mut h = ChannelHistory::new();
+        for i in 0..(RING + 100) {
+            h.push(sample(i));
+        }
+        // Spill range, exact position honoured.
+        let (start, w) = h.read(10, 50);
+        assert_eq!(start, 10);
+        assert_eq!(w.len(), 50);
+        assert!((w[0].avg - sample(10).avg).abs() < 0.05);
+        // Ring range comes back exact (not quantized).
+        let (start, w) = h.read(RING + 50, 1000);
+        assert_eq!(start, RING + 50);
+        assert_eq!(w.len(), 50, "count is clamped to what exists");
+        assert_eq!(w[0].avg, sample(RING + 50).avg);
+        // Past the end: empty, positioned at the end.
+        let (start, w) = h.read(h.total() + 5, 10);
+        assert_eq!(start, h.total());
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn read_skips_ranges_discarded_by_clear() {
+        let mut h = ChannelHistory::new();
+        for i in 0..100 {
+            h.push(sample(i));
+        }
+        h.clear();
+        for i in 100..130 {
+            h.push(sample(i));
+        }
+        // The first 100 are gone; a request for them is bumped to what exists.
+        let (start, w) = h.read(0, 4096);
+        assert_eq!(start, 100);
+        assert_eq!(w.len(), 30);
+    }
+
+    #[test]
+    fn compaction_keeps_the_newest_day_and_absolute_indices() {
+        let mut h = ChannelHistory::new();
+        for i in 0..(2 * KEEP + 10) {
+            h.push(sample(i));
+        }
+        assert_eq!(h.total(), 2 * KEEP + 10);
+        assert!(h.available() <= 2 * KEEP, "compaction must have run");
+        assert!(h.available() >= KEEP, "compaction must keep the newest day");
+        // It fires once at 2×KEEP+1 and moves the floor in ONE daily jump.
+        assert_eq!(h.first_available(), KEEP + 1);
+        // A sample near the new floor still reads back at its absolute index.
+        let idx = h.first_available() + 5;
+        let (start, w) = h.read(idx, 1);
+        assert_eq!(start, idx);
+        assert_eq!(w.len(), 1);
+        assert!((w[0].out - sample(idx).out).abs() < 0.05);
+        // Discarded territory is bumped forward, not served stale.
+        let (start, _) = h.read(0, 1);
+        assert_eq!(start, h.first_available());
     }
 }

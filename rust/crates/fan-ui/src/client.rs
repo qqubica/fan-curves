@@ -4,34 +4,32 @@
 //! `request_repaint()` only when fresh data landed — the UI never animates on
 //! its own, per the repaint rules.
 //!
+//! History is MIRRORED from the daemon, not collected here: the daemon records
+//! a sample every engine tick around the clock, and on (re)connect this thread
+//! backfills everything the daemon retains (~24 h) before following along one
+//! sample per poll — so the strip is populated the moment the window opens
+//! instead of starting from scratch. A daemon too old to serve history is
+//! detected by its `status` reply and falls back to the old poll-synthesized
+//! samples.
+//!
 //! If no daemon answers at startup, it spawns a sibling `fan-daemon --sim`
 //! once and keeps retrying.
 
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use interprocess::local_socket::traits::Stream as _;
 use interprocess::local_socket::{GenericNamespaced, RecvHalf, SendHalf, Stream, ToNsName};
 use serde_json::{json, Value};
 
+use fan_core::history::ChannelHistory;
+pub use fan_core::history::HistorySample;
 use fan_core::{ChannelStatus, Profile};
 
-use crate::history::ChannelHistory;
-
-pub const SOCKET_NAME: &str = "fan-curves-daemon.sock";
-
-#[derive(Clone, Copy)]
-pub struct HistorySample {
-    /// Seconds since the UI connected — drives "how long ago".
-    pub t: f64,
-    /// Unix seconds, so the hover chip can show a wall clock.
-    pub wall: f64,
-    pub avg: f64,
-    pub raw: Option<f64>,
-    pub out: f64,
-}
+/// Samples per `history` request while backfilling (the daemon caps there too).
+const HISTORY_CHUNK: usize = 4096;
 
 /// One row of the SOURCES panel.
 #[derive(Clone, Default)]
@@ -85,6 +83,8 @@ pub enum Cmd {
     Update(Box<Profile>),
     RefreshInventory,
     SetAutostart(bool),
+    /// Wipe the recorded history, daemon-side and mirror alike (CLEAR).
+    ClearHistory,
 }
 
 pub struct Link {
@@ -109,7 +109,7 @@ struct Conn {
 
 impl Conn {
     fn open() -> std::io::Result<Self> {
-        let name = SOCKET_NAME.to_ns_name::<GenericNamespaced>()?;
+        let name = fan_core::ipc_socket_name().to_ns_name::<GenericNamespaced>()?;
         let stream = Stream::connect(name)?;
         let (recv, send) = stream.split();
         Ok(Self { reader: BufReader::new(recv), writer: BufWriter::new(send) })
@@ -129,9 +129,11 @@ impl Conn {
 }
 
 fn worker(ctx: eframe::egui::Context, state: Arc<Mutex<UiState>>, rx: Receiver<Cmd>) {
-    let start = Instant::now();
     let mut conn: Option<Conn> = None;
     let mut spawned_daemon = false;
+    // Daemon-side absolute index each channel's mirror has caught up to.
+    // Daemon-relative, so it resets with the mirror on every (re)connect.
+    let mut synced: Vec<usize> = Vec::new();
 
     loop {
         if conn.is_none() {
@@ -149,14 +151,19 @@ fn worker(ctx: eframe::egui::Context, state: Arc<Mutex<UiState>>, rx: Receiver<C
                     }
                     apply_profile_reply(&mut st, profile);
                     apply_inventory_reply(&mut st, inventory);
+                    // Start the mirror over: sample indices are daemon-relative
+                    // and this may be a different daemon than last time. What
+                    // the daemon retains (~24 h) comes back in the backfill.
+                    st.history.clear();
                     drop(st);
+                    synced.clear();
                     conn = Some(c);
                     ctx.request_repaint();
                     // First status RIGHT NOW: the recv_timeout below would
                     // otherwise sit out a full second before the first poll,
                     // and the freshly opened window would show an empty hero
                     // and no channels for exactly that long.
-                    poll_status(&ctx, &mut conn, &state, start);
+                    poll_status(&ctx, &mut conn, &state, &mut synced);
                 }
                 Err(e) => {
                     {
@@ -182,6 +189,7 @@ fn worker(ctx: eframe::egui::Context, state: Arc<Mutex<UiState>>, rx: Receiver<C
                 // Autostart changes what the inventory reports, so re-read it.
                 let refresh_inventory =
                     matches!(cmd, Cmd::RefreshInventory | Cmd::SetAutostart(_));
+                let clear_history = matches!(cmd, Cmd::ClearHistory);
                 let request = match cmd {
                     Cmd::Preset(name) => json!({"cmd": "preset", "name": name}),
                     Cmd::Apply => json!({"cmd": "apply"}),
@@ -189,17 +197,29 @@ fn worker(ctx: eframe::egui::Context, state: Arc<Mutex<UiState>>, rx: Receiver<C
                     Cmd::Update(profile) => json!({"cmd": "update_profile", "profile": profile}),
                     Cmd::RefreshInventory => json!({"cmd": "inventory"}),
                     Cmd::SetAutostart(on) => json!({"cmd": "set_autostart", "enabled": on}),
+                    Cmd::ClearHistory => json!({"cmd": "clear_history"}),
                 };
                 let reply = run_call(&mut conn, &state, request);
-                if refresh_inventory {
+                if clear_history {
+                    // The mirror is wiped regardless of the reply, so CLEAR
+                    // still clears against a daemon too old to know the
+                    // command. `synced` is daemon-side position — a clear
+                    // moves the daemon's floor, not its total — so it stands.
+                    let mut st = state.lock().unwrap();
+                    for h in st.history.iter_mut() {
+                        h.clear();
+                    }
+                    drop(st);
+                    ctx.request_repaint();
+                } else if refresh_inventory {
                     apply_inventory_reply(&mut state.lock().unwrap(), reply);
                 } else if reply.is_some() && refetch_profile {
                     let reply = run_call(&mut conn, &state, json!({"cmd": "profile"}));
                     apply_profile_reply(&mut state.lock().unwrap(), reply);
                 }
-                poll_status(&ctx, &mut conn, &state, start);
+                poll_status(&ctx, &mut conn, &state, &mut synced);
             }
-            Err(RecvTimeoutError::Timeout) => poll_status(&ctx, &mut conn, &state, start),
+            Err(RecvTimeoutError::Timeout) => poll_status(&ctx, &mut conn, &state, &mut synced),
             Err(RecvTimeoutError::Disconnected) => return, // UI is gone
         }
     }
@@ -225,12 +245,48 @@ fn poll_status(
     ctx: &eframe::egui::Context,
     conn: &mut Option<Conn>,
     state: &Arc<Mutex<UiState>>,
-    start: Instant,
+    synced: &mut Vec<usize>,
 ) {
     let Some(reply) = run_call(conn, state, json!({"cmd": "status"})) else { return };
     let channels: Vec<ChannelStatus> =
         serde_json::from_value(reply["channels"].clone()).unwrap_or_default();
-    let t = start.elapsed().as_secs_f64();
+
+    // Mirror the daemon's history: fetch whatever it has that we do not. On
+    // first connect that is the whole backfill (up to ~24 h, chunked); in
+    // steady state it is the one sample the last tick appended, served from
+    // the daemon's RAM ring with no disk I/O on either side. All IPC happens
+    // BEFORE taking the state lock.
+    let daemon_serves_history = reply["history"].is_array();
+    let mut fetched: Vec<(usize, Vec<HistorySample>)> = Vec::new();
+    if let Some(infos) = reply["history"].as_array() {
+        synced.resize(channels.len(), 0);
+        for (i, info) in infos.iter().enumerate().take(channels.len()) {
+            let first = info["first"].as_u64().unwrap_or(0) as usize;
+            let total = info["total"].as_u64().unwrap_or(0) as usize;
+            let mut have = synced[i].min(total);
+            // Anything before the daemon's floor (CLEAR, compaction) is gone.
+            have = have.max(first);
+            while have < total {
+                let want = (total - have).min(HISTORY_CHUNK);
+                let request = json!({"cmd": "history", "channel": i, "start": have, "count": want});
+                let Some(r) = run_call(conn, state, request) else {
+                    synced[i] = have;
+                    return; // connection dropped; position is kept for the retry
+                };
+                let got = r["samples"].as_array().map_or(0, |a| a.len());
+                if r["ok"].as_bool() != Some(true) || got == 0 {
+                    have = total; // nothing more retrievable — do not spin
+                    break;
+                }
+                // The daemon may bump the start past discarded territory.
+                let start = r["start"].as_u64().map_or(have, |s| s as usize);
+                fetched.push((i, parse_samples(&r["samples"])));
+                have = start + got;
+            }
+            synced[i] = have;
+        }
+    }
+
     let wall = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
@@ -241,20 +297,48 @@ fn poll_status(
         st.profile_name = name.to_string();
     }
     st.history.resize_with(channels.len(), ChannelHistory::new);
-    for (i, ch) in channels.iter().enumerate() {
-        // A missing reading is RECORDED, not skipped: the strip draws it as a
-        // break in the trace, which is how a dead sensor should read.
-        st.history[i].push(HistorySample {
-            t,
-            wall,
-            avg: ch.effective_temp,
-            raw: ch.raw_temp,
-            out: ch.output_percent,
-        });
+    if daemon_serves_history {
+        for (i, samples) in fetched {
+            for s in samples {
+                st.history[i].push(s);
+            }
+        }
+    } else {
+        // Old daemon without history support: synthesize one sample per poll,
+        // as this thread always did. A missing reading is RECORDED, not
+        // skipped — the strip draws it as a break in the trace, which is how
+        // a dead sensor should read.
+        for (i, ch) in channels.iter().enumerate() {
+            st.history[i].push(HistorySample {
+                wall,
+                avg: ch.effective_temp,
+                raw: ch.raw_temp,
+                out: ch.output_percent,
+            });
+        }
     }
     st.channels = channels;
     drop(st);
     ctx.request_repaint(); // fresh data — the ONE place the UI asks to paint
+}
+
+/// Decode the `history` reply's compact rows: `[wall, avg|null, raw|null, out]`.
+fn parse_samples(rows: &Value) -> Vec<HistorySample> {
+    rows.as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| {
+                    let r = r.as_array()?;
+                    Some(HistorySample {
+                        wall: r.first()?.as_f64()?,
+                        avg: r.get(1).and_then(Value::as_f64).unwrap_or(f64::NAN),
+                        raw: r.get(2).and_then(Value::as_f64),
+                        out: r.get(3).and_then(Value::as_f64).unwrap_or(0.0),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn apply_profile_reply(st: &mut UiState, reply: Option<Value>) {
