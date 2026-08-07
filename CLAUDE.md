@@ -66,6 +66,15 @@ the shipping app until the port reaches feature parity.
 - Toolchain (installed 2026-08-06): rustup + VS Build Tools via winget. cargo
   is NOT on PATH in this harness's shells — use
   `& "$env:USERPROFILE\.cargo\bin\cargo.exe"` from `rust/`.
+- **Deploying the live Rust stack** (which runs from `rust\target\release`):
+  the UI and tray are non-elevated — swap them in place by renaming the
+  locked exe aside (`Move-Item` works on a running image), rebuilding, then
+  kill + relaunch; delete the renamed copy after. The daemon runs ELEVATED,
+  so a non-elevated session cannot restart it — `rust\deploy-daemon.ps1`
+  from an elevated shell does the shutdown-over-IPC → rebuild → start cycle
+  (fans sit on the BIOS curve during the gap, the Pause state). Do NOT
+  register the autostart task just to trampoline elevation — registration
+  stays an explicit act.
 - **Footprint rules** (the port's reason to exist): release profile runs fat
   LTO + `codegen-units 1` + symbol strip, but `panic` stays **"unwind" on
   purpose** — a panicking daemon must unwind through `FanEngine::drop` so the
