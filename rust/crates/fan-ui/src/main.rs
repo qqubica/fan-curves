@@ -201,7 +201,14 @@ impl eframe::App for App {
                     ui.add_space(26.0);
 
                     // --- dev panel LAST in the row, so reserve its width now
-                    let dev_w = if self.dev { devpanel::PANEL_WIDTH + 26.0 } else { 0.0 };
+                    // (incl. the item_spacing egui inserts after the charts
+                    // allocation — without it the row overflows by that much
+                    // and the panel's right border is clipped off).
+                    let dev_w = if self.dev {
+                        devpanel::PANEL_WIDTH + 26.0 + ui.spacing().item_spacing.x
+                    } else {
+                        0.0
+                    };
                     let charts_w = (ui.available_width() - dev_w).max(200.0);
 
                     // --- charts column: ONE card holding the channel header,
@@ -678,10 +685,20 @@ impl App {
         }
 
         // The mode toggle, seated under Pause since 2026-08-07 (it lived in
-        // the removed in-app title row before).
+        // the removed in-app title row before). Same geometry and type size
+        // as the Pause button above so the sidebar column reads as one stack.
         ui.add_space(8.0);
+        let dev_button = Button::new(
+            RichText::new("Developer Mode")
+                .font(FontId::proportional(12.0))
+                .color(TEXT),
+        )
+        .fill(CARD)
+        .stroke(Stroke::new(1.0, HAIRLINE))
+        .corner_radius(CornerRadius::same(6))
+        .min_size(Vec2::new(ui.available_width(), 34.0));
         if ui
-            .add(chip_button("Developer").min_size(Vec2::new(ui.available_width(), 28.0)))
+            .add(dev_button)
             .on_hover_text("Show or hide the developer panel, the history strip and curve editing")
             .clicked()
         {
@@ -942,13 +959,6 @@ fn text_button(text: &str) -> Button<'static> {
     Button::new(RichText::new(devpanel::tracked(text)).font(FontId::proportional(9.0)).color(DIM))
         .fill(Color32::TRANSPARENT)
         .stroke(Stroke::NONE)
-}
-
-fn chip_button(text: &str) -> Button<'_> {
-    Button::new(RichText::new(text).font(FontId::proportional(10.5)).color(TEXT))
-        .fill(CARD)
-        .stroke(Stroke::new(1.0, HAIRLINE))
-        .corner_radius(CornerRadius::same(4))
 }
 
 fn readout(ui: &mut eframe::egui::Ui, label: &str, value: &str) {

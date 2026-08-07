@@ -133,7 +133,9 @@ the shipping app until the port reaches feature parity.
   enable developer mode" + "remove the logo and app name from the top left
   corner"): fan-ui opens at DEV_SIZE with the panel showing (`--dev` is
   accepted but redundant), the Developer chip is a full-width button in the
-  sidebar directly under Pause, and the glyph + "Fan Curves" row above the
+  sidebar directly under Pause (labelled "Developer Mode" and sized like the
+  Pause button — 34 px / 12 pt — since later that day, Kuba: "Unify the size
+  of the buttons under mode selection"), and the glyph + "Fan Curves" row above the
   grid was deleted — the OS caption still carries the icon and name (native
   chrome; removing it would cost the caption buttons). fan-ui's `draw_glyph`
   went with the row; the drawn geometry survives in `fan_core::icon`.
