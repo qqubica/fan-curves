@@ -115,14 +115,33 @@ the shipping app until the port reaches feature parity.
   Also done: the **app icon** (`icon.rs` — one geometry drawn twice, the WPF
   title-bar canvas and TrayIcon's 32×32; the glyph is STATIC on purpose, a
   perpetual spin violates the repaint rules), the strip's **hover crosshair +
-  readout chip**, **stopped-time spans**, **CLEAR**, and the **three-size
-  window cycle**. Maximized is **drag-restorable** (2026-08-07, "in fullscreen
-  I can't move the window"): Windows refuses to drag-restore a window without
-  the resize style, so `cycle_size` sends `Resizable(true)` only while
-  entering Max and `update` watches `viewport().maximized` — when the OS
-  restores it (title-bar drag / caption button) the mode falls back to
-  Quarter (the pre-maximize size the OS restores to) and the style is
-  dropped again, keeping drag-resize disabled everywhere else.
+  readout chip**, **stopped-time spans**, **CLEAR**, and the **two-size
+  window toggle** (Fixed ↔ Max — the quarter-of-screen step existed until
+  2026-08-07, removed on Kuba's ask "remove the quarter button"; the WPF app
+  keeps its three sizes). Maximized is **drag-restorable** (2026-08-07, "in
+  fullscreen I can't move the window"): Windows refuses to drag-restore a
+  window without the resize style, so `cycle_size` sends `Resizable(true)`
+  only while entering Max and `update` watches `viewport().maximized` — when
+  the OS restores it (title-bar drag / caption button) the mode falls back to
+  Fixed and the style is dropped again, keeping drag-resize disabled
+  everywhere else.
+  **One window only (2026-08-07)**: the first fan-ui binds a lock socket named
+  `<ipc_socket_name()>.ui` (so a `FAN_CURVES_SOCKET` dev stack locks
+  separately) and a later launch connects to it — which tells the first
+  window to unminimize + focus — and exits; two windows were two mirrors
+  polling the daemon for nothing.
+  **Edge glow (2026-08-07, "make the edges of areas glow")**: `GLOW` in
+  main.rs — a zero-offset white `Shadow` (blur 18, spread 1, premultiplied
+  13/13/13/13) on the two big cards, preset cards, status pill and the
+  segmented channel control, with the card hairline brightened to
+  white-alpha 28. Amber stays live-data-only; the glow is white.
+  **History-strip render rules** (2026-08-07, "weird artifacts"): the fan-%
+  under-fill must NOT go through `Shape::convex_polygon` — the staircase
+  outline is concave and egui fills it with criss-crossing triangles; it is a
+  hand-built triangle-strip `Mesh` down to the baseline. And every trace that
+  can contain NaN (avg on missing readings — backfilled data has them) must
+  BREAK into line-runs at NaN like the raw trace, never feed NaN vertices to
+  the tessellator (one NaN smears the whole strip).
   Also done: **two-tier history + scrollback** (`fan-core/src/history.rs` —
   exact 600-sample ring plus a per-channel spill file of fixed 10-byte
   quantized records, delete-on-close, silent RAM-only degradation on any file
