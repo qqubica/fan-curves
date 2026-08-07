@@ -74,7 +74,20 @@ the shipping app until the port reaches feature parity.
   from an elevated shell does the shutdown-over-IPC → rebuild → start cycle
   (fans sit on the BIOS curve during the gap, the Pause state). Do NOT
   register the autostart task just to trampoline elevation — registration
-  stays an explicit act.
+  stays an explicit act. If the `FanCurvesDaemon` task IS already registered,
+  a non-elevated session can restart the elevated daemon via
+  `schtasks /Run /TN FanCurvesDaemon` — but **stop fan-ui FIRST**: an
+  offline UI auto-spawns a sim daemon that grabs the IPC socket
+  (single-instance lock), and the task-launched real daemon then exits
+  (happened 2026-08-07; symptom: ping says `"simulated":true` on real
+  hardware). Order: kill UI/tray → IPC `shutdown` → wait for exit →
+  `schtasks /Run` → verify ping shows the NCT6686D backend → relaunch tray/UI.
+  **Known stale path (2026-08-07)**: the registered task points at
+  `.claude\worktrees\wise-wibbling-cocoa\rust\target\release\fan-daemon.exe`
+  (autostart registers `current_exe`, and it was registered from a worktree
+  run); the fresh main-checkout build is copied over that path for now.
+  Proper fix — re-register from the main-checkout exe — needs an elevated
+  shell (`--install-autostart` or `schtasks /Change`).
 - **Footprint rules** (the port's reason to exist): release profile runs fat
   LTO + `codegen-units 1` + symbol strip, but `panic` stays **"unwind" on
   purpose** — a panicking daemon must unwind through `FanEngine::drop` so the
