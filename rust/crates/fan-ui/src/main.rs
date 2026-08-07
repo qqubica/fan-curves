@@ -43,6 +43,12 @@ const DEV_SIZE: [f32; 2] = [1336.0, 830.0];
 const SIDEBAR_WIDTH: f32 = 252.0;
 
 fn main() -> eframe::Result {
+    // ONE window only: the first instance holds a lock socket; a later launch
+    // asks it to come to the front and exits instead of opening a second
+    // window (two live mirrors polling the daemon bought nothing).
+    let Some(instance_lock) = single_instance() else {
+        return Ok(());
+    };
     let dev = std::env::args().any(|a| a == "--dev");
     let options = eframe::NativeOptions {
         viewport: ViewportBuilder::default()
@@ -67,8 +73,10 @@ fn main() -> eframe::Result {
             visuals.panel_fill = CANVAS;
             cc.egui_ctx.set_visuals(visuals);
             let link = client::start(cc.egui_ctx.clone());
+            let focus_requested = watch_instance_lock(instance_lock, cc.egui_ctx.clone());
             Ok(Box::new(App {
                 link,
+                focus_requested,
                 selected: 0,
                 dev,
                 draft: None,
@@ -93,6 +101,9 @@ fn main() -> eframe::Result {
 
 struct App {
     link: Link,
+    /// Set by the instance-lock thread when a second launch knocked — the next
+    /// frame raises this window instead.
+    focus_requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
     selected: usize,
     dev: bool,
     /// The profile the UI edits. Seeded from the daemon and re-seeded whenever
@@ -118,12 +129,12 @@ struct App {
     drag_remainder: f32,
 }
 
-/// The app has exactly three window sizes and no drag-resize, cycled in this
-/// order by the size button — whose glyph previews the NEXT one.
+/// The app has exactly two window sizes and no drag-resize, toggled by the
+/// size button — whose label previews the NEXT one. (Quarter-of-screen was
+/// removed 2026-08-07 on Kuba's ask.)
 #[derive(Clone, Copy, PartialEq)]
 enum SizeMode {
     Fixed,
-    Quarter,
     Max,
 }
 
@@ -164,14 +175,21 @@ impl eframe::App for App {
         // cycle_size) — without it Windows refuses to drag-restore a maximized
         // window from its title bar ("can't move the window in fullscreen").
         // When the OS restores it (title-bar drag, caption button), it comes
-        // back at the pre-maximize size — Quarter — so follow with the mode
-        // and drop the resize style again.
+        // back at the pre-maximize size — the fixed window — so follow with
+        // the mode and drop the resize style again.
         let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
         if self.size_mode == SizeMode::Max && self.was_maximized && !maximized {
-            self.size_mode = SizeMode::Quarter;
+            self.size_mode = SizeMode::Fixed;
             ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Resizable(false));
         }
         self.was_maximized = maximized;
+
+        // A second launch knocked on the instance lock: this window IS the
+        // app now — unminimize and take focus.
+        if self.focus_requested.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Focus);
+        }
 
         // Re-seed the draft when the daemon's profile was replaced under us
         // (first connect, preset switch) — never on an ordinary status poll,
@@ -497,25 +515,14 @@ impl App {
         ctx.send_viewport_cmd(eframe::egui::ViewportCommand::InnerSize(Vec2::new(s[0], s[1])));
     }
 
-    /// Fixed → Quarter → Max → Fixed. Quarter is half the monitor in each
-    /// dimension, i.e. a quarter of the screen.
+    /// Fixed ↔ Max.
     fn cycle_size(&mut self, ctx: &Context) {
         self.size_mode = match self.size_mode {
-            SizeMode::Fixed => SizeMode::Quarter,
-            SizeMode::Quarter => SizeMode::Max,
+            SizeMode::Fixed => SizeMode::Max,
             SizeMode::Max => SizeMode::Fixed,
         };
         match self.size_mode {
             SizeMode::Fixed => self.apply_fixed_size(ctx),
-            SizeMode::Quarter => {
-                let monitor = ctx.input(|i| i.viewport().monitor_size).unwrap_or(Vec2::new(1920.0, 1080.0));
-                ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Maximized(false));
-                ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Resizable(false));
-                ctx.send_viewport_cmd(eframe::egui::ViewportCommand::InnerSize(Vec2::new(
-                    monitor.x / 2.0,
-                    monitor.y / 2.0,
-                )));
-            }
             SizeMode::Max => {
                 // Resizable while maximized ONLY: the style (WS_THICKFRAME |
                 // WS_MAXIMIZEBOX) is what makes Windows honour a title-bar
@@ -621,10 +628,9 @@ impl App {
             ui.label(RichText::new("Fan Curves").font(FontId::proportional(13.0)).color(TEXT));
 
             ui.with_layout(eframe::egui::Layout::right_to_left(eframe::egui::Align::Center), |ui| {
-                // Size cycle: Fixed → Quarter → Max → Fixed, label previews next.
+                // Size toggle: Fixed ↔ Max, label previews the next size.
                 let next = match self.size_mode {
-                    SizeMode::Fixed => "Quarter",
-                    SizeMode::Quarter => "Maximize",
+                    SizeMode::Fixed => "Maximize",
                     SizeMode::Max => "Restore",
                 };
                 if ui
@@ -701,6 +707,7 @@ impl App {
             .stroke(Stroke::new(1.0, Color32::from_white_alpha(20)))
             .corner_radius(CornerRadius::same(255)) // pill (u8 radius, so max out)
             .inner_margin(Margin::symmetric(10, 6))
+            .shadow(GLOW)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let (r, _) = ui.allocate_exact_size(Vec2::splat(7.0), Sense::hover());
@@ -815,6 +822,7 @@ impl App {
                 .stroke(Stroke::new(1.0, Color32::from_white_alpha(18)))
                 .corner_radius(CornerRadius::same(11))
                 .inner_margin(Margin::same(3))
+                .shadow(GLOW)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         for (i, c) in snap.channels.iter().enumerate() {
@@ -892,9 +900,10 @@ fn preset_card(ui: &mut eframe::egui::Ui, title: &str, subtitle: &str, on: bool)
     let width = ui.available_width();
     let response = Frame::new()
         .fill(if on { Color32::from_white_alpha(16) } else { CARD })
-        .stroke(Stroke::new(1.0, if on { Color32::from_white_alpha(66) } else { HAIRLINE }))
+        .stroke(Stroke::new(1.0, if on { Color32::from_white_alpha(66) } else { Color32::from_white_alpha(28) }))
         .corner_radius(CornerRadius::same(10))
         .inner_margin(Margin::symmetric(12, 10))
+        .shadow(GLOW)
         .show(ui, |ui| {
             ui.set_width(width - 26.0);
             ui.horizontal(|ui| {
@@ -946,13 +955,65 @@ fn format_avg(secs: f64) -> String {
     }
 }
 
-/// The app's card surface: near-black fill, hairline edge, generous radius.
+/// Soft white outer glow on card/area edges (Kuba's ask 2026-08-07). Kept
+/// faint: it reads as the edge catching light, not as a halo. PREMULTIPLIED —
+/// equal components are white-at-alpha.
+pub const GLOW: eframe::egui::epaint::Shadow = eframe::egui::epaint::Shadow {
+    offset: [0, 0],
+    blur: 18,
+    spread: 1,
+    color: Color32::from_rgba_premultiplied(13, 13, 13, 13),
+};
+
+/// The app's card surface: near-black fill, hairline edge, generous radius,
+/// glowing rim.
 fn card_frame() -> Frame {
     Frame::new()
         .fill(CARD)
-        .stroke(Stroke::new(1.0, HAIRLINE))
+        .stroke(Stroke::new(1.0, Color32::from_white_alpha(28)))
         .corner_radius(CornerRadius::same(16))
         .inner_margin(Margin::same(16))
+        .shadow(GLOW)
+}
+
+/// First instance: bind the lock and keep it. Second instance: knock on it so
+/// the existing window raises itself, and return None. The name derives from
+/// the daemon socket name, so a `FAN_CURVES_SOCKET` dev stack locks separately.
+fn single_instance() -> Option<interprocess::local_socket::Listener> {
+    use interprocess::local_socket::traits::Stream as _;
+    use interprocess::local_socket::{GenericNamespaced, ListenerOptions, Stream, ToNsName};
+    let name_str = format!("{}.ui", fan_core::ipc_socket_name());
+    let name = name_str.as_str().to_ns_name::<GenericNamespaced>().ok()?;
+    match ListenerOptions::new().name(name.clone()).create_sync() {
+        Ok(listener) => Some(listener),
+        Err(_) => {
+            if let Ok(stream) = Stream::connect(name) {
+                use std::io::Write;
+                let _ = (&stream).write_all(b"focus\n");
+            }
+            None
+        }
+    }
+}
+
+/// Own the instance lock for the process lifetime; any connection to it means
+/// "a second launch happened — raise the window".
+fn watch_instance_lock(
+    listener: interprocess::local_socket::Listener,
+    ctx: Context,
+) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    use interprocess::local_socket::traits::ListenerExt as _;
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let out = std::sync::Arc::clone(&flag);
+    std::thread::spawn(move || {
+        for conn in listener.incoming() {
+            // The connection itself is the message; drop it right away.
+            drop(conn);
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            ctx.request_repaint();
+        }
+    });
+    out
 }
 
 /// Bare text button (CLEAR / LIVE): no fill, no border — the WPF strip's style.

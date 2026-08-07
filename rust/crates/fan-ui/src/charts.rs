@@ -465,13 +465,24 @@ pub fn draw_history_strip(painter: &Painter, rect: Rect, snap: &Snapshot) {
     }
 
     if count >= 2 {
-        // Fan % under-fill + dim trace.
+        // Fan % under-fill + dim trace. The staircase outline is CONCAVE, and
+        // `convex_polygon` fills a concave outline with criss-crossing
+        // triangles (visible smears) — so the fill is a hand-built triangle
+        // strip down to the baseline instead.
         let line: Vec<Pos2> =
             visible.iter().enumerate().map(|(i, s)| Pos2::new(x(i), y_pct(s.out))).collect();
-        let mut fill = line.clone();
-        fill.push(Pos2::new(x(count - 1), plot.max.y));
-        fill.push(Pos2::new(x(0), plot.max.y));
-        painter.add(Shape::convex_polygon(fill, Color32::from_white_alpha(8), Stroke::NONE));
+        let fill_color = Color32::from_white_alpha(8);
+        let mut mesh = eframe::egui::Mesh::default();
+        for (i, p) in line.iter().enumerate() {
+            mesh.colored_vertex(*p, fill_color);
+            mesh.colored_vertex(Pos2::new(p.x, plot.max.y), fill_color);
+            if i > 0 {
+                let b = (2 * i) as u32;
+                mesh.add_triangle(b - 2, b - 1, b);
+                mesh.add_triangle(b - 1, b + 1, b);
+            }
+        }
+        painter.add(Shape::mesh(mesh));
         painter.add(Shape::line(line, Stroke::new(1.5, Color32::from_white_alpha(102))));
 
         // Raw "now" temp, faint — a missing reading BREAKS the line rather
@@ -493,10 +504,24 @@ pub fn draw_history_strip(painter: &Painter, rect: Rect, snap: &Snapshot) {
             painter.add(Shape::line(run, Stroke::new(1.0, FAINT)));
         }
 
-        // Rolling average — the bright trace.
-        let avg: Vec<Pos2> =
-            visible.iter().enumerate().map(|(i, s)| Pos2::new(x(i), y_temp(s.avg))).collect();
-        painter.add(Shape::line(avg, Stroke::new(2.0, TEXT)));
+        // Rolling average — the bright trace. NaN (no reading) BREAKS the
+        // line like the raw trace: a NaN vertex poisons the tessellator and
+        // smears the whole strip.
+        let mut avg_run: Vec<Pos2> = Vec::new();
+        for (i, s) in visible.iter().enumerate() {
+            if s.avg.is_nan() {
+                if avg_run.len() >= 2 {
+                    painter.add(Shape::line(std::mem::take(&mut avg_run), Stroke::new(2.0, TEXT)));
+                } else {
+                    avg_run.clear();
+                }
+            } else {
+                avg_run.push(Pos2::new(x(i), y_temp(s.avg)));
+            }
+        }
+        if avg_run.len() >= 2 {
+            painter.add(Shape::line(avg_run, Stroke::new(2.0, TEXT)));
+        }
 
         // Fan ON/OFF baseline ticks (ON brighter), and the stopped-time span
         // between an OFF and the next ON — how long the fan actually rested.

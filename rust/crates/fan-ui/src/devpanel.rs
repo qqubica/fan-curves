@@ -223,6 +223,8 @@ pub fn draw(
     let changed = &mut edited;
     ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         ui.set_width(PANEL_WIDTH - 16.0);
+        // Full-width slider tracks — egui's default is a fixed ~100 px stub.
+        ui.spacing_mut().slider_width = ui.available_width();
 
         // ---- CHANNEL RESPONSE — the one group with no switch: following the
         // curve at all has no on/off, and its knobs can be flattened one by one.
