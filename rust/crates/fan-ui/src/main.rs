@@ -49,7 +49,10 @@ fn main() -> eframe::Result {
     let Some(instance_lock) = single_instance() else {
         return Ok(());
     };
-    let dev = std::env::args().any(|a| a == "--dev");
+    // Developer mode is the launch default (2026-08-07); the sidebar chip
+    // under Pause drops back to the simple window. `--dev` is accepted but
+    // redundant now.
+    let dev = true;
     let options = eframe::NativeOptions {
         viewport: ViewportBuilder::default()
             .with_inner_size(if dev { DEV_SIZE } else { SIMPLE_SIZE })
@@ -184,8 +187,8 @@ impl eframe::App for App {
             .frame(Frame::new().fill(CANVAS).inner_margin(Margin::same(14)))
             .show(ctx, |ui| {
                 // Layout mirrors the WPF grid: sidebar 252 | charts * | dev 300.
-                self.title_bar(ui);
-                ui.add_space(10.0);
+                // No in-app title row since 2026-08-07 — the OS caption
+                // already carries the icon and name.
                 ui.horizontal_top(|ui| {
                     let full_h = ui.available_height();
 
@@ -571,30 +574,6 @@ impl App {
         self.push_pending = true;
     }
 
-    /// Title bar: fan glyph, name, and the mode toggle — the WPF caption row.
-    fn title_bar(&mut self, ui: &mut eframe::egui::Ui) {
-        ui.horizontal(|ui| {
-            // The app mark. It spins in the WPF app; here it is static, because
-            // the repaint rules forbid a perpetual animation and this UI paints
-            // once per engine tick.
-            let (rect, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
-            icon::draw_glyph(ui.painter(), rect.center(), 20.0, Color32::from_white_alpha(217));
-            ui.add_space(6.0);
-            ui.label(RichText::new("Fan Curves").font(FontId::proportional(13.0)).color(TEXT));
-
-            ui.with_layout(eframe::egui::Layout::right_to_left(eframe::egui::Align::Center), |ui| {
-                if ui
-                    .add(chip_button("Developer"))
-                    .on_hover_text("Show the developer panel, the history strip and curve editing")
-                    .clicked()
-                {
-                    self.dev = !self.dev;
-                    self.apply_fixed_size(ui.ctx());
-                }
-            });
-        });
-    }
-
     /// Sidebar: hero, status chip, preset cards, pause — the WPF column order.
     fn sidebar(&mut self, ui: &mut eframe::egui::Ui, snap: &Snapshot) {
         let ch = snap.channels.get(snap.selected);
@@ -696,6 +675,18 @@ impl App {
                 .link
                 .tx
                 .send(if snap.applying { Cmd::Pause } else { Cmd::Apply });
+        }
+
+        // The mode toggle, seated under Pause since 2026-08-07 (it lived in
+        // the removed in-app title row before).
+        ui.add_space(8.0);
+        if ui
+            .add(chip_button("Developer").min_size(Vec2::new(ui.available_width(), 28.0)))
+            .on_hover_text("Show or hide the developer panel, the history strip and curve editing")
+            .clicked()
+        {
+            self.dev = !self.dev;
+            self.apply_fixed_size(ui.ctx());
         }
 
         // Footer pinned to the bottom of the sidebar, with the residency

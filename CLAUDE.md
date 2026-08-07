@@ -125,10 +125,18 @@ the shipping app until the port reaches feature parity.
   right-click remove, committing on RELEASE so one drag is one undo entry),
   **undo-redo** (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z, CurveEdit + TuningEdit), and
   the **why-chip** in the chart corner with the original wordings.
-  Also done: the **app icon** (`icon.rs` — one geometry drawn twice, the WPF
-  title-bar canvas and TrayIcon's 32×32; the glyph is STATIC on purpose, a
-  perpetual spin violates the repaint rules), the strip's **hover crosshair +
+  Also done: the **app icon** (window/taskbar icon from `fan_core::icon` via
+  fan-ui's `icon.rs`), the strip's **hover crosshair +
   readout chip**, **stopped-time spans**, and **CLEAR**.
+  **Developer mode is the launch default and the in-app title row is gone
+  (2026-08-07**, "move the developer mode button under the pause button and
+  enable developer mode" + "remove the logo and app name from the top left
+  corner"): fan-ui opens at DEV_SIZE with the panel showing (`--dev` is
+  accepted but redundant), the Developer chip is a full-width button in the
+  sidebar directly under Pause, and the glyph + "Fan Curves" row above the
+  grid was deleted — the OS caption still carries the icon and name (native
+  chrome; removing it would cost the caption buttons). fan-ui's `draw_glyph`
+  went with the row; the drawn geometry survives in `fan_core::icon`.
   **No size button at all since 2026-08-07** (Kuba: "Remove completely the
   button to change window size" — earlier the same day the quarter-of-screen
   step went, then the whole Fixed ↔ Max toggle): the egui window has exactly
@@ -206,7 +214,8 @@ the shipping app until the port reaches feature parity.
 - **The layout follows the WPF grid `252 | * | Auto`** (verified by
   screenshotting the running .NET app and comparing): sidebar = hero label,
   int/frac hero numeral, status-chip pill, PROFILE, preset CARDS, full-width
-  pause; middle = **ONE card** holding the segmented channel header, the
+  pause, then the Developer chip (since 2026-08-07 — no in-app title row);
+  middle = **ONE card** holding the segmented channel header, the
   detail line, the curve, the hint and the history strip; dev panel on the
   **RIGHT** as one card with letter-spaced headers. Do not reintroduce
   per-group boxes or move the panel between the hero and the chart.
