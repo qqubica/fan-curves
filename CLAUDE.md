@@ -225,6 +225,14 @@ the shipping app until the port reaches feature parity.
     right-to-left layout inside it claims the whole row (it ate the dev
     panel's space). Allocate the exact region with `allocate_ui_with_layout`
     first, then draw the card inside it.
+  - egui: a `Frame` also GROWS to its child — `set_width` on the frame's ui
+    is a floor, not a cap, and a vertical `ScrollArea` does not clip the
+    cross axis. The dev panel's old inner `set_width(PANEL_WIDTH - 16)`
+    (wider than the card's `PANEL_WIDTH - 36` content) silently widened the
+    card ~20 px past its allocation, parking the right border past the
+    window edge — "invisible" no matter how the row math was fixed
+    (2026-08-07; found by scanning screenshot pixel columns for the stroke).
+    Inner content must size from `available_width()`, never a constant.
   - The default font has no U+2713; the preset tick is drawn with two line
     segments, not typed.
   - Edits go through **`update_profile`**, never `set_profile`: the latter

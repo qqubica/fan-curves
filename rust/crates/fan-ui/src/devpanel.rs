@@ -222,7 +222,11 @@ pub fn draw(
     let mut edited = Edited::default();
     let changed = &mut edited;
     ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        ui.set_width(PANEL_WIDTH - 16.0);
+        // Fit INSIDE the card: the caller fixed the card's content width, and
+        // any wider set_width here silently widens the whole card — Frame
+        // sizes itself to its child and ScrollArea does not clip the cross
+        // axis, which is how the panel's right border ended up off-window.
+        ui.set_width(ui.available_width());
         // Full-width slider tracks — egui's default is a fixed ~100 px stub.
         ui.spacing_mut().slider_width = ui.available_width();
 
