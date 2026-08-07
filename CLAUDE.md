@@ -115,16 +115,14 @@ the shipping app until the port reaches feature parity.
   Also done: the **app icon** (`icon.rs` — one geometry drawn twice, the WPF
   title-bar canvas and TrayIcon's 32×32; the glyph is STATIC on purpose, a
   perpetual spin violates the repaint rules), the strip's **hover crosshair +
-  readout chip**, **stopped-time spans**, **CLEAR**, and the **two-size
-  window toggle** (Fixed ↔ Max — the quarter-of-screen step existed until
-  2026-08-07, removed on Kuba's ask "remove the quarter button"; the WPF app
-  keeps its three sizes). Maximized is **drag-restorable** (2026-08-07, "in
-  fullscreen I can't move the window"): Windows refuses to drag-restore a
-  window without the resize style, so `cycle_size` sends `Resizable(true)`
-  only while entering Max and `update` watches `viewport().maximized` — when
-  the OS restores it (title-bar drag / caption button) the mode falls back to
-  Fixed and the style is dropped again, keeping drag-resize disabled
-  everywhere else.
+  readout chip**, **stopped-time spans**, and **CLEAR**.
+  **No size button at all since 2026-08-07** (Kuba: "Remove completely the
+  button to change window size" — earlier the same day the quarter-of-screen
+  step went, then the whole Fixed ↔ Max toggle): the egui window has exactly
+  one size per mode (SIMPLE_SIZE / DEV_SIZE, switched by the Developer chip),
+  no drag-resize, no maximize; the `SizeMode` enum, `cycle_size` and the
+  maximize/drag-restore watcher were deleted with the button. The WPF app
+  keeps its three sizes and its drag-restore `Chrome` hook.
   **One window only (2026-08-07)**: the first fan-ui binds a lock socket named
   `<ipc_socket_name()>.ui` (so a `FAN_CURVES_SOCKET` dev stack locks
   separately) and a later launch connects to it — which tells the first

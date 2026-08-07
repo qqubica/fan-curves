@@ -90,8 +90,6 @@ fn main() -> eframe::Result {
                 utc_offset_secs: time::UtcOffset::current_local_offset()
                     .map(|o| o.whole_seconds() as i64)
                     .unwrap_or(0),
-                size_mode: SizeMode::Fixed,
-                was_maximized: false,
                 viewport: history::Viewport::default(),
                 drag_remainder: 0.0,
             }))
@@ -120,22 +118,9 @@ struct App {
     undo: Vec<Edit>,
     redo: Vec<Edit>,
     utc_offset_secs: i64,
-    size_mode: SizeMode,
-    /// Last observed OS maximize state — detects the OS restoring the window
-    /// (title-bar drag / caption button) so `size_mode` can follow.
-    was_maximized: bool,
     viewport: history::Viewport,
     /// Sub-sample drag leftover, so a slow drag still pans.
     drag_remainder: f32,
-}
-
-/// The app has exactly two window sizes and no drag-resize, toggled by the
-/// size button — whose label previews the NEXT one. (Quarter-of-screen was
-/// removed 2026-08-07 on Kuba's ask.)
-#[derive(Clone, Copy, PartialEq)]
-enum SizeMode {
-    Fixed,
-    Max,
 }
 
 /// Undo covers curve edits AND preset switches — a preset click overwrites
@@ -170,19 +155,6 @@ impl eframe::App for App {
             )
         };
         self.selected = snap.selected;
-
-        // While maximized the window carries the OS resize style (set in
-        // cycle_size) — without it Windows refuses to drag-restore a maximized
-        // window from its title bar ("can't move the window in fullscreen").
-        // When the OS restores it (title-bar drag, caption button), it comes
-        // back at the pre-maximize size — the fixed window — so follow with
-        // the mode and drop the resize style again.
-        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-        if self.size_mode == SizeMode::Max && self.was_maximized && !maximized {
-            self.size_mode = SizeMode::Fixed;
-            ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Resizable(false));
-        }
-        self.was_maximized = maximized;
 
         // A second launch knocked on the instance lock: this window IS the
         // app now — unminimize and take focus.
@@ -507,32 +479,10 @@ impl App {
         snap.is_live = live;
     }
 
-    /// The fixed size for the current mode.
+    /// The fixed size for the current mode (simple or dev).
     fn apply_fixed_size(&self, ctx: &Context) {
         let s = if self.dev { DEV_SIZE } else { SIMPLE_SIZE };
-        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Maximized(false));
-        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Resizable(false));
         ctx.send_viewport_cmd(eframe::egui::ViewportCommand::InnerSize(Vec2::new(s[0], s[1])));
-    }
-
-    /// Fixed ↔ Max.
-    fn cycle_size(&mut self, ctx: &Context) {
-        self.size_mode = match self.size_mode {
-            SizeMode::Fixed => SizeMode::Max,
-            SizeMode::Max => SizeMode::Fixed,
-        };
-        match self.size_mode {
-            SizeMode::Fixed => self.apply_fixed_size(ctx),
-            SizeMode::Max => {
-                // Resizable while maximized ONLY: the style (WS_THICKFRAME |
-                // WS_MAXIMIZEBOX) is what makes Windows honour a title-bar
-                // drag on a maximized window (restore-and-move). There is no
-                // visible frame to grab while maximized, and the style is
-                // dropped again the moment the window leaves Max.
-                ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Resizable(true));
-                ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Maximized(true));
-            }
-        }
     }
 
     /// Adopt a preset locally (so it is undoable) and tell the daemon.
@@ -628,28 +578,13 @@ impl App {
             ui.label(RichText::new("Fan Curves").font(FontId::proportional(13.0)).color(TEXT));
 
             ui.with_layout(eframe::egui::Layout::right_to_left(eframe::egui::Align::Center), |ui| {
-                // Size toggle: Fixed ↔ Max, label previews the next size.
-                let next = match self.size_mode {
-                    SizeMode::Fixed => "Maximize",
-                    SizeMode::Max => "Restore",
-                };
-                if ui
-                    .add(chip_button(next))
-                    .on_hover_text("Cycle the window size — the label is the next size")
-                    .clicked()
-                {
-                    self.cycle_size(ui.ctx());
-                }
-                ui.add_space(8.0);
                 if ui
                     .add(chip_button("Developer"))
                     .on_hover_text("Show the developer panel, the history strip and curve editing")
                     .clicked()
                 {
                     self.dev = !self.dev;
-                    if self.size_mode == SizeMode::Fixed {
-                        self.apply_fixed_size(ui.ctx());
-                    }
+                    self.apply_fixed_size(ui.ctx());
                 }
             });
         });
