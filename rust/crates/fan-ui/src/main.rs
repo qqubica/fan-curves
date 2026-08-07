@@ -774,16 +774,6 @@ impl App {
             ui.label(RichText::new(line).font(FontId::proportional(10.0)).color(FAINT));
             ui.add_space(8.0);
 
-            if snap.autostart_conflict && snap.autostart {
-                ui.label(
-                    RichText::new(
-                        "Both this daemon and the .NET app start at logon — they will fight \
-                         over the headers. Disable one.",
-                    )
-                    .font(FontId::proportional(10.0))
-                    .color(AMBER),
-                );
-            }
             let mut on = snap.autostart;
             if ui
                 .add_enabled(
