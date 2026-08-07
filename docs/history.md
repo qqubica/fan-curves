@@ -924,3 +924,50 @@ exits with an error otherwise), but Windows 11 files new tray icons into the
 overflow flyout, and a scripted click on the chevron did not land — so the icon
 was not visually confirmed in the notification area. Drag it out of the
 overflow to pin it.
+
+## Rust port: daemon-owned strip history — the UI stops starting from scratch (2026-08-07)
+
+Kuba: "the graph history should not start from scratch when you launch the
+UI." The strip's samples were collected by the UI process itself (one per
+status poll), and the UI fully exits on close — so every launch began with an
+empty strip. The fix follows the architecture instead of fighting it: the
+daemon is the resident part, so the daemon owns the history.
+
+- `ChannelHistory`/`Viewport` moved from fan-ui into `fan-core/src/history.rs`
+  and both processes keep one. The daemon records a sample per channel per
+  tick around the clock, retaining ~24 h: `KEEP = 86 400` samples, and the
+  spill file compacts to the newest day once it holds two (one ~0.9 MB rewrite
+  a day per channel, absolute indices preserved), so a daemon that runs for
+  weeks never grows the file unbounded.
+- IPC: `status` gained per-channel `{first, total}` retention bounds;
+  `history` pages samples by absolute index (≤4096 per reply, compact
+  `[wall, avg, raw, out]` rows with nulls for missing readings, ranges inside
+  the ring served exact with no disk I/O); `clear_history` wipes every
+  channel. The daemon-side `respond()` grew a unit test covering bounds,
+  paging, the chunk cap, null round-trips and clear.
+- The UI is now a MIRROR: on every (re)connect it wipes its local store and
+  backfills everything the daemon retains (chunked oldest→newest; a full-day
+  backfill is ~21 round-trips, under a second), then follows along one sample
+  per poll. Samples therefore come from daemon TICKS, not UI polls — two
+  windows, or the same window closed and reopened, see the same series.
+  CLEAR goes through the daemon (a mirror-only clear would refill on next
+  launch). A daemon too old to serve history is detected per status reply and
+  the UI falls back to the old poll-synthesized samples.
+- `HistorySample` lost its UI-relative `t` (seconds since connect); the
+  "ago" and stopped-span math now uses wall-clock differences, which is what
+  makes backfilled timestamps read correctly in the hover chip and spans.
+- The socket name was consolidated into `fan_core::ipc_socket_name()` — the
+  daemon, UI and tray each had their own copy of the constant — with a
+  `FAN_CURVES_SOCKET` env override so a development daemon+UI pair can run
+  beside the live stack. That override is also how this change was verified
+  end-to-end on a machine whose real daemon was busy driving the actual fans:
+  an isolated `--sim` daemon + UI on a test socket, launched twice, with the
+  second launch showing the full timeline recorded while no window existed.
+
+Deployment note: the live stack runs from `rust/target/release`. The UI and
+tray are non-elevated and were swapped in place (rename the locked exe aside,
+rebuild, restart), but the daemon runs elevated and a non-elevated session
+cannot restart it — registering the autostart task just to trampoline
+elevation was deliberately not done (autostart stays an explicit act). The
+old daemon keeps running from `fan-daemon-old.exe` until an elevated shell
+swaps it; history accumulation starts at that moment.

@@ -87,10 +87,14 @@ the shipping app until the port reaches feature parity.
   UTC offset captured once at startup — DST flips shift timestamps until
   restart). IPC = local socket `fan-curves-daemon.sock` (named pipe on
   Windows), line-delimited JSON: ping / status / profile / set_profile /
-  preset / apply / pause / shutdown; binding doubles as the single-instance
-  lock; `--send <json>` is the built-in client. Service/autostart wiring
-  deferred to the hardware-backend phase (autostarting a sim-only daemon is
-  pointless).
+  update_profile / inventory / preset / apply / pause / set_autostart /
+  history / clear_history / shutdown; binding doubles as the single-instance
+  lock; `--send <json>` is the built-in client. The socket name lives in ONE
+  place, `fan_core::ipc_socket_name()` (daemon, UI and tray all call it), and
+  the `FAN_CURVES_SOCKET` env var overrides it — that is how a development
+  daemon+UI pair runs beside the live stack without cross-talk (2026-08-07).
+  Service/autostart wiring deferred to the hardware-backend phase
+  (autostarting a sim-only daemon is pointless).
 - **UI feature parity with the WPF app is TRACKED, not assumed.** Done:
   simple mode, **developer mode** (`devpanel.rs`, all eleven groups with the
   WPF labels/ranges/step snapping/value formats/tooltips, master-checkbox
@@ -104,12 +108,33 @@ the shipping app until the port reaches feature parity.
   perpetual spin violates the repaint rules), the strip's **hover crosshair +
   readout chip**, **stopped-time spans**, **CLEAR**, and the **three-size
   window cycle**.
-  Also done: **two-tier history + scrollback** (`history.rs` — exact 600-sample
-  ring plus a per-channel spill file of fixed 10-byte quantized records,
-  delete-on-close, silent RAM-only degradation on any file error; the viewport
-  anchors on ABSOLUTE indices so incoming ticks never move a scrolled window
-  and CLEAR strands an anchor harmlessly; wheel ≈1 min/notch, 10× with Shift,
-  drag with a fractional remainder, double-click / LIVE back to now).
+  Also done: **two-tier history + scrollback** (`fan-core/src/history.rs` —
+  exact 600-sample ring plus a per-channel spill file of fixed 10-byte
+  quantized records, delete-on-close, silent RAM-only degradation on any file
+  error; the viewport anchors on ABSOLUTE indices so incoming ticks never move
+  a scrolled window and CLEAR strands an anchor harmlessly; wheel ≈1 min/notch,
+  10× with Shift, drag with a fractional remainder, double-click / LIVE back
+  to now).
+- **History is DAEMON-owned since 2026-08-07** ("the graph history should not
+  start from scratch when you launch the UI"): the daemon records a
+  `HistorySample` per channel per tick into the shared two-tier store (which
+  moved from fan-ui into fan-core for exactly this), retains ~24 h (`KEEP` =
+  86 400 samples; the spill compacts to the newest day once it holds two, so a
+  weeks-long daemon never grows the file past ~1.7 MB/channel), and serves it
+  over IPC: `status` gains per-channel `{first,total}` bounds and `history`
+  pages samples by absolute index (≤4096/reply, compact `[wall,avg,raw,out]`
+  rows, nulls for missing readings). The UI keeps only a MIRROR: on every
+  (re)connect it wipes the local store and backfills from the daemon (chunked,
+  oldest→newest — a 24 h backfill is ~21 round-trips, under a second), then
+  follows along one sample per poll (served from the daemon's ring, no disk
+  I/O on either side). Steady-state samples come from daemon TICKS, not UI
+  polls, so two UI launches see the same series. CLEAR sends `clear_history`
+  (a mirror-only clear would refill on the next launch) and wipes the mirror
+  regardless of the reply; against a daemon too old to serve history the UI
+  falls back to the old poll-synthesized samples, detected per status reply.
+  `HistorySample` lost its UI-relative `t` field — wall-clock differences
+  drive the "ago"/stopped-span math, which is also what makes backfilled
+  timestamps correct.
 - **Tray = launcher only** (`crates/fan-tray`, Windows): the daemon is the
   resident part and the UI is disposable, so there is nothing to minimise INTO
   the tray. Runs **non-elevated on purpose** — the daemon has admin, and
@@ -224,9 +249,10 @@ the shipping app until the port reaches feature parity.
     same profile and drove the real headers through the full MacBook sequence
     — 40% → 25 s step-down hold → hysteresis → slew ramp to 20%, both NH-D15
     fans at ~330/373 rpm, exactly what the C# app produced at the same duty.
-    The daemon has **no autostart and no tray**: after a reboot the scheduled
-    task starts the WPF app again, which is the intended safe default until
-    the port takes over for real.
+    The daemon's autostart task is **not registered** (the tray exists but is
+    launcher-only): after a reboot the scheduled task starts the WPF app
+    again, which is the intended safe default until the port takes over for
+    real.
 - **Phase 5 (done 2026-08-06): Linux hwmon backend** (`fan-core/src/hwmon.rs`)
   — sysfs enumeration, millidegree temps, tach, pwm 0–255 writes with
   `pwmN_enable` saved on first write and restored on release (the SetDefault
