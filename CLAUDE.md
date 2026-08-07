@@ -281,10 +281,14 @@ the shipping app until the port reaches feature parity.
     same profile and drove the real headers through the full MacBook sequence
     — 40% → 25 s step-down hold → hysteresis → slew ramp to 20%, both NH-D15
     fans at ~330/373 rpm, exactly what the C# app produced at the same duty.
-    The daemon's autostart task is **not registered** (the tray exists but is
-    launcher-only): after a reboot the scheduled task starts the WPF app
-    again, which is the intended safe default until the port takes over for
-    real.
+    **The Rust daemon is the reboot default since 2026-08-07** (Kuba: "remove
+    wpf"): the `FanCurvesDaemon` logon task is registered (pointing at the
+    wise-wibbling-cocoa worktree's release build) and the WPF `FanCurves`
+    task was deleted, with `AutostartEnabled: false` written into
+    profile.json so a stray WPF launch does not re-register it (App.xaml.cs
+    gates `Autostart.Ensure()` on that flag; the Rust code deserializes the
+    field but never reads it). Re-enabling the WPF app = tick its "Start
+    with Windows" checkbox, and then the daemon task must go.
 - **Phase 5 (done 2026-08-06): Linux hwmon backend** (`fan-core/src/hwmon.rs`)
   — sysfs enumeration, millidegree temps, tach, pwm 0–255 writes with
   `pwmN_enable` saved on first write and restored on release (the SetDefault
