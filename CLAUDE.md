@@ -116,7 +116,13 @@ the shipping app until the port reaches feature parity.
   title-bar canvas and TrayIcon's 32×32; the glyph is STATIC on purpose, a
   perpetual spin violates the repaint rules), the strip's **hover crosshair +
   readout chip**, **stopped-time spans**, **CLEAR**, and the **three-size
-  window cycle**.
+  window cycle**. Maximized is **drag-restorable** (2026-08-07, "in fullscreen
+  I can't move the window"): Windows refuses to drag-restore a window without
+  the resize style, so `cycle_size` sends `Resizable(true)` only while
+  entering Max and `update` watches `viewport().maximized` — when the OS
+  restores it (title-bar drag / caption button) the mode falls back to
+  Quarter (the pre-maximize size the OS restores to) and the style is
+  dropped again, keeping drag-resize disabled everywhere else.
   Also done: **two-tier history + scrollback** (`fan-core/src/history.rs` —
   exact 600-sample ring plus a per-channel spill file of fixed 10-byte
   quantized records, delete-on-close, silent RAM-only degradation on any file
@@ -409,7 +415,11 @@ the shipping app until the port reaches feature parity.
   button (its glyph previews the next size); drag-resize disabled
   (`ResizeMode=CanMinimize`, `ResizeBorderThickness=0`), and a `WM_GETMINMAXINFO` hook
   in `Chrome` clamps maximize to the work area (borderless windows otherwise cover the
-  taskbar). Further elements: layered near-black surfaces (canvas `#0a0a0d`, cards `#111116` with light-from-above
+  taskbar). Dragging the maximized window's title bar restores it under the cursor and
+  keeps moving it (2026-08-07): without a maximize style Windows won't drag-restore, so
+  `Chrome`'s WndProc catches `WM_NCLBUTTONDOWN`/`HTCAPTION` while maximized, restores
+  (StateChanged → `EnterFixed`), repositions proportionally, and hands off to the OS
+  move loop via `WM_SYSCOMMAND` `SC_MOVE+HTCAPTION`. Further elements: layered near-black surfaces (canvas `#0a0a0d`, cards `#111116` with light-from-above
   gradient hairline + drop shadow), monochrome white at graded opacities, and ONE
   accent — warm amber `#FF9E5E` — reserved strictly for live thermal state (chart
   operating dot + crosshair with axis readout chips, status-chip dot, and the

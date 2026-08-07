@@ -83,6 +83,7 @@ fn main() -> eframe::Result {
                     .map(|o| o.whole_seconds() as i64)
                     .unwrap_or(0),
                 size_mode: SizeMode::Fixed,
+                was_maximized: false,
                 viewport: history::Viewport::default(),
                 drag_remainder: 0.0,
             }))
@@ -109,6 +110,9 @@ struct App {
     redo: Vec<Edit>,
     utc_offset_secs: i64,
     size_mode: SizeMode,
+    /// Last observed OS maximize state — detects the OS restoring the window
+    /// (title-bar drag / caption button) so `size_mode` can follow.
+    was_maximized: bool,
     viewport: history::Viewport,
     /// Sub-sample drag leftover, so a slow drag still pans.
     drag_remainder: f32,
@@ -155,6 +159,19 @@ impl eframe::App for App {
             )
         };
         self.selected = snap.selected;
+
+        // While maximized the window carries the OS resize style (set in
+        // cycle_size) — without it Windows refuses to drag-restore a maximized
+        // window from its title bar ("can't move the window in fullscreen").
+        // When the OS restores it (title-bar drag, caption button), it comes
+        // back at the pre-maximize size — Quarter — so follow with the mode
+        // and drop the resize style again.
+        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+        if self.size_mode == SizeMode::Max && self.was_maximized && !maximized {
+            self.size_mode = SizeMode::Quarter;
+            ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Resizable(false));
+        }
+        self.was_maximized = maximized;
 
         // Re-seed the draft when the daemon's profile was replaced under us
         // (first connect, preset switch) — never on an ordinary status poll,
@@ -476,6 +493,7 @@ impl App {
     fn apply_fixed_size(&self, ctx: &Context) {
         let s = if self.dev { DEV_SIZE } else { SIMPLE_SIZE };
         ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Maximized(false));
+        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Resizable(false));
         ctx.send_viewport_cmd(eframe::egui::ViewportCommand::InnerSize(Vec2::new(s[0], s[1])));
     }
 
@@ -492,12 +510,21 @@ impl App {
             SizeMode::Quarter => {
                 let monitor = ctx.input(|i| i.viewport().monitor_size).unwrap_or(Vec2::new(1920.0, 1080.0));
                 ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Maximized(false));
+                ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Resizable(false));
                 ctx.send_viewport_cmd(eframe::egui::ViewportCommand::InnerSize(Vec2::new(
                     monitor.x / 2.0,
                     monitor.y / 2.0,
                 )));
             }
-            SizeMode::Max => ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Maximized(true)),
+            SizeMode::Max => {
+                // Resizable while maximized ONLY: the style (WS_THICKFRAME |
+                // WS_MAXIMIZEBOX) is what makes Windows honour a title-bar
+                // drag on a maximized window (restore-and-move). There is no
+                // visible frame to grab while maximized, and the style is
+                // dropped again the moment the window leaves Max.
+                ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Resizable(true));
+                ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Maximized(true));
+            }
         }
     }
 

@@ -46,6 +46,20 @@ public static class Chrome
     // covers the whole screen, taskbar included — clamp it to the monitor work area.
     private const int WM_GETMINMAXINFO = 0x0024;
 
+    // Windows refuses to drag-restore a maximized window that has no maximize
+    // style (ResizeMode=CanMinimize) — the title-bar drag just dead-ends. Catch
+    // the caption click ourselves: restore under the cursor, then hand off to
+    // the OS move loop so the drag continues seamlessly.
+    private const int WM_NCLBUTTONDOWN = 0x00A1;
+    private const int WM_SYSCOMMAND = 0x0112;
+    private const int HTCAPTION = 2;
+    private const int SC_MOVE_CAPTION = 0xF012; // SC_MOVE + HTCAPTION
+
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorPos(out POINT pt);
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
+
     [StructLayout(LayoutKind.Sequential)] private struct POINT { public int X, Y; }
     [StructLayout(LayoutKind.Sequential)] private struct RECT { public int Left, Top, Right, Bottom; }
 
@@ -86,8 +100,35 @@ public static class Chrome
         return new Rect(topLeft, bottomRight);
     }
 
+    /// <summary>Cursor position in WPF device-independent units.</summary>
+    private static Point CursorDip(Window w)
+    {
+        GetCursorPos(out POINT pt);
+        var p = new Point(pt.X, pt.Y);
+        if (PresentationSource.FromVisual(w)?.CompositionTarget?.TransformFromDevice is System.Windows.Media.Matrix m)
+            p = m.Transform(p);
+        return p;
+    }
+
     private static IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
+        if (msg == WM_NCLBUTTONDOWN && wParam.ToInt64() == HTCAPTION
+            && HwndSource.FromHwnd(hwnd)?.RootVisual is Window w
+            && w.WindowState == WindowState.Maximized)
+        {
+            var wa = WorkAreaDip(w);
+            var cursor = CursorDip(w);
+            // Keep the cursor at the same relative spot on the caption after
+            // the restore, so the hand-off to the move loop doesn't jump.
+            double frac = wa.Width > 0 ? (cursor.X - wa.Left) / wa.Width : 0.5;
+            w.WindowState = WindowState.Normal; // StateChanged → EnterFixed
+            w.Left = cursor.X - w.Width * frac;
+            w.Top = wa.Top;
+            SendMessage(hwnd, WM_SYSCOMMAND, (IntPtr)SC_MOVE_CAPTION, IntPtr.Zero);
+            handled = true;
+            return IntPtr.Zero;
+        }
+
         if (msg != WM_GETMINMAXINFO) return IntPtr.Zero;
         IntPtr monitor = MonitorFromWindow(hwnd, 2 /* MONITOR_DEFAULTTONEAREST */);
         if (monitor == IntPtr.Zero) return IntPtr.Zero;
