@@ -55,6 +55,11 @@ fn main() -> eframe::Result {
             .with_inner_size(if dev { DEV_SIZE } else { SIMPLE_SIZE })
             .with_position([100.0, 100.0])
             .with_resizable(false)
+            // No size changes at all (2026-08-07): the in-app size chip is
+            // gone, so the caption's maximize button must go too — resizable
+            // false alone leaves it live, and a maximized fixed-layout window
+            // would have no way back.
+            .with_maximize_button(false)
             .with_title("Fan Curves")
             // Same mark as the WPF app's window/taskbar/tray icon.
             .with_icon(icon::icon_data()),
