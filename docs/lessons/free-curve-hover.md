@@ -1,0 +1,3 @@
+The developer settings curve crosshair follows the pointer on both axes, with full-plot guides and no center dot.
+
+The initial hover implementation evaluated the curve at the pointer temperature and placed the marker at that percentage. This made vertical movement snap to the configured staircase even while the pointer moved freely. Derive both temperature and percentage from the pointer position inside the plot; keep curve point rounding only in the drag editor. The white hover guides span the plot's full width and height without a dot at their intersection, while the readouts remain distinct from the amber live operating point.

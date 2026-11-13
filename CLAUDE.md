@@ -1,5 +1,16 @@
 # fan-curves — Windows fan control with a MacBook-like default
 
+Current Windows deployment (2026-09-23): see `AGENTS.md` and
+`rust/install-windows.ps1`. The live Rust daemon, tray, and UI are installed in
+`%LOCALAPPDATA%\Programs\FanCurvesRust`; the former worktree startup path has
+been replaced. `FanCurvesDaemon` runs hidden and elevated; `FanCurvesTray`
+runs at normal privilege and shows only the tray icon at logon. Open the UI
+from the tray when needed. Profile
+changes persist. NVIDIA GPU fans are supported through NVML. Simulation is
+explicit and the UI's `--sim` mode uses a separate socket. Historical notes
+below about worktree deployment, implicit simulation, missing GPU controls,
+or the .NET app being the current controller are superseded.
+
 WPF (.NET 8) app that drives motherboard fan headers the way a MacBook manages its
 fans: silent flat floor at idle, no reaction to short temperature spikes, smooth
 ramp only under sustained load (class-level default slew 8 %/s both directions; the Quiet preset's CPU channel runs 9 up / 8 down since 2026-07-22). Built for Kuba's 2026 PC
@@ -115,6 +126,12 @@ the shipping app until the port reaches feature parity.
   place, `fan_core::ipc_socket_name()` (daemon, UI and tray all call it), and
   the `FAN_CURVES_SOCKET` env var overrides it — that is how a development
   daemon+UI pair runs beside the live stack without cross-talk (2026-08-07).
+  **Read-only commands never take the engine lock (2026-10-24**, Kuba: "When
+  I start the UI it's loading for at least a second"): a tick holds it
+  through ~600 ms of EC write handshakes, so ping/status/profile/inventory
+  answer from `Shared::view` (republished after every tick and every
+  mutating command), and the autostart state is a cached background check —
+  details in `docs/lessons/ipc-reads-never-wait-for-the-tick.md`.
   Service/autostart wiring deferred to the hardware-backend phase
   (autostarting a sim-only daemon is pointless).
 - **UI feature parity with the WPF app is TRACKED, not assumed.** Done:

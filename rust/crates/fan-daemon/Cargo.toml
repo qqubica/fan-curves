@@ -17,3 +17,4 @@ time = { version = "0.3", features = ["local-offset"] }
 [target.'cfg(windows)'.dependencies]
 # For the pipe security descriptor (SDDL string → SECURITY_DESCRIPTOR).
 widestring = "1"
+libloading = "0.8"

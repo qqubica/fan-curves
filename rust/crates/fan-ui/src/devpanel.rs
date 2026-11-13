@@ -16,7 +16,7 @@ use eframe::egui::{
 
 use fan_core::Profile;
 
-use crate::client::Inventory;
+use crate::client::{Inventory, SourceItem};
 use crate::{AMBER, CARD, DIM, FAINT, HAIRLINE, TEXT};
 
 pub const PANEL_WIDTH: f32 = 300.0;
@@ -80,6 +80,33 @@ fn history_label(minutes: f64, sensor_count: usize) -> String {
 
 fn micro(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).font(FontId::proportional(9.5)).color(FAINT));
+}
+
+fn control_row(ui: &mut Ui, profile: &mut Profile, channel: usize, control: &SourceItem, changed: &mut Edited) {
+    let mut on = profile.channels.get(channel)
+        .is_some_and(|ch| ch.control_ids.iter().any(|id| id == &control.id));
+    let owner = profile.channels.iter()
+        .position(|ch| ch.control_ids.iter().any(|id| id == &control.id));
+    let elsewhere = owner.filter(|i| *i != channel);
+    ui.horizontal_top(|ui| {
+        if ui.add(Checkbox::without_text(&mut on)).changed() {
+            profile.assign_control(channel, &control.id, on);
+            changed.app(true);
+        }
+        ui.label(RichText::new(control.value.map_or("      \u{2014}".into(), |v| format!("{v:>5.0} r")))
+            .font(FontId::monospace(10.5))
+            .color(if control.value.is_some() { TEXT } else { FAINT }));
+        ui.label(RichText::new(&control.name)
+            .font(FontId::monospace(10.5))
+            .color(if elsewhere.is_some() { FAINT } else { DIM }));
+    });
+    if let Some(i) = elsewhere {
+        if let Some(other) = profile.channels.get(i) {
+            ui.label(RichText::new(format!("         driven by \u{201c}{}\u{201d}", other.name))
+                .font(FontId::proportional(9.0))
+                .color(FAINT));
+        }
+    }
 }
 
 /// Label on the left, value hard right, on ONE line. Must be inside a
@@ -351,10 +378,11 @@ pub fn draw(
 
         // ---- SOURCES
         group(ui, "SOURCES", "", None, |ui| {
-            micro(ui, "Temperature sensors \u{2014} max wins");
+            let temperature_sensors: Vec<_> = inventory.sensors.iter().filter(|s| !s.is_rpm).collect();
+            micro(ui, &format!("Temperature sensors ({}) — max wins", temperature_sensors.len()));
             ui.add_space(3.0);
             let mut sensor_rows = 0;
-            for s in inventory.sensors.iter().filter(|s| !s.is_rpm) {
+            for s in temperature_sensors {
                 sensor_rows += 1;
                 let mut on = profile.channels.get(channel)
                     .is_some_and(|c| c.sensor_ids.iter().any(|i| *i == s.id));
@@ -381,39 +409,25 @@ pub fn draw(
                 micro(ui, "No temperature sensors found.");
             }
 
+            let (gpu_controls, header_controls): (Vec<_>, Vec<_>) = inventory.controls.iter()
+                .partition(|c| c.id.to_ascii_lowercase().starts_with("/nvidiagpu/"));
             ui.add_space(9.0);
-            micro(ui, "Fan headers driven");
-            ui.add_space(3.0);
-            if inventory.controls.is_empty() {
-                micro(ui, "No controllable headers found.");
-            }
-            for c in &inventory.controls {
-                let mut on = profile.channels.get(channel)
-                    .is_some_and(|ch| ch.control_ids.iter().any(|i| *i == c.id));
-                let owner = profile.channels.iter()
-                    .position(|ch| ch.control_ids.iter().any(|i| *i == c.id));
-                let elsewhere = owner.filter(|i| *i != channel);
-                ui.horizontal_top(|ui| {
-                    if ui.add(Checkbox::without_text(&mut on)).changed() {
-                        // A header obeys ONE PWM value: assigning it takes it
-                        // away from whichever channel held it.
-                        profile.assign_control(channel, &c.id, on);
-                        changed.app(true);
-                    }
-                    ui.label(RichText::new(c.value.map_or("      \u{2014}".into(), |v| format!("{v:>5.0} r")))
-                        .font(FontId::monospace(10.5))
-                        .color(if c.value.is_some() { TEXT } else { FAINT }));
-                    ui.label(RichText::new(&c.name)
-                        .font(FontId::monospace(10.5))
-                        .color(if elsewhere.is_some() { FAINT } else { DIM }));
-                });
-                if let Some(i) = elsewhere {
-                    if let Some(other) = profile.channels.get(i) {
-                        ui.label(RichText::new(format!("         driven by \u{201c}{}\u{201d}", other.name))
-                            .font(FontId::proportional(9.0))
-                            .color(FAINT));
-                    }
+            if !gpu_controls.is_empty() {
+                micro(ui, &format!("GPU fan controls ({})", gpu_controls.len()));
+                micro(ui, "Physical fans may share one control.");
+                ui.add_space(3.0);
+                for c in gpu_controls {
+                    control_row(ui, profile, channel, c, changed);
                 }
+                ui.add_space(7.0);
+            }
+            micro(ui, &format!("Fan headers ({})", header_controls.len()));
+            ui.add_space(3.0);
+            if header_controls.is_empty() && inventory.controls.is_empty() {
+                micro(ui, "No controllable fans found.");
+            }
+            for c in header_controls {
+                control_row(ui, profile, channel, c, changed);
             }
         });
 

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,7 @@ pub enum OutputReason {
     MinFloor,     // channel min_percent overrides a lower curve level
     IdleKick,     // stopped fan briefly spun up by the idle kick
     StopProbe,    // trial stop — fan held at 0 to see if it is needed at all
+    FullSpeed,    // temporary developer override
 }
 
 impl std::fmt::Display for OutputReason {
@@ -39,6 +40,7 @@ impl std::fmt::Display for OutputReason {
             OutputReason::MinFloor => "MinFloor",
             OutputReason::IdleKick => "IdleKick",
             OutputReason::StopProbe => "StopProbe",
+            OutputReason::FullSpeed => "FullSpeed",
         })
     }
 }
@@ -72,6 +74,7 @@ pub struct FanEngine<B: HardwareBackend> {
     hw: B,
     profile: Profile,
     applying: bool,
+    full_speed: bool,
     filters: HashMap<usize, ResponseFilter>,
     kicks: HashMap<usize, IdleKick>,
     probes: HashMap<usize, StopProbe>,
@@ -85,6 +88,7 @@ impl<B: HardwareBackend> FanEngine<B> {
             hw,
             profile,
             applying: false,
+            full_speed: false,
             filters: HashMap::new(),
             kicks: HashMap::new(),
             probes: HashMap::new(),
@@ -108,8 +112,58 @@ impl<B: HardwareBackend> FanEngine<B> {
         &mut self.profile
     }
 
+    /// Apply an IPC/UI profile edit without resetting filters or stranding a
+    /// control that was removed from every channel.
+    pub fn apply_settings(&mut self, src: &Profile) {
+        let keep: std::collections::HashSet<&str> = self.profile.channels.iter().enumerate()
+            .flat_map(|(i, old)| src.channels.get(i).unwrap_or(old).control_ids.iter().map(String::as_str)).collect();
+        for ch in &self.profile.channels {
+            for id in &ch.control_ids {
+                if !keep.contains(id.as_str()) { self.hw.release_control(id); }
+            }
+        }
+        self.profile.apply_settings(src);
+    }
+
     pub fn applying(&self) -> bool {
         self.applying
+    }
+
+    pub fn full_speed(&self) -> bool {
+        self.full_speed
+    }
+
+    /// Temporary override of every control the backend discovered. It is not
+    /// stored in the profile; turning it off returns to curves or firmware,
+    /// according to the prior applying state.
+    pub fn set_full_speed(&mut self, enabled: bool) {
+        if self.full_speed == enabled { return; }
+        self.full_speed = enabled;
+        if enabled {
+            self.drive_full_speed();
+        } else {
+            self.release_all_controls();
+        }
+    }
+
+    fn drive_full_speed(&mut self) -> HashSet<String> {
+        let ids: Vec<String> = self.hw.controls().iter().map(|c| c.id.clone()).collect();
+        let mut succeeded = HashSet::with_capacity(ids.len());
+        for id in ids {
+            self.hw.set_control(&id, 100.0);
+            if self.hw.control_write_succeeded(&id) {
+                succeeded.insert(id);
+            } else {
+                self.hw.release_control(&id);
+            }
+        }
+        succeeded
+    }
+
+    fn release_all_controls(&mut self) {
+        let mut ids: HashSet<String> = self.hw.controls().iter().map(|c| c.id.clone()).collect();
+        ids.extend(self.profile.channels.iter().flat_map(|ch| ch.control_ids.iter().cloned()));
+        for id in ids { self.hw.release_control(&id); }
     }
 
     /// Begin writing PWM (until then the engine only monitors/previews).
@@ -119,11 +173,8 @@ impl<B: HardwareBackend> FanEngine<B> {
 
     pub fn stop_applying(&mut self) {
         self.applying = false;
-        for ch in &self.profile.channels {
-            for id in &ch.control_ids {
-                self.hw.release_control(id);
-            }
-        }
+        self.full_speed = false;
+        self.release_all_controls();
     }
 
     pub fn replace_profile(&mut self, p: Profile) {
@@ -188,6 +239,7 @@ impl<B: HardwareBackend> FanEngine<B> {
                 .set_sensor_history_window(self.profile.sensor_history_hours.clamp(0.0, 24.0));
         }
         self.hw.update();
+        let full_speed_writes = if self.full_speed { self.drive_full_speed() } else { HashSet::new() };
 
         // A changed fingerprint = a user edit landed since the last tick →
         // apply it on THIS tick, skipping holds and the slew glide.
@@ -259,7 +311,7 @@ impl<B: HardwareBackend> FanEngine<B> {
                     reason_level = filter.curve_level;
                 }
 
-                if self.applying && ch.enabled && !ch.control_ids.is_empty() {
+                if self.applying && !self.full_speed && ch.enabled && !ch.control_ids.is_empty() {
                     // Trial stop runs BEFORE the kick, so a probe-stopped channel counts
                     // as stopped for the idle kick (same choice as zero snap). Channels
                     // with a safety floor are never trial-stopped — the floor wins.
@@ -292,11 +344,26 @@ impl<B: HardwareBackend> FanEngine<B> {
                     for id in &ch.control_ids {
                         self.hw.set_control(id, output);
                     }
-                    applied = true;
+                    applied = ch.control_ids.iter().all(|id| self.hw.control_write_succeeded(id));
                 }
             }
             // While the BIOS (or nothing) drives the fan, the stopped/running clocks must not run.
-            if !applied {
+            if !applied && !self.full_speed {
+                // This also covers a disabled channel, a lost temperature, or
+                // a failed write. Never strand a previously manual fan there.
+                for id in &ch.control_ids { self.hw.release_control(id); }
+                self.kicks.remove(&i);
+                self.probes.remove(&i);
+            }
+
+            if self.full_speed {
+                output = 100.0;
+                target_pct = 100.0;
+                reason = OutputReason::FullSpeed;
+                reason_level = 0.0;
+                reason_seconds = 0.0;
+                applied = !ch.control_ids.is_empty()
+                    && ch.control_ids.iter().all(|id| full_speed_writes.contains(id));
                 self.kicks.remove(&i);
                 self.probes.remove(&i);
             }
@@ -344,6 +411,7 @@ mod tests {
     /// shared log the test can keep after the engine consumes the backend.
     struct FakeHw {
         temp: f64,
+        fail: bool,
         pwm: PwmLog,
         sensors: Vec<HwSensor>,
         controls: Vec<HwControl>,
@@ -353,6 +421,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 temp: 40.0,
+                fail: false,
                 pwm: Rc::new(RefCell::new(HashMap::new())),
                 sensors: vec![HwSensor { id: "t0".into(), name: "CPU".into(), kind: SensorKind::Temp }],
                 controls: vec![HwControl { id: "c0".into(), name: "CPU_FAN".into() }],
@@ -384,6 +453,7 @@ mod tests {
         fn set_control(&mut self, id: &str, percent: f64) {
             self.pwm.borrow_mut().insert(id.into(), Some(percent));
         }
+        fn control_write_succeeded(&self, _id: &str) -> bool { !self.fail }
         fn release_control(&mut self, id: &str) {
             self.pwm.borrow_mut().insert(id.into(), None);
         }
@@ -415,6 +485,77 @@ mod tests {
         e.apply();
         e.tick(1.0);
         assert!(e.backend().written().is_some());
+    }
+
+    #[test]
+    fn full_speed_drives_all_discovered_controls_and_restores_paused_state() {
+        let mut hw = FakeHw::new();
+        hw.controls.push(HwControl { id: "c1".into(), name: "Unassigned fan".into() });
+        let log = Rc::clone(&hw.pwm);
+        let mut p = profile();
+        p.channels[0].enabled = false;
+        p.channels[0].sensor_ids.clear();
+        let mut engine = FanEngine::new(hw, p);
+        assert!(!engine.applying());
+        engine.set_full_speed(true);
+        let status = engine.tick(0.0);
+        assert_eq!(log.borrow().get("c0"), Some(&Some(100.0)));
+        assert_eq!(log.borrow().get("c1"), Some(&Some(100.0)));
+        assert_eq!(status[0].reason, OutputReason::FullSpeed);
+        assert_eq!(status[0].output_percent, 100.0);
+        assert!(status[0].applied);
+        engine.set_full_speed(false);
+        assert!(!engine.applying());
+        assert_eq!(log.borrow().get("c0"), Some(&None));
+        assert_eq!(log.borrow().get("c1"), Some(&None));
+    }
+
+    #[test]
+    fn pause_cancels_full_speed_and_restores_firmware_control() {
+        let mut engine = FanEngine::new(FakeHw::new(), profile());
+        engine.apply();
+        engine.set_full_speed(true);
+        assert_eq!(engine.backend().written(), Some(100.0));
+        engine.stop_applying();
+        assert!(!engine.full_speed());
+        assert_eq!(engine.backend().written(), None);
+        let status = engine.tick(0.0);
+        assert!(!status[0].applied);
+        assert_ne!(status[0].reason, OutputReason::FullSpeed);
+    }
+
+    #[test]
+    fn rejected_write_is_not_reported_as_applied() {
+        let mut hw = FakeHw::new();
+        hw.fail = true;
+        let mut engine = FanEngine::new(hw, profile());
+        engine.apply();
+        assert!(!engine.tick(0.0)[0].applied);
+        assert_eq!(engine.backend().written(), None);
+    }
+
+    #[test]
+    fn disabling_channel_releases_previous_manual_control() {
+        let mut engine = FanEngine::new(FakeHw::new(), profile());
+        engine.apply();
+        engine.tick(0.0);
+        assert!(engine.backend().written().is_some());
+        engine.profile_mut().channels[0].enabled = false;
+        assert!(!engine.tick(1.0)[0].applied);
+        assert_eq!(engine.backend().written(), None);
+    }
+
+    #[test]
+    fn profile_edit_removing_control_releases_it_immediately() {
+        let mut engine = FanEngine::new(FakeHw::new(), profile());
+        engine.apply();
+        engine.tick(0.0);
+        assert!(engine.backend().written().is_some());
+        let mut edited = engine.profile().clone();
+        edited.channels[0].control_ids.clear();
+        engine.apply_settings(&edited); // IPC update_profile path; no next tick yet
+        assert_eq!(engine.backend().written(), None);
+        assert!(engine.profile().channels[0].control_ids.is_empty());
     }
 
     #[test]

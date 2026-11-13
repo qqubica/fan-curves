@@ -12,8 +12,8 @@
 //! detected by its `status` reply and falls back to the old poll-synthesized
 //! samples.
 //!
-//! If no daemon answers at startup, it spawns a sibling `fan-daemon --sim`
-//! once and keeps retrying.
+//! A normal launch waits for the hardware daemon. Only explicit `--sim` mode
+//! may spawn a sibling simulated daemon, using its isolated socket.
 
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -30,6 +30,9 @@ use fan_core::{ChannelStatus, Profile};
 
 /// Samples per `history` request while backfilling (the daemon caps there too).
 const HISTORY_CHUNK: usize = 4096;
+/// Missing samples (all channels) above which a poll shows the live status
+/// before fetching history. Steady state is one sample per channel.
+const PUBLISH_BEFORE_BACKFILL: usize = 64;
 
 /// One row of the SOURCES panel.
 #[derive(Clone, Default)]
@@ -60,6 +63,10 @@ pub struct UiState {
     pub connected: bool,
     pub daemon_version: String,
     pub applying: bool,
+    pub full_speed: bool,
+    /// Clicks sent to the daemon but not yet acknowledged. The daemon remains
+    /// authoritative; their parity only predicts the button's next state.
+    pub pending_full_speed_toggles: usize,
     pub profile_name: String,
     pub read_only: bool,
     pub channels: Vec<ChannelStatus>,
@@ -79,6 +86,7 @@ pub enum Cmd {
     Preset(&'static str),
     Apply,
     Pause,
+    ToggleFullSpeed,
     /// Push edited settings; applied in place so engine state survives.
     Update(Box<Profile>),
     RefreshInventory,
@@ -92,12 +100,32 @@ pub struct Link {
     pub tx: Sender<Cmd>,
 }
 
-pub fn start(ctx: eframe::egui::Context) -> Link {
+impl Link {
+    /// Show the click immediately, while the worker keeps the daemon toggle
+    /// atomic and reconciles its answer when the hardware write completes.
+    pub fn toggle_full_speed(&self, ctx: &eframe::egui::Context) {
+        let mut st = self.state.lock().unwrap();
+        st.pending_full_speed_toggles += 1;
+        if self.tx.send(Cmd::ToggleFullSpeed).is_err() {
+            st.pending_full_speed_toggles -= 1;
+        }
+        drop(st);
+        ctx.request_repaint();
+    }
+}
+
+impl UiState {
+    pub fn displayed_full_speed(&self) -> bool {
+        self.full_speed ^ (self.pending_full_speed_toggles % 2 != 0)
+    }
+}
+
+pub fn start(ctx: eframe::egui::Context, sim: bool) -> Link {
     let state = Arc::new(Mutex::new(UiState::default()));
     let (tx, rx) = std::sync::mpsc::channel();
     {
         let state = Arc::clone(&state);
-        std::thread::spawn(move || worker(ctx, state, rx));
+        std::thread::spawn(move || worker(ctx, state, rx, sim));
     }
     Link { state, tx }
 }
@@ -128,7 +156,7 @@ impl Conn {
     }
 }
 
-fn worker(ctx: eframe::egui::Context, state: Arc<Mutex<UiState>>, rx: Receiver<Cmd>) {
+fn worker(ctx: eframe::egui::Context, state: Arc<Mutex<UiState>>, rx: Receiver<Cmd>, sim: bool) {
     let mut conn: Option<Conn> = None;
     let mut spawned_daemon = false;
     // Daemon-side absolute index each channel's mirror has caught up to.
@@ -141,7 +169,8 @@ fn worker(ctx: eframe::egui::Context, state: Arc<Mutex<UiState>>, rx: Receiver<C
                 Ok(mut c) => {
                     let hello = c.call(json!({"cmd": "ping"})).ok();
                     let profile = c.call(json!({"cmd": "profile"})).ok();
-                    let inventory = c.call(json!({"cmd": "inventory"})).ok();
+                    // No inventory here: the status poll right below fetches
+                    // it anyway, before the history backfill.
                     let mut st = state.lock().unwrap();
                     st.connected = true;
                     st.last_error = None;
@@ -150,7 +179,6 @@ fn worker(ctx: eframe::egui::Context, state: Arc<Mutex<UiState>>, rx: Receiver<C
                             h["version"].as_str().unwrap_or_default().to_string();
                     }
                     apply_profile_reply(&mut st, profile);
-                    apply_inventory_reply(&mut st, inventory);
                     // Start the mirror over: sample indices are daemon-relative
                     // and this may be a different daemon than last time. What
                     // the daemon retains (~24 h) comes back in the backfill.
@@ -172,7 +200,7 @@ fn worker(ctx: eframe::egui::Context, state: Arc<Mutex<UiState>>, rx: Receiver<C
                         st.last_error = Some(format!("daemon unreachable: {e}"));
                     }
                     ctx.request_repaint();
-                    if !spawned_daemon {
+                    if sim && !spawned_daemon {
                         spawned_daemon = true;
                         spawn_sibling_daemon();
                     }
@@ -190,16 +218,27 @@ fn worker(ctx: eframe::egui::Context, state: Arc<Mutex<UiState>>, rx: Receiver<C
                 let refresh_inventory =
                     matches!(cmd, Cmd::RefreshInventory | Cmd::SetAutostart(_));
                 let clear_history = matches!(cmd, Cmd::ClearHistory);
+                let full_speed_toggle = matches!(cmd, Cmd::ToggleFullSpeed);
                 let request = match cmd {
                     Cmd::Preset(name) => json!({"cmd": "preset", "name": name}),
                     Cmd::Apply => json!({"cmd": "apply"}),
                     Cmd::Pause => json!({"cmd": "pause"}),
+                    Cmd::ToggleFullSpeed => json!({"cmd": "toggle_full_speed"}),
                     Cmd::Update(profile) => json!({"cmd": "update_profile", "profile": profile}),
                     Cmd::RefreshInventory => json!({"cmd": "inventory"}),
                     Cmd::SetAutostart(on) => json!({"cmd": "set_autostart", "enabled": on}),
                     Cmd::ClearHistory => json!({"cmd": "clear_history"}),
                 };
                 let reply = run_call(&mut conn, &state, request);
+                if full_speed_toggle {
+                    let mut st = state.lock().unwrap();
+                    if let Some(enabled) = reply.as_ref().and_then(|r| r["full_speed"].as_bool()) {
+                        st.full_speed = enabled;
+                    }
+                    st.pending_full_speed_toggles = st.pending_full_speed_toggles.saturating_sub(1);
+                    drop(st);
+                    ctx.request_repaint();
+                }
                 if clear_history {
                     // The mirror is wiped regardless of the reply, so CLEAR
                     // still clears against a daemon too old to know the
@@ -217,7 +256,12 @@ fn worker(ctx: eframe::egui::Context, state: Arc<Mutex<UiState>>, rx: Receiver<C
                     let reply = run_call(&mut conn, &state, json!({"cmd": "profile"}));
                     apply_profile_reply(&mut state.lock().unwrap(), reply);
                 }
-                poll_status(&ctx, &mut conn, &state, &mut synced);
+                // The toggle reply already contains its authoritative state.
+                // Do not queue another hardware inventory read ahead of a
+                // second click; the regular poll will refresh channel data.
+                if !full_speed_toggle {
+                    poll_status(&ctx, &mut conn, &state, &mut synced);
+                }
             }
             Err(RecvTimeoutError::Timeout) => poll_status(&ctx, &mut conn, &state, &mut synced),
             Err(RecvTimeoutError::Disconnected) => return, // UI is gone
@@ -250,6 +294,9 @@ fn poll_status(
     let Some(reply) = run_call(conn, state, json!({"cmd": "status"})) else { return };
     let channels: Vec<ChannelStatus> =
         serde_json::from_value(reply["channels"].clone()).unwrap_or_default();
+    // Source rows include every discovered temperature sensor and fan RPM.
+    // Refresh their readings with status so the developer panel stays live.
+    let mut inventory = run_call(conn, state, json!({"cmd": "inventory"}));
 
     // Mirror the daemon's history: fetch whatever it has that we do not. On
     // first connect that is the whole backfill (up to ~24 h, chunked); in
@@ -260,12 +307,27 @@ fn poll_status(
     let mut fetched: Vec<(usize, Vec<HistorySample>)> = Vec::new();
     if let Some(infos) = reply["history"].as_array() {
         synced.resize(channels.len(), 0);
-        for (i, info) in infos.iter().enumerate().take(channels.len()) {
-            let first = info["first"].as_u64().unwrap_or(0) as usize;
-            let total = info["total"].as_u64().unwrap_or(0) as usize;
-            let mut have = synced[i].min(total);
-            // Anything before the daemon's floor (CLEAR, compaction) is gone.
-            have = have.max(first);
+        // Where each channel's fetch starts. Anything before the daemon's
+        // floor (CLEAR, compaction) is gone.
+        let ranges: Vec<(usize, usize)> = infos
+            .iter()
+            .take(channels.len())
+            .enumerate()
+            .map(|(i, info)| {
+                let first = info["first"].as_u64().unwrap_or(0) as usize;
+                let total = info["total"].as_u64().unwrap_or(0) as usize;
+                (synced[i].min(total).max(first), total)
+            })
+            .collect();
+        // A first-connect backfill is up to ~86k samples per channel and
+        // takes up to a second to replay. Show the live readings first, so the
+        // window is not empty meanwhile; the strip fills in after.
+        let backlog: usize = ranges.iter().map(|(have, total)| total - have).sum();
+        if backlog > PUBLISH_BEFORE_BACKFILL {
+            apply_status(&mut state.lock().unwrap(), &reply, &channels, inventory.take());
+            ctx.request_repaint();
+        }
+        for (i, (mut have, total)) in ranges.into_iter().enumerate() {
             while have < total {
                 let want = (total - have).min(HISTORY_CHUNK);
                 let request = json!({"cmd": "history", "channel": i, "start": have, "count": want});
@@ -292,11 +354,8 @@ fn poll_status(
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0);
     let mut st = state.lock().unwrap();
-    st.applying = reply["applying"].as_bool().unwrap_or(false);
-    if let Some(name) = reply["profile_name"].as_str() {
-        st.profile_name = name.to_string();
-    }
-    st.history.resize_with(channels.len(), ChannelHistory::new);
+    // `inventory` is None here when it already went out before the backfill.
+    apply_status(&mut st, &reply, &channels, inventory);
     if daemon_serves_history {
         for (i, samples) in fetched {
             for s in samples {
@@ -317,9 +376,22 @@ fn poll_status(
             });
         }
     }
-    st.channels = channels;
     drop(st);
-    ctx.request_repaint(); // fresh data — the ONE place the UI asks to paint
+    // Fresh data: the one place the steady-state poll asks to paint (a big
+    // backfill also paints once before it starts).
+    ctx.request_repaint();
+}
+
+/// Everything a `status` + `inventory` pair carries, except history samples.
+fn apply_status(st: &mut UiState, reply: &Value, channels: &[ChannelStatus], inventory: Option<Value>) {
+    apply_inventory_reply(st, inventory);
+    st.applying = reply["applying"].as_bool().unwrap_or(false);
+    st.full_speed = reply["full_speed"].as_bool().unwrap_or(false);
+    if let Some(name) = reply["profile_name"].as_str() {
+        st.profile_name = name.to_string();
+    }
+    st.history.resize_with(channels.len(), ChannelHistory::new);
+    st.channels = channels.to_vec();
 }
 
 /// Decode the `history` reply's compact rows: `[wall, avg|null, raw|null, out]`.

@@ -1,5 +1,13 @@
 # FanCurves
 
+The actively developed Rust app is in [`rust/`](rust/README.md). On Windows,
+run `rust/install-windows.ps1` in an elevated PowerShell session to install it
+at `%LOCALAPPDATA%\Programs\FanCurvesRust`. It starts a hidden hardware daemon
+and a tray icon at logon; open the UI from the tray when needed.
+The Rust app supports NVIDIA GPU fan
+control through NVML, including both fans on the RTX 5080. The older .NET
+release described below controls motherboard fans only.
+
 MacBook-like fan control for Windows desktops. Fans sit **fully stopped at idle**,
 ignore short temperature spikes entirely, and ramp up smoothly only under
 *sustained* load — the way Apple laptops manage their fans, applied to your

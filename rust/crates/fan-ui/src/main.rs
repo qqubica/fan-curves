@@ -43,6 +43,12 @@ const DEV_SIZE: [f32; 2] = [1336.0, 830.0];
 const SIDEBAR_WIDTH: f32 = 252.0;
 
 fn main() -> eframe::Result {
+    let sim = std::env::args().any(|arg| arg == "--sim");
+    if sim && (std::env::var_os("FAN_CURVES_SOCKET").is_none()
+        || std::env::var_os("FAN_CURVES_SOCKET").as_deref() == Some(std::ffi::OsStr::new("fan-curves-daemon.sock"))) {
+        // Keep a demo daemon away from the live daemon's single-instance lock.
+        std::env::set_var("FAN_CURVES_SOCKET", format!("fan-curves-sim-{}.sock", std::process::id()));
+    }
     // ONE window only: the first instance holds a lock socket; a later launch
     // asks it to come to the front and exits instead of opening a second
     // window (two live mirrors polling the daemon bought nothing).
@@ -80,7 +86,7 @@ fn main() -> eframe::Result {
             visuals.hyperlink_color = TEXT;
             visuals.panel_fill = CANVAS;
             cc.egui_ctx.set_visuals(visuals);
-            let link = client::start(cc.egui_ctx.clone());
+            let link = client::start(cc.egui_ctx.clone(), sim);
             let focus_requested = watch_instance_lock(instance_lock, cc.egui_ctx.clone());
             Ok(Box::new(App {
                 link,
@@ -343,6 +349,8 @@ pub struct Snapshot {
     pub connected: bool,
     pub daemon_version: String,
     pub applying: bool,
+    pub full_speed: bool,
+    pub full_speed_pending: bool,
     pub read_only: bool,
     pub simulated: bool,
     pub profile_name: String,
@@ -387,6 +395,8 @@ impl Snapshot {
             connected: st.connected,
             daemon_version: st.daemon_version.clone(),
             applying: st.applying,
+            full_speed: st.displayed_full_speed(),
+            full_speed_pending: st.pending_full_speed_toggles != 0,
             read_only: st.read_only,
             simulated: st.inventory.simulated,
             profile_name: st.profile_name.clone(),
@@ -618,12 +628,18 @@ impl App {
         // Status chip: pill + dot, the dot amber only while genuinely live.
         let (dot, text) = if !snap.connected {
             (FAINT, "Daemon not running".to_string())
+        } else if snap.full_speed_pending {
+            (AMBER, if snap.full_speed { "Setting all fans to full speed…" } else { "Restoring fan control…" }.to_string())
+        } else if snap.full_speed {
+            (AMBER, "Full speed — all fans at 100%".to_string())
         } else if !snap.applying {
             (Color32::from_white_alpha(102), "Paused — fans on the BIOS curve".to_string())
         } else if ch.map_or(true, |c| c.raw_temp.is_none()) {
             (AMBER, "No temp sensor — assign in Developer mode".to_string())
         } else if snap.simulated {
             (AMBER, "Simulation — demo data".to_string())
+        } else if ch.is_some_and(|c| !c.applied) {
+            (Color32::from_white_alpha(102), "Automatic control".to_string())
         } else {
             (AMBER, "Curves active".to_string())
         };
@@ -704,6 +720,25 @@ impl App {
         {
             self.dev = !self.dev;
             self.apply_fixed_size(ui.ctx());
+        }
+
+        if self.dev {
+            ui.add_space(8.0);
+            let full_speed_button = Button::new(
+                RichText::new(if snap.full_speed { "Full speed: ON" } else { "Run all fans at full speed" })
+                    .font(FontId::proportional(12.0))
+                    .color(if snap.full_speed { Color32::from_rgb(0x0b, 0x0b, 0x0e) } else { TEXT }),
+            )
+            .fill(if snap.full_speed { Color32::from_white_alpha(235) } else { CARD })
+            .stroke(Stroke::new(1.0, HAIRLINE))
+            .corner_radius(CornerRadius::same(6))
+            .min_size(Vec2::new(ui.available_width(), 34.0));
+            if ui.add_enabled(snap.connected, full_speed_button)
+                .on_hover_text("Temporarily run every detected fan control at 100%. Turn off to restore curves or firmware control.")
+                .clicked()
+            {
+                self.link.toggle_full_speed(ui.ctx());
+            }
         }
 
         // Footer pinned to the bottom of the sidebar, with the residency
@@ -803,7 +838,7 @@ impl App {
                         parts.push(format!("{r:.0} rpm"));
                     }
                     if !c.applied {
-                        parts.push("preview — no fan header".into());
+                        parts.push("automatic / not applied".into());
                     }
                     ui.label(
                         RichText::new(parts.join(" · "))
@@ -828,7 +863,8 @@ impl App {
                 snap.curve = c.points.clone();
             }
         }
-        charts::draw_curve_chart(ui.painter(), rect, &snap);
+        let hover = if self.dev { response.hover_pos() } else { None };
+        charts::draw_curve_chart(ui.painter(), rect, &snap, hover);
         snap
     }
 }
@@ -981,6 +1017,7 @@ pub fn describe(s: &ChannelStatus) -> String {
         OutputReason::MinFloor => format!("safety floor (curve asks {:.0}%)", s.reason_level),
         OutputReason::IdleKick => "idle kick".into(),
         OutputReason::StopProbe => "trial stop — is this fan needed?".into(),
+        OutputReason::FullSpeed => "full speed override".into(),
         OutputReason::None => String::new(),
     }
 }

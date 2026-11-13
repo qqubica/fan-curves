@@ -335,6 +335,7 @@ fn describe(s: &ChannelStatus) -> String {
         OutputReason::MinFloor => format!("safety floor (curve asks {}%)", n0(Some(s.reason_level))),
         OutputReason::IdleKick => "idle kick".into(),
         OutputReason::StopProbe => "stop probe (trial stop)".into(),
+        OutputReason::FullSpeed => "full speed override".into(),
         OutputReason::None => "steady on the curve".into(),
     }
 }

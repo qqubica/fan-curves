@@ -245,6 +245,8 @@ fn main() {
         open_ui();
         return;
     }
+    // Older logon tasks pass `--open-when-ready`. Ignore that retired flag so
+    // upgrading the tray also fixes startup without administrator task edits.
 
     unsafe {
         let class = wide("FanCurvesTray");
@@ -277,7 +279,17 @@ fn main() {
 
         ICON = make_icon();
         let nid = notify_data(hwnd, ICON, &status_text());
-        if Shell_NotifyIconW(NIM_ADD, &nid) == 0 {
+        // An ONLOGON task can start before Explorer owns the notification area.
+        // Give the shell time to appear instead of exiting without an icon.
+        let mut added = false;
+        for _ in 0..60 {
+            if Shell_NotifyIconW(NIM_ADD, &nid) != 0 {
+                added = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        if !added {
             eprintln!("could not add the tray icon");
             std::process::exit(1);
         }

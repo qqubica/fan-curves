@@ -1,5 +1,36 @@
 # fan-curves Rust port
 
+## Current Windows installation
+
+Run `powershell -NoProfile -ExecutionPolicy Bypass -File .\rust\install-windows.ps1`
+from an elevated shell at the repository root. It builds before stopping the
+old controller, backs up the saved profile, preserves the running profile,
+and installs all three programs into `%LOCALAPPDATA%\Programs\FanCurvesRust`.
+Two logon tasks start a hidden elevated daemon and an ordinary-privilege tray
+launcher. Only the tray icon appears at logon; double-click it or choose
+Open Fan Curves to open the UI. Closing that window leaves fan control running.
+The Start with Windows checkbox governs both tasks. Task execution has no time
+limit, and profile edits are saved.
+
+The Windows backend combines PawnIO motherboard control with NVIDIA NVML GPU
+control. A GPU channel appears when the NVIDIA driver exposes fan controls.
+The RTX 5080's two fans have been verified with a bounded manual write and
+automatic-policy restoration. The default GPU curve starts at 30%; custom
+curves can request positive speeds up to 100%, subject to driver acceptance.
+A 0% GPU target returns control to the driver so its own idle fan-stop policy
+can operate; it does not force the fan off against firmware thermal limits.
+Pause, exit, disabled channels, and failed writes also return GPU fans to the
+driver's automatic policy.
+
+`fan-daemon --selftest-gpu 0 50` tests GPU fan 0 at 50% for two seconds and then
+restores automatic control. Run elevated, with no other controller driving that
+GPU. Substitute `1` for the second fan. Read-only enumeration alone does not
+verify write support.
+
+The production app never silently falls back to simulation. For a demo, use
+`fan-ui --sim`, which starts its sibling simulated daemon on a separate socket.
+The historical port milestones below describe earlier implementation stages.
+
 Rust rewrite of the temperature-only engine, targeting a headless daemon +
 on-demand UI split across Windows and Linux.
 

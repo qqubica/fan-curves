@@ -20,12 +20,14 @@ mod ipc;
 #[cfg(windows)]
 mod nct6686;
 #[cfg(windows)]
+mod nvml;
+#[cfg(windows)]
 mod pawnio;
 mod telemetry;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fan_core::backend::{HwControl, HwSensor, SensorKind};
@@ -43,6 +45,83 @@ pub enum Backend {
     Hwmon(fan_core::hwmon::HwmonBackend),
     #[cfg(windows)]
     Nct(nct6686::Nct6686Backend),
+    #[cfg(windows)]
+    Windows(Box<WindowsBackend>),
+}
+
+#[cfg(windows)]
+pub struct WindowsBackend {
+    nct: Option<nct6686::Nct6686Backend>,
+    gpu: Option<nvml::NvmlBackend>,
+    sensors: Vec<HwSensor>,
+    controls: Vec<HwControl>,
+    description: String,
+}
+
+#[cfg(windows)]
+impl WindowsBackend {
+    fn detect() -> Option<Self> {
+        let nct = match nct6686::Nct6686Backend::detect() {
+            Ok(v) => Some(v),
+            Err(e) => { eprintln!("NCT6686D unavailable: {e}"); None }
+        };
+        let gpu = match nvml::NvmlBackend::detect() {
+            Ok(v) => Some(v),
+            Err(e) => { eprintln!("NVIDIA NVML unavailable: {e}"); None }
+        };
+        if nct.is_none() && gpu.is_none() { return None; }
+        let mut sensors = Vec::new();
+        let mut controls = Vec::new();
+        let mut names = Vec::new();
+        if let Some(b) = &nct {
+            sensors.extend_from_slice(b.sensors());
+            controls.extend_from_slice(b.controls());
+            names.push(b.description());
+        }
+        if let Some(b) = &gpu {
+            sensors.extend_from_slice(b.sensors());
+            controls.extend_from_slice(b.controls());
+            names.push(b.description());
+        }
+        let description = names.join(" + ");
+        Some(Self { nct, gpu, sensors, controls, description })
+    }
+}
+
+#[cfg(windows)]
+impl HardwareBackend for WindowsBackend {
+    fn description(&self) -> &str { &self.description }
+    fn is_simulated(&self) -> bool { false }
+    fn sensors(&self) -> &[HwSensor] { &self.sensors }
+    fn controls(&self) -> &[HwControl] { &self.controls }
+    fn update(&mut self) {
+        if let Some(b) = &mut self.nct { b.update(); }
+        if let Some(b) = &mut self.gpu { b.update(); }
+    }
+    fn read_value(&self, id: &str) -> Option<f64> {
+        self.nct.as_ref().and_then(|b| b.read_value(id)).or_else(|| self.gpu.as_ref().and_then(|b| b.read_value(id)))
+    }
+    fn set_control(&mut self, id: &str, percent: f64) {
+        if let Some(b) = &mut self.gpu {
+            if b.has_control(id) { b.set_control(id, percent); return; }
+        }
+        if let Some(b) = &mut self.nct { b.set_control(id, percent); }
+    }
+    fn control_write_succeeded(&self, id: &str) -> bool {
+        if let Some(b) = &self.gpu {
+            if b.has_control(id) { return b.control_write_succeeded(id); }
+        }
+        self.nct.as_ref().is_some_and(|b| b.control_write_succeeded(id))
+    }
+    fn release_control(&mut self, id: &str) {
+        if let Some(b) = &mut self.gpu {
+            if b.has_control(id) { b.release_control(id); return; }
+        }
+        if let Some(b) = &mut self.nct { b.release_control(id); }
+    }
+    fn read_control_rpm(&self, id: &str) -> Option<f64> {
+        self.nct.as_ref().and_then(|b| b.read_control_rpm(id)).or_else(|| self.gpu.as_ref().and_then(|b| b.read_control_rpm(id)))
+    }
 }
 
 impl HardwareBackend for Backend {
@@ -53,6 +132,8 @@ impl HardwareBackend for Backend {
             Backend::Hwmon(b) => b.description(),
             #[cfg(windows)]
             Backend::Nct(b) => b.description(),
+            #[cfg(windows)]
+            Backend::Windows(b) => b.description(),
         }
     }
     fn is_simulated(&self) -> bool {
@@ -62,6 +143,8 @@ impl HardwareBackend for Backend {
             Backend::Hwmon(b) => b.is_simulated(),
             #[cfg(windows)]
             Backend::Nct(b) => b.is_simulated(),
+            #[cfg(windows)]
+            Backend::Windows(b) => b.is_simulated(),
         }
     }
     fn sensors(&self) -> &[HwSensor] {
@@ -71,6 +154,8 @@ impl HardwareBackend for Backend {
             Backend::Hwmon(b) => b.sensors(),
             #[cfg(windows)]
             Backend::Nct(b) => b.sensors(),
+            #[cfg(windows)]
+            Backend::Windows(b) => b.sensors(),
         }
     }
     fn controls(&self) -> &[HwControl] {
@@ -80,6 +165,8 @@ impl HardwareBackend for Backend {
             Backend::Hwmon(b) => b.controls(),
             #[cfg(windows)]
             Backend::Nct(b) => b.controls(),
+            #[cfg(windows)]
+            Backend::Windows(b) => b.controls(),
         }
     }
     fn update(&mut self) {
@@ -89,6 +176,8 @@ impl HardwareBackend for Backend {
             Backend::Hwmon(b) => b.update(),
             #[cfg(windows)]
             Backend::Nct(b) => b.update(),
+            #[cfg(windows)]
+            Backend::Windows(b) => b.update(),
         }
     }
     fn read_value(&self, sensor_id: &str) -> Option<f64> {
@@ -98,6 +187,8 @@ impl HardwareBackend for Backend {
             Backend::Hwmon(b) => b.read_value(sensor_id),
             #[cfg(windows)]
             Backend::Nct(b) => b.read_value(sensor_id),
+            #[cfg(windows)]
+            Backend::Windows(b) => b.read_value(sensor_id),
         }
     }
     fn set_control(&mut self, control_id: &str, percent: f64) {
@@ -107,6 +198,19 @@ impl HardwareBackend for Backend {
             Backend::Hwmon(b) => b.set_control(control_id, percent),
             #[cfg(windows)]
             Backend::Nct(b) => b.set_control(control_id, percent),
+            #[cfg(windows)]
+            Backend::Windows(b) => b.set_control(control_id, percent),
+        }
+    }
+    fn control_write_succeeded(&self, control_id: &str) -> bool {
+        match self {
+            Backend::Sim(b) => b.control_write_succeeded(control_id),
+            #[cfg(target_os = "linux")]
+            Backend::Hwmon(b) => b.control_write_succeeded(control_id),
+            #[cfg(windows)]
+            Backend::Nct(b) => b.control_write_succeeded(control_id),
+            #[cfg(windows)]
+            Backend::Windows(b) => b.control_write_succeeded(control_id),
         }
     }
     fn release_control(&mut self, control_id: &str) {
@@ -116,6 +220,8 @@ impl HardwareBackend for Backend {
             Backend::Hwmon(b) => b.release_control(control_id),
             #[cfg(windows)]
             Backend::Nct(b) => b.release_control(control_id),
+            #[cfg(windows)]
+            Backend::Windows(b) => b.release_control(control_id),
         }
     }
     fn read_control_rpm(&self, control_id: &str) -> Option<f64> {
@@ -125,6 +231,8 @@ impl HardwareBackend for Backend {
             Backend::Hwmon(b) => b.read_control_rpm(control_id),
             #[cfg(windows)]
             Backend::Nct(b) => b.read_control_rpm(control_id),
+            #[cfg(windows)]
+            Backend::Windows(b) => b.read_control_rpm(control_id),
         }
     }
     fn internal_sensor_count(&self) -> usize {
@@ -134,6 +242,8 @@ impl HardwareBackend for Backend {
             Backend::Hwmon(b) => b.internal_sensor_count(),
             #[cfg(windows)]
             Backend::Nct(b) => b.internal_sensor_count(),
+            #[cfg(windows)]
+            Backend::Windows(b) => b.internal_sensor_count(),
         }
     }
     fn set_sensor_history_window(&mut self, hours: f64) {
@@ -143,6 +253,8 @@ impl HardwareBackend for Backend {
             Backend::Hwmon(b) => b.set_sensor_history_window(hours),
             #[cfg(windows)]
             Backend::Nct(b) => b.set_sensor_history_window(hours),
+            #[cfg(windows)]
+            Backend::Windows(b) => b.set_sensor_history_window(hours),
         }
     }
 }
@@ -155,6 +267,8 @@ struct Args {
     save_profile: bool,
     /// (header index, percent) — write-path self-test on one header, then exit.
     selftest: Option<(usize, f64)>,
+    /// (fan index, percent): bounded two-second GPU write/restore test.
+    gpu_selftest: Option<(usize, f64)>,
     /// Register (true) or remove (false) the start-with-Windows task, then exit.
     autostart: Option<bool>,
     ticks: Option<u64>,
@@ -170,6 +284,7 @@ fn parse_args() -> Args {
         probe: false,
         save_profile: false,
         selftest: None,
+        gpu_selftest: None,
         autostart: None,
         ticks: None,
         profile: None,
@@ -186,6 +301,11 @@ fn parse_args() -> Args {
             "--selftest-write" => {
                 args.selftest = it.next().and_then(|v| v.parse().ok()).map(|i| {
                     (i, it.next().and_then(|v| v.parse().ok()).unwrap_or(40.0))
+                });
+            }
+            "--selftest-gpu" => {
+                args.gpu_selftest = it.next().and_then(|v| v.parse().ok()).map(|i| {
+                    (i, it.next().and_then(|v| v.parse().ok()).unwrap_or(50.0))
                 });
             }
             "--ticks" => args.ticks = it.next().and_then(|v| v.parse().ok()),
@@ -273,16 +393,38 @@ fn find_sensor<B: HardwareBackend>(hw: &B, needles: &[&str]) -> Option<String> {
     None
 }
 
-/// Port of the WPF app's `AutoAssign` + `AssignEmptyChannels`: prune identifiers
-/// this backend doesn't know (they heal on the next launch of the other app),
+/// Port of the WPF app's `AutoAssign` + `AssignEmptyChannels`: preserve identifiers
+/// this backend cannot currently see (a transient backend failure must not erase them),
 /// de-duplicate headers across channels (a header obeys ONE PWM value — the
 /// last writer silently wins otherwise), and wire empty channels to plausible
 /// defaults. Pump headers are never auto-assigned; the case channel only takes
 /// explicitly chassis-named headers.
 fn auto_assign<B: HardwareBackend>(profile: &mut Profile, hw: &B) -> bool {
-    let known_controls: std::collections::HashSet<String> =
-        hw.controls().iter().map(|c| c.id.clone()).collect();
-    let mut changed = false;
+    let gpu_controls: Vec<String> = hw.controls().iter()
+        .filter(|c| c.id.starts_with("/nvidiagpu/") && c.id.contains("/control/"))
+        .map(|c| c.id.clone()).collect();
+    let already_assigned: std::collections::HashSet<&str> = profile.channels.iter()
+        .flat_map(|ch| ch.control_ids.iter().map(String::as_str)).collect();
+    let unclaimed_gpu_controls: Vec<String> = gpu_controls.iter()
+        .filter(|id| !already_assigned.contains(id.as_str())).cloned().collect();
+    let mut added_gpu_channel = false;
+    if !unclaimed_gpu_controls.is_empty() && !profile.channels.iter().any(|c| contains_ci(&c.name, "GPU")) {
+        use fan_core::{ChannelConfig, CurvePoint};
+        profile.channels.push(ChannelConfig {
+            name: "GPU fans".into(),
+            control_ids: unclaimed_gpu_controls,
+            // Never ask a GPU fan to stop under load. The driver's reported
+            // minimum is enforced again by NVML at the write boundary.
+            min_percent: 30.0,
+            points: vec![CurvePoint::new(20.0, 30.0), CurvePoint::new(50.0, 40.0),
+                         CurvePoint::new(65.0, 60.0), CurvePoint::new(75.0, 80.0),
+                         CurvePoint::new(83.0, 100.0)],
+            averaging_seconds: 10.0,
+            ..Default::default()
+        });
+        added_gpu_channel = true;
+    }
+    let mut changed = added_gpu_channel;
 
     let mut claimed = std::collections::HashSet::new();
     for ch in &mut profile.channels {
@@ -292,12 +434,15 @@ fn auto_assign<B: HardwareBackend>(profile: &mut Profile, hw: &B) -> bool {
     }
 
     for ch in &mut profile.channels {
-        let before = (ch.sensor_ids.len(), ch.control_ids.len());
-        ch.sensor_ids.retain(|id| plausible(hw.read_value(id)));
-        ch.control_ids.retain(|id| known_controls.contains(id));
-        changed |= (ch.sensor_ids.len(), ch.control_ids.len()) != before;
+        // Keep missing IDs in the saved profile. The engine ignores unavailable
+        // readings and the backend rejects unknown controls for this session.
 
         if ch.control_ids.is_empty() {
+            if contains_ci(&ch.name, "GPU") {
+                ch.control_ids = gpu_controls.iter().filter(|id| !claimed.contains(*id)).cloned().collect();
+                changed |= !ch.control_ids.is_empty();
+                continue;
+            }
             let is_cpu = contains_ci(&ch.name, "CPU");
             let control = hw.controls().iter().filter(|c| !contains_ci(&c.name, "Pump")).find(|c| {
                 if is_cpu {
@@ -320,6 +465,10 @@ fn auto_assign<B: HardwareBackend>(profile: &mut Profile, hw: &B) -> bool {
             continue;
         }
         let is_cpu = contains_ci(&ch.name, "CPU");
+        if contains_ci(&ch.name, "GPU") {
+            if let Some(t) = &gpu_temp { ch.sensor_ids.push(t.clone()); changed = true; }
+            continue;
+        }
         let mut ids = Vec::new();
         if let Some(t) = &cpu_temp {
             ids.push(t.clone());
@@ -337,6 +486,68 @@ fn auto_assign<B: HardwareBackend>(profile: &mut Profile, hw: &B) -> bool {
         }
     }
     changed
+}
+
+#[cfg(test)]
+mod assignment_tests {
+    use super::*;
+
+    struct InventoryHw { sensors: Vec<HwSensor>, controls: Vec<HwControl> }
+    impl InventoryHw {
+        fn gpu() -> Self {
+            Self {
+                sensors: vec![HwSensor { id: "/nvidiagpu/0/temperature/0".into(), name: "RTX 5080 — GPU Core".into(), kind: SensorKind::Temp }],
+                controls: (0..2).map(|i| HwControl { id: format!("/nvidiagpu/0/control/{i}"), name: format!("GPU Fan #{i}") }).collect(),
+            }
+        }
+    }
+    impl HardwareBackend for InventoryHw {
+        fn description(&self) -> &str { "test" }
+        fn is_simulated(&self) -> bool { false }
+        fn sensors(&self) -> &[HwSensor] { &self.sensors }
+        fn controls(&self) -> &[HwControl] { &self.controls }
+        fn update(&mut self) {}
+        fn read_value(&self, id: &str) -> Option<f64> { (id == "/nvidiagpu/0/temperature/0").then_some(42.0) }
+        fn set_control(&mut self, _: &str, _: f64) {}
+        fn release_control(&mut self, _: &str) {}
+        fn read_control_rpm(&self, _: &str) -> Option<f64> { None }
+    }
+
+    #[test]
+    fn gpu_channel_uses_gpu_temperature_and_only_unclaimed_fans() {
+        let mut profile = Profile::mac_book_like();
+        let manually_assigned = "/nvidiagpu/0/control/0".to_string();
+        profile.channels[1].control_ids.push(manually_assigned.clone());
+        assert!(auto_assign(&mut profile, &InventoryHw::gpu()));
+        let gpu = profile.channels.iter().find(|ch| ch.name == "GPU fans").unwrap();
+        assert_eq!(profile.channels[1].control_ids, vec![manually_assigned]);
+        assert_eq!(gpu.control_ids, vec!["/nvidiagpu/0/control/1"]);
+        assert_eq!(gpu.sensor_ids, vec!["/nvidiagpu/0/temperature/0"]);
+        assert!(gpu.min_percent >= 30.0);
+    }
+
+    #[test]
+    fn unavailable_motherboard_ids_survive_gpu_only_inventory() {
+        let mut profile = Profile::mac_book_like();
+        let old_control = "/lpc/nct6686d/0/control/1".to_string();
+        let old_sensor = "/amdcpu/0/temperature/2".to_string();
+        profile.channels[0].control_ids.push(old_control.clone());
+        profile.channels[0].sensor_ids.push(old_sensor.clone());
+        auto_assign(&mut profile, &InventoryHw::gpu());
+        assert_eq!(profile.channels[0].control_ids, vec![old_control]);
+        assert_eq!(profile.channels[0].sensor_ids, vec![old_sensor]);
+    }
+
+    #[test]
+    fn cpu_case_preset_does_not_overwrite_gpu_tuning() {
+        let mut profile = Profile::mac_book_like();
+        auto_assign(&mut profile, &InventoryHw::gpu());
+        let gpu_points = profile.channels[2].points.clone();
+        let gpu_sensors = profile.channels[2].sensor_ids.clone();
+        profile.adopt_tuning(&Profile::performance());
+        assert_eq!(profile.channels[2].points, gpu_points);
+        assert_eq!(profile.channels[2].sensor_ids, gpu_sensors);
+    }
 }
 
 /// Last tick's state per channel, for change-only console output — a daemon
@@ -429,6 +640,7 @@ fn describe(s: &ChannelStatus) -> String {
         OutputReason::MinFloor => format!("safety floor (curve asks {:.0}%)", s.reason_level),
         OutputReason::IdleKick => "idle kick".into(),
         OutputReason::StopProbe => "stop probe (trial stop)".into(),
+        OutputReason::FullSpeed => "full speed override".into(),
         OutputReason::None => String::new(),
     }
 }
@@ -477,24 +689,24 @@ fn main() {
         return;
     }
 
-    // Try the platform's real backend unless --sim was asked for; a failure is
-    // reported and demoted to simulation, never silently pretended away.
+    // Simulation is explicit. A missing hardware backend must not turn a
+    // scheduled production controller into a convincing simulated process.
     let mut hw = None;
     if !args.sim {
         #[cfg(windows)]
-        match nct6686::Nct6686Backend::detect() {
-            Ok(b) => hw = Some(Backend::Nct(b)),
-            Err(e) => eprintln!(
-                "no hardware control: {e}\n  (needs administrator + PawnIO installed; \
-                 falling back to simulation)"
-            ),
+        {
+            hw = WindowsBackend::detect().map(|b| Backend::Windows(Box::new(b)));
         }
         #[cfg(target_os = "linux")]
         {
             hw = Some(Backend::Hwmon(fan_core::hwmon::HwmonBackend::new()));
         }
     }
-    let real = hw.is_some();
+    if !args.sim && hw.is_none() {
+        eprintln!("no supported hardware backend available; use --sim explicitly for a demo");
+        std::process::exit(1);
+    }
+    let real = !args.sim;
 
     // Local-offset lookup is only reliable before other threads exist; captured
     // once, so a DST flip mid-run shifts log timestamps until restart.
@@ -517,8 +729,51 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+            Backend::Windows(b) if b.nct.is_some() => {
+                let nct = b.nct.as_mut().unwrap();
+                nct.update();
+                if let Err(e) = nct.selftest_write(index, percent) {
+                    eprintln!("self-test failed: {e}");
+                    std::process::exit(1);
+                }
+            }
             _ => eprintln!("--selftest-write needs the real backend (run elevated)"),
         }
+        return;
+    }
+    #[cfg(windows)]
+    if let Some((fan, percent)) = args.gpu_selftest {
+        let Backend::Windows(b) = &mut hw else {
+            eprintln!("--selftest-gpu needs the NVIDIA NVML backend");
+            std::process::exit(1);
+        };
+        let Some(gpu) = &mut b.gpu else {
+            eprintln!("--selftest-gpu: NVIDIA NVML is unavailable");
+            std::process::exit(1);
+        };
+        let id = format!("/nvidiagpu/0/control/{fan}");
+        if !gpu.has_control(&id) {
+            eprintln!("--selftest-gpu: {id} is not a supported control");
+            std::process::exit(1);
+        }
+        gpu.update();
+        println!("before: {id} = {:?} rpm", gpu.read_control_rpm(&id));
+        gpu.set_control(&id, percent.clamp(30.0, 100.0));
+        if !gpu.control_write_succeeded(&id) {
+            eprintln!("--selftest-gpu: driver refused the fan write");
+            drop(hw); // retry any failed automatic-policy handback before exit
+            std::process::exit(1);
+        }
+        std::thread::sleep(Duration::from_secs(2));
+        gpu.update();
+        println!("manual: {id} = {:?} rpm", gpu.read_control_rpm(&id));
+        gpu.release_control(&id);
+        if gpu.is_manual(&id) {
+            eprintln!("--selftest-gpu: automatic-policy restore failed; retrying on drop");
+            drop(hw);
+            std::process::exit(1);
+        }
+        println!("restored: {id} = automatic");
         return;
     }
 
@@ -528,13 +783,20 @@ fn main() {
     // (`--profile`). This is the C# `Profile.ReadOnly` contract widened: a sim
     // run must not prune real IDs, and a Rust run must not race the WPF app
     // over the file that holds Kuba's manual header assignments.
-    let read_only = args.profile.is_none() && !args.save_profile;
+    let read_only = args.profile.is_none() && (args.sim || !args.save_profile);
     let profile_path = args.profile.clone().unwrap_or_else(|| config_dir().join("profile.json"));
     let mut profile = Profile::load_or_default(&profile_path);
+    #[cfg(windows)]
+    if let Backend::Windows(b) = &hw {
+        if b.nct.is_none() && !args.probe && args.gpu_selftest.is_none() {
+            eprintln!("NCT6686D motherboard control is unavailable; refusing GPU-only startup");
+            std::process::exit(1);
+        }
+    }
     println!("profile: \"{}\" from {}", profile.name, profile_path.display());
     println!("backend: {}", hw.description());
     #[cfg(windows)]
-    {
+    let autostart_state = {
         // Say the residency situation out loud: a port that cannot survive a
         // reboot silently hands the machine back to the WPF app.
         let mine = autostart::installed();
@@ -547,7 +809,10 @@ fn main() {
         if mine && theirs {
             eprintln!("WARNING: both would start at logon and fight over the headers.");
         }
-    }
+        ipc::AutostartCache::checked(mine, theirs)
+    };
+    #[cfg(not(windows))]
+    let autostart_state = ipc::AutostartCache::checked(false, false);
     hw.update(); // one reading so auto-assign sees plausible values
     if auto_assign(&mut profile, &hw) && !read_only {
         if let Err(e) = profile.save(&profile_path) {
@@ -577,16 +842,14 @@ fn main() {
         engine.apply();
     }
 
-    let shared = Arc::new(Shared {
-        engine: Mutex::new(engine),
-        latest: Mutex::new(Vec::new()),
-        history: Mutex::new(Vec::new()),
+    let shared = Arc::new(Shared::new(
+        engine,
         // Sim runs get the -sim log filenames, exactly like the WPF dev flows.
-        telemetry: Mutex::new(TelemetryLog::new(config_dir(), !real, utc_offset_secs)),
+        TelemetryLog::new(config_dir(), !real, utc_offset_secs),
         profile_path,
         read_only,
-        stop: AtomicBool::new(false),
-    });
+        autostart_state,
+    ));
     {
         let shared = Arc::clone(&shared);
         ctrlc::set_handler(move || shared.stop.store(true, Ordering::SeqCst))
@@ -614,6 +877,7 @@ fn main() {
         let (statuses, profile_snapshot, telemetry_on) = {
             let mut engine = shared.engine.lock().unwrap();
             let statuses = engine.tick(now);
+            shared.publish(&engine);
             (statuses, engine.profile().clone(), engine.profile().telemetry_logging_enabled)
         };
         *shared.latest.lock().unwrap() = statuses.clone();

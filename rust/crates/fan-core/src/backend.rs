@@ -35,6 +35,11 @@ pub trait HardwareBackend {
     /// Write a PWM duty cycle 0–100 to a control.
     fn set_control(&mut self, control_id: &str, percent: f64);
 
+    /// Whether the most recent control write is known to have reached the
+    /// device. Backends without an acknowledgement mechanism retain the
+    /// historical optimistic behavior.
+    fn control_write_succeeded(&self, _control_id: &str) -> bool { true }
+
     /// Give control back to the BIOS/firmware curve.
     fn release_control(&mut self, control_id: &str);
 

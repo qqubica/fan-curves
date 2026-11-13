@@ -35,11 +35,11 @@ pub struct CurveEdit {
     pub committed: bool,
 }
 
-/// Amber axis readout, seated on a card-coloured backing so it stays legible
-/// where it crosses a gridline.
-fn chip(painter: &Painter, at: Pos2, anchor: Align2, text: &str) {
+/// Axis readout, seated on a card-coloured backing so it stays legible
+/// where it crosses a gridline. Amber is live output; white is curve hover.
+fn chip(painter: &Painter, at: Pos2, anchor: Align2, text: &str, color: Color32) {
     let font = eframe::egui::FontId::monospace(10.5);
-    let galley = painter.layout_no_wrap(text.to_string(), font, AMBER);
+    let galley = painter.layout_no_wrap(text.to_string(), font, color);
     let size = galley.size();
     let min = match anchor {
         Align2::CENTER_TOP => Pos2::new(at.x - size.x / 2.0, at.y),
@@ -51,7 +51,7 @@ fn chip(painter: &Painter, at: Pos2, anchor: Align2, text: &str) {
         CornerRadius::same(3),
         CARD,
     );
-    painter.galley(min, galley, AMBER);
+    painter.galley(min, galley, color);
 }
 
 fn card(painter: &Painter, rect: Rect) {
@@ -170,7 +170,7 @@ pub fn edit_curve(
 
 /// The chart draws NO card of its own — the whole column (header, curve,
 /// strip, hint) lives inside one card, as in the WPF layout.
-pub fn draw_curve_chart(painter: &Painter, rect: Rect, snap: &Snapshot) {
+pub fn draw_curve_chart(painter: &Painter, rect: Rect, snap: &Snapshot, hover: Option<Pos2>) {
     let plot = plot_area(rect);
     if plot.width() < 60.0 || plot.height() < 40.0 {
         return; // render-robustness rule: bail below a minimum plot size
@@ -255,11 +255,29 @@ pub fn draw_curve_chart(painter: &Painter, rect: Rect, snap: &Snapshot) {
             let hair = Stroke::new(1.0, AMBER.gamma_multiply(0.30));
             painter.line_segment([dot, Pos2::new(dot.x, plot.max.y)], hair);
             painter.line_segment([dot, Pos2::new(plot.min.x, dot.y)], hair);
-            chip(painter, Pos2::new(dot.x, plot.max.y + 4.0), Align2::CENTER_TOP, &format!("{t:.1}°"));
-            chip(painter, Pos2::new(plot.min.x - 10.0, dot.y), Align2::RIGHT_CENTER, &format!("{p:.0}%"));
+            chip(painter, Pos2::new(dot.x, plot.max.y + 4.0), Align2::CENTER_TOP, &format!("{t:.1}°"), AMBER);
+            chip(painter, Pos2::new(plot.min.x - 10.0, dot.y), Align2::RIGHT_CENTER, &format!("{p:.0}%"), AMBER);
             painter.circle_filled(dot, 4.2, AMBER);
             painter.circle_filled(dot, 1.8, Color32::WHITE);
         }
+    }
+
+    // Developer hover follows the pointer on both axes. Its full-width and
+    // full-height guides distinguish it from the amber live output.
+    if let Some(pos) = hover.filter(|pos| plot.contains(*pos)) {
+        let temp = TEMP_MIN + ((pos.x - plot.min.x) / plot.width()) as f64 * (TEMP_MAX - TEMP_MIN);
+        let percent = (1.0 - ((pos.y - plot.min.y) / plot.height()) as f64) * 100.0;
+        let hair = Stroke::new(1.0_f32, Color32::from_white_alpha(90));
+        painter.line_segment(
+            [Pos2::new(pos.x, plot.min.y), Pos2::new(pos.x, plot.max.y)],
+            hair,
+        );
+        painter.line_segment(
+            [Pos2::new(plot.min.x, pos.y), Pos2::new(plot.max.x, pos.y)],
+            hair,
+        );
+        chip(painter, Pos2::new(pos.x, plot.max.y + 4.0), Align2::CENTER_TOP, &format!("{temp:.1}°"), TEXT);
+        chip(painter, Pos2::new(plot.min.x - 10.0, pos.y), Align2::RIGHT_CENTER, &format!("{percent:.1}%"), TEXT);
     }
 }
 
@@ -299,6 +317,7 @@ fn why_text(s: &fan_core::ChannelStatus, snap: &Snapshot) -> String {
         ),
         R::IdleKick => "idle kick · spinning the stopped fan briefly".into(),
         R::StopProbe => "trial stop · resumes the moment the temp rises".into(),
+        R::FullSpeed => "full speed override · all fans at 100%".into(),
         R::None => String::new(),
     }
 }

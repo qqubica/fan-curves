@@ -675,6 +675,7 @@ dependencies = [
  "ctrlc",
  "fan-core",
  "interprocess",
+ "libloading",
  "serde",
  "serde_json",
  "time",

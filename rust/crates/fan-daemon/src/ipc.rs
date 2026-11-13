@@ -15,6 +15,8 @@
 //!   {"cmd":"set_profile","profile":…}  → replace + save (unless the daemon is read-only)
 //!   {"cmd":"preset","name":"quiet"|"performance"} → adopt tuning, keep assignments
 //!   {"cmd":"apply"} / {"cmd":"pause"}  → start/stop writing PWM (pause = BIOS control)
+//!   {"cmd":"set_full_speed","enabled":true|false} → temporary 100% override
+//!   {"cmd":"toggle_full_speed"}        → atomically flip the temporary override
 //!
 //! Binding the socket also serves as the single-instance check: a second daemon
 //! fails to create the listener and exits.
@@ -22,6 +24,7 @@
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use interprocess::local_socket::traits::{ListenerExt as _, Stream as _};
 use interprocess::local_socket::{
@@ -41,9 +44,26 @@ use crate::Backend;
 /// backfilling client loops until it has caught up.
 const HISTORY_CHUNK: usize = 4096;
 
+/// How old the cached start-with-Windows state may get before an inventory
+/// request triggers a background re-check.
+const AUTOSTART_TTL: Duration = Duration::from_secs(30);
+
 /// Everything the tick loop and the IPC handlers share.
+///
+/// Lock order: `engine` before `view`. Read-only commands take `view` (and
+/// `latest`/`history`) and never `engine`.
 pub struct Shared {
     pub engine: Mutex<FanEngine<Backend>>,
+    /// What the read-only commands answer from, republished after every tick
+    /// and every command that changes the engine. A tick holds the engine lock
+    /// through the header writes (two 50 ms EC handshake waits per header, so
+    /// ~600 ms on this board), and a `status` that waited for it took most of
+    /// a second; a UI opening paid that several times over before it could
+    /// show anything.
+    pub view: Mutex<View>,
+    /// Start-with-Windows state. Checking it spawns `schtasks`, far too slow
+    /// for the UI's once-a-second inventory poll, so replies use this copy.
+    pub autostart: Arc<Mutex<AutostartCache>>,
     pub latest: Mutex<Vec<ChannelStatus>>,
     /// Per-channel strip history, recorded every tick. The daemon is the only
     /// resident process, so this is the only place a sample can survive while
@@ -56,6 +76,119 @@ pub struct Shared {
     /// Set by Ctrl+C or the `shutdown` command; the tick loop exits on it and
     /// hands the headers back to the BIOS (the daemon's `exit.signal`).
     pub stop: AtomicBool,
+}
+
+impl Shared {
+    pub fn new(
+        engine: FanEngine<Backend>,
+        telemetry: TelemetryLog,
+        profile_path: std::path::PathBuf,
+        read_only: bool,
+        autostart: AutostartCache,
+    ) -> Self {
+        Self {
+            view: Mutex::new(View::of(&engine)),
+            engine: Mutex::new(engine),
+            autostart: Arc::new(Mutex::new(autostart)),
+            latest: Mutex::new(Vec::new()),
+            history: Mutex::new(Vec::new()),
+            telemetry: Mutex::new(telemetry),
+            profile_path,
+            read_only,
+            stop: AtomicBool::new(false),
+        }
+    }
+
+    /// Refresh the read-only view. Call with the engine lock held, after
+    /// anything that changed the engine.
+    pub fn publish(&self, engine: &FanEngine<Backend>) {
+        *self.view.lock().unwrap() = View::of(engine);
+    }
+}
+
+/// Engine state as of the last tick or command (see [`Shared::view`]).
+pub struct View {
+    simulated: bool,
+    backend: String,
+    applying: bool,
+    full_speed: bool,
+    profile: Profile,
+    sensors: Vec<serde_json::Value>,
+    controls: Vec<serde_json::Value>,
+}
+
+impl View {
+    fn of(engine: &FanEngine<Backend>) -> Self {
+        let hw = engine.backend();
+        // Readings come from the backend's last update, so a copy taken right
+        // after the tick is exactly as fresh as asking the backend later.
+        let sensors = hw
+            .sensors()
+            .iter()
+            .map(|s| {
+                json!({
+                    "id": s.id,
+                    "name": s.name,
+                    "kind": match s.kind { SensorKind::Temp => "temp", SensorKind::Rpm => "rpm" },
+                    "value": hw.read_value(&s.id),
+                })
+            })
+            .collect();
+        let controls = hw
+            .controls()
+            .iter()
+            .map(|c| json!({ "id": c.id, "name": c.name, "rpm": hw.read_control_rpm(&c.id) }))
+            .collect();
+        Self {
+            simulated: hw.is_simulated(),
+            backend: hw.description().to_string(),
+            applying: engine.applying(),
+            full_speed: engine.full_speed(),
+            profile: engine.profile().clone(),
+            sensors,
+            controls,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct AutostartCache {
+    /// The daemon's start-with-Windows tasks are registered.
+    pub installed: bool,
+    /// The WPF app's task is enabled too, so both would start at logon.
+    pub conflict: bool,
+    checked: Option<Instant>,
+    refreshing: bool,
+}
+
+impl AutostartCache {
+    pub fn checked(installed: bool, conflict: bool) -> Self {
+        Self { installed, conflict, checked: Some(Instant::now()), refreshing: false }
+    }
+}
+
+/// Re-check the task state on a background thread when the cached copy is
+/// stale. The request that noticed keeps the old answer; the next poll gets
+/// the new one.
+fn refresh_autostart_if_stale(cache: &Arc<Mutex<AutostartCache>>) {
+    #[cfg(windows)]
+    {
+        let mut c = cache.lock().unwrap();
+        let fresh = c.checked.is_some_and(|t| t.elapsed() < AUTOSTART_TTL);
+        if fresh || c.refreshing {
+            return;
+        }
+        c.refreshing = true;
+        drop(c);
+        let cache = Arc::clone(cache);
+        std::thread::spawn(move || {
+            let installed = crate::autostart::installed();
+            let conflict = crate::autostart::conflicting_wpf_task();
+            *cache.lock().unwrap() = AutostartCache::checked(installed, conflict);
+        });
+    }
+    #[cfg(not(windows))]
+    let _ = cache;
 }
 
 /// The daemon runs ELEVATED (Super I/O access needs it) while the UI is a
@@ -144,6 +277,8 @@ enum Request {
     Preset { name: String },
     Apply,
     Pause,
+    SetFullSpeed { enabled: bool },
+    ToggleFullSpeed,
     Shutdown,
     /// Register/remove the start-with-Windows task. The daemon already runs
     /// elevated, so the UI can ask for this without elevating itself.
@@ -157,16 +292,16 @@ fn respond(line: &str, shared: &Shared) -> serde_json::Value {
     };
     match request {
         Request::Ping => {
-            let engine = shared.engine.lock().unwrap();
+            let view = shared.view.lock().unwrap();
             json!({
                 "ok": true,
                 "version": env!("CARGO_PKG_VERSION"),
-                "simulated": engine.backend().is_simulated(),
-                "backend": engine.backend().description(),
+                "simulated": view.simulated,
+                "backend": view.backend,
             })
         }
         Request::Status => {
-            let engine = shared.engine.lock().unwrap();
+            let view = shared.view.lock().unwrap();
             let latest = shared.latest.lock().unwrap();
             // Per-channel retention bounds, so a mirroring client can tell how
             // far behind it is and fetch exactly the missing range.
@@ -179,8 +314,9 @@ fn respond(line: &str, shared: &Shared) -> serde_json::Value {
                 .collect();
             json!({
                 "ok": true,
-                "applying": engine.applying(),
-                "profile_name": engine.profile().name,
+                "applying": view.applying,
+                "full_speed": view.full_speed,
+                "profile_name": view.profile.name,
                 "channels": *latest,
                 "history": history,
             })
@@ -220,8 +356,8 @@ fn respond(line: &str, shared: &Shared) -> serde_json::Value {
             json!({ "ok": true })
         }
         Request::Profile => {
-            let engine = shared.engine.lock().unwrap();
-            json!({ "ok": true, "read_only": shared.read_only, "profile": engine.profile() })
+            let view = shared.view.lock().unwrap();
+            json!({ "ok": true, "read_only": shared.read_only, "profile": view.profile })
         }
         Request::SetProfile { profile } => {
             if profile.channels.is_empty() {
@@ -229,6 +365,7 @@ fn respond(line: &str, shared: &Shared) -> serde_json::Value {
             }
             let mut engine = shared.engine.lock().unwrap();
             engine.replace_profile(*profile);
+            shared.publish(&engine);
             let saved = save_if_allowed(shared, engine.profile());
             shared.telemetry.lock().unwrap().event("profile replaced via IPC");
             json!({ "ok": true, "saved": saved })
@@ -238,45 +375,28 @@ fn respond(line: &str, shared: &Shared) -> serde_json::Value {
                 return json!({ "ok": false, "error": "profile has no channels" });
             }
             let mut engine = shared.engine.lock().unwrap();
-            engine.profile_mut().apply_settings(&profile);
+            engine.apply_settings(&profile);
+            shared.publish(&engine);
             let saved = save_if_allowed(shared, engine.profile());
             json!({ "ok": true, "saved": saved })
         }
         Request::Inventory => {
-            let engine = shared.engine.lock().unwrap();
-            let hw = engine.backend();
-            let sensors: Vec<_> = hw
-                .sensors()
-                .iter()
-                .map(|s| {
-                    json!({
-                        "id": s.id,
-                        "name": s.name,
-                        "kind": match s.kind { SensorKind::Temp => "temp", SensorKind::Rpm => "rpm" },
-                        "value": hw.read_value(&s.id),
-                    })
-                })
-                .collect();
-            let controls: Vec<_> = hw
-                .controls()
-                .iter()
-                .map(|c| json!({ "id": c.id, "name": c.name, "rpm": hw.read_control_rpm(&c.id) }))
-                .collect();
-            #[cfg(windows)]
-            let (autostart, autostart_conflict) =
-                (crate::autostart::installed(), crate::autostart::conflicting_wpf_task());
-            #[cfg(not(windows))]
-            let (autostart, autostart_conflict) = (false, false);
+            refresh_autostart_if_stale(&shared.autostart);
+            let (autostart, autostart_conflict) = {
+                let c = shared.autostart.lock().unwrap();
+                (c.installed, c.conflict)
+            };
+            let view = shared.view.lock().unwrap();
             json!({
                 "ok": true,
-                "backend": hw.description(),
-                "simulated": hw.is_simulated(),
+                "backend": view.backend,
+                "simulated": view.simulated,
                 "config_path": shared.profile_path.to_string_lossy(),
                 "read_only": shared.read_only,
                 "autostart": autostart,
                 "autostart_conflict": autostart_conflict,
-                "sensors": sensors,
-                "controls": controls,
+                "sensors": view.sensors,
+                "controls": view.controls,
             })
         }
         Request::Preset { name } => {
@@ -287,6 +407,7 @@ fn respond(line: &str, shared: &Shared) -> serde_json::Value {
             };
             let mut engine = shared.engine.lock().unwrap();
             engine.profile_mut().adopt_tuning(&preset);
+            shared.publish(&engine);
             // The changed settings fingerprint instant-applies on the next tick,
             // exactly like a preset click in the WPF UI.
             let saved = save_if_allowed(shared, engine.profile());
@@ -294,14 +415,45 @@ fn respond(line: &str, shared: &Shared) -> serde_json::Value {
             json!({ "ok": true, "profile_name": engine.profile().name, "saved": saved })
         }
         Request::Apply => {
-            shared.engine.lock().unwrap().apply();
+            let mut engine = shared.engine.lock().unwrap();
+            engine.apply();
+            shared.publish(&engine);
+            drop(engine);
             shared.telemetry.lock().unwrap().event("apply via IPC");
             json!({ "ok": true })
         }
         Request::Pause => {
-            shared.engine.lock().unwrap().stop_applying();
+            let mut engine = shared.engine.lock().unwrap();
+            engine.stop_applying();
+            shared.publish(&engine);
+            drop(engine);
             shared.telemetry.lock().unwrap().event("paused via IPC (headers to BIOS)");
             json!({ "ok": true })
+        }
+        Request::SetFullSpeed { enabled } => {
+            let mut engine = shared.engine.lock().unwrap();
+            engine.set_full_speed(enabled);
+            shared.publish(&engine);
+            drop(engine);
+            shared.telemetry.lock().unwrap().event(if enabled {
+                "full speed enabled via IPC"
+            } else {
+                "full speed disabled via IPC"
+            });
+            json!({ "ok": true, "full_speed": enabled })
+        }
+        Request::ToggleFullSpeed => {
+            let mut engine = shared.engine.lock().unwrap();
+            let enabled = !engine.full_speed();
+            engine.set_full_speed(enabled);
+            shared.publish(&engine);
+            drop(engine);
+            shared.telemetry.lock().unwrap().event(if enabled {
+                "full speed enabled via IPC"
+            } else {
+                "full speed disabled via IPC"
+            });
+            json!({ "ok": true, "full_speed": enabled })
         }
         Request::SetAutostart { enabled } => {
             #[cfg(windows)]
@@ -317,11 +469,19 @@ fn respond(line: &str, shared: &Shared) -> serde_json::Value {
                             "autostart {} via IPC",
                             if enabled { "enabled" } else { "disabled" }
                         ));
-                        json!({
+                        // Re-check now, so this reply and the next inventory
+                        // both show the new state.
+                        let cache = AutostartCache::checked(
+                            crate::autostart::installed(),
+                            crate::autostart::conflicting_wpf_task(),
+                        );
+                        let reply = json!({
                             "ok": true,
-                            "autostart": crate::autostart::installed(),
-                            "autostart_conflict": crate::autostart::conflicting_wpf_task(),
-                        })
+                            "autostart": cache.installed,
+                            "autostart_conflict": cache.conflict,
+                        });
+                        *shared.autostart.lock().unwrap() = cache;
+                        reply
                     }
                     Err(e) => json!({ "ok": false, "error": e.to_string() }),
                 }
@@ -355,18 +515,39 @@ mod tests {
 
     fn test_shared() -> Shared {
         let dir = std::env::temp_dir().join("FanCurvesIpcTest");
-        Shared {
-            engine: Mutex::new(FanEngine::new(
-                Backend::Sim(SimulatedBackend::new()),
-                Profile::mac_book_like(),
-            )),
-            latest: Mutex::new(Vec::new()),
-            history: Mutex::new(Vec::new()),
-            telemetry: Mutex::new(TelemetryLog::new(dir.clone(), true, 0)),
-            profile_path: dir.join("profile.json"),
-            read_only: true,
-            stop: AtomicBool::new(false),
+        Shared::new(
+            FanEngine::new(Backend::Sim(SimulatedBackend::new()), Profile::mac_book_like()),
+            TelemetryLog::new(dir.clone(), true, 0),
+            dir.join("profile.json"),
+            true,
+            // Fresh, so the inventory test never spawns schtasks.
+            AutostartCache::checked(false, false),
+        )
+    }
+
+    #[test]
+    fn read_commands_do_not_wait_for_the_engine() {
+        let s = test_shared();
+        // A tick in progress holds the engine lock through the header writes.
+        let _tick = s.engine.lock().unwrap();
+        for cmd in ["ping", "status", "profile", "inventory"] {
+            let r = respond(&format!(r#"{{"cmd":"{cmd}"}}"#), &s);
+            assert_eq!(r["ok"], true, "{cmd}");
         }
+        let r = respond(r#"{"cmd":"inventory"}"#, &s);
+        assert!(!r["sensors"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn commands_republish_the_view() {
+        let s = test_shared();
+        assert_eq!(respond(r#"{"cmd":"status"}"#, &s)["applying"], false);
+        respond(r#"{"cmd":"apply"}"#, &s);
+        assert_eq!(respond(r#"{"cmd":"status"}"#, &s)["applying"], true);
+        respond(r#"{"cmd":"preset","name":"performance"}"#, &s);
+        let name = respond(r#"{"cmd":"status"}"#, &s)["profile_name"].clone();
+        assert_eq!(respond(r#"{"cmd":"profile"}"#, &s)["profile"]["Name"], name);
+        assert_eq!(name, Profile::performance().name.as_str());
     }
 
     fn sample(i: usize) -> HistorySample {
@@ -376,6 +557,24 @@ mod tests {
             raw: Some(41.5),
             out: if i % 2 == 0 { 20.0 } else { 0.0 },
         }
+    }
+
+    #[test]
+    fn full_speed_status_and_pause_round_trip() {
+        let shared = test_shared();
+        assert_eq!(respond(r#"{"cmd":"status"}"#, &shared)["full_speed"], false);
+        assert_eq!(respond(r#"{"cmd":"set_full_speed","enabled":true}"#, &shared)["ok"], true);
+        assert_eq!(respond(r#"{"cmd":"status"}"#, &shared)["full_speed"], true);
+        assert_eq!(respond(r#"{"cmd":"pause"}"#, &shared)["ok"], true);
+        assert_eq!(respond(r#"{"cmd":"status"}"#, &shared)["full_speed"], false);
+    }
+
+    #[test]
+    fn rapid_full_speed_toggles_use_current_daemon_state() {
+        let shared = test_shared();
+        assert_eq!(respond(r#"{"cmd":"toggle_full_speed"}"#, &shared)["full_speed"], true);
+        assert_eq!(respond(r#"{"cmd":"toggle_full_speed"}"#, &shared)["full_speed"], false);
+        assert_eq!(respond(r#"{"cmd":"status"}"#, &shared)["full_speed"], false);
     }
 
     #[test]
