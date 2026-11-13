@@ -1,18 +1,8 @@
-# Working notes
+# Agent instructions
 
-- The active implementation is the Rust workspace. Read `CLAUDE.md` for hardware constraints and historical context; its old deployment instructions are superseded by `rust/install-windows.ps1`.
-- Windows production binaries belong in `%LOCALAPPDATA%\Programs\FanCurvesRust`, never a worktree or Cargo build directory. Install with `rust/install-windows.ps1` from an elevated PowerShell session.
-- If the installer shell is not elevated but the existing `FanCurvesDaemon` and `FanCurvesTray` tasks already point to the stable install directory, build to `rust/target/install`, preserve the live daemon profile, shut down over IPC, replace the installed binaries, and restart those tasks. Verify the installed hashes and a non-simulated hardware ping.
-- The requested logon state is a hidden hardware daemon and an ordinary-privilege tray icon only. Open the UI only on user request; closing it leaves the daemon and tray running. The retired `--open-when-ready` flag must remain harmless for existing scheduled tasks. See `docs/lessons/tray-only-startup.md`.
-- Only explicit simulation may start a simulated daemon. A disconnected production UI must wait for hardware rather than take the production socket with a simulator.
-- Keep one controller per fan header. Outside the explicit full-speed override, release motherboard control to firmware and NVIDIA GPU control to the driver on pause, shutdown, disabled channels, or failed sensor/control operations. Failed control writes must still release their endpoints during the override.
-- The developer-mode full-speed button is a temporary daemon override of every discovered fan control, including unassigned controls. It sends an atomic toggle command so rapid clicks cannot reuse stale UI status. It does not edit the profile; turning it off returns to the prior curves or paused state, and Pause cancels it. See `docs/lessons/full-speed-override.md`.
-- The UI shows each full-speed click immediately using the parity of unacknowledged toggles, then reconciles with the daemon reply. Keep the daemon's atomic toggle; synchronous hardware writes and inventory reads must not hold up the button highlight. See `docs/lessons/full-speed-override.md`.
-- A 0% GPU curve target means driver automatic control, shown as such in the UI. This RTX 5080 accepts manual 0% but keeps reporting about 1,400 RPM; automatic firmware policy owns zero-RPM idle behavior. Positive targets use manual control.
-- Enumerate NVIDIA fan controls from the driver-reported NVML endpoints, not the number of visible fan blades. This three-fan RTX 5080 currently reports two endpoints. Probe current GPU core, hotspot, and memory temperatures and expose only readings the driver supports; thresholds are not live sensors. Keep source readings refreshed with the UI status poll. See `docs/lessons/gpu-capability-verification.md`.
-- In developer mode, the settings curve hover crosshair follows the pointer freely on both axes and shows the temperature and percentage at that position with white guides spanning the full plot width and height, without a dot at their intersection. Keep this distinct from the amber live operating point and hidden outside developer mode. See `docs/lessons/free-curve-hover.md`.
-- Preserve the user's existing curves and header assignments during deployment. Save real profile changes; simulation must not overwrite the production profile.
-- This machine's CPU cooler currently uses CPU CCD1 (`/amdcpu/0/temperature/3`), with 0% below 50°C. The hotter Tctl/Tdie sensor is not its input; see `docs/lessons/cpu-temperature-selection.md` before diagnosing idle fan behavior.
-- Daemon read-only IPC commands (`ping`, `status`, `profile`, `inventory`) answer from the published `Shared::view`, never the engine lock, which a tick holds through ~600 ms of header writes. Keep slow probes such as `schtasks` out of request paths; the autostart state is cached. See `docs/lessons/ipc-reads-never-wait-for-the-tick.md`.
-- Use `%USERPROFILE%\.cargo\bin\cargo.exe` when Cargo is absent from PATH. Run workspace tests, including C# golden parity, after engine changes.
-- Put reusable lessons in individual files under `docs/lessons/`, with a one-line summary first. Avoid duplicating this file or source documentation.
+Read `CLAUDE.md` in this directory before working here. It is the single
+source of project instructions: layout, build and deploy procedure, the
+behaviour contract, hardware facts and the rules that must not be broken.
+
+Reusable lessons live in `docs/lessons/`, one per file with a one-line summary
+first. Add project rules and decisions to `CLAUDE.md`, not to this file.

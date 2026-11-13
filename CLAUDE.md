@@ -1,922 +1,420 @@
-# fan-curves — Windows fan control with a MacBook-like default
+# fan-curves — fan control with a MacBook-like default
 
-Current Windows deployment (2026-09-23): see `AGENTS.md` and
-`rust/install-windows.ps1`. The live Rust daemon, tray, and UI are installed in
-`%LOCALAPPDATA%\Programs\FanCurvesRust`; the former worktree startup path has
-been replaced. `FanCurvesDaemon` runs hidden and elevated; `FanCurvesTray`
-runs at normal privilege and shows only the tray icon at logon. Open the UI
-from the tray when needed. Profile
-changes persist. NVIDIA GPU fans are supported through NVML. Simulation is
-explicit and the UI's `--sim` mode uses a separate socket. Historical notes
-below about worktree deployment, implicit simulation, missing GPU controls,
-or the .NET app being the current controller are superseded.
+Drives motherboard fan headers and NVIDIA GPU fans the way a MacBook manages
+its fans: fully stopped at idle, no reaction to short temperature spikes, a
+smooth ramp only under sustained load. Written in Rust: a headless daemon that
+owns the hardware, a tray launcher, and an on-demand egui UI. Built for Kuba's
+2026 PC (ASRock X870 Steel Legend WiFi, 9950X3D, NH-D15, 4× Noctua NF-A14 in a
+Phanteks P600S, RTX 5080); Windows is the verified platform, Linux (hwmon)
+compiles but has never run on real hardware.
 
-WPF (.NET 8) app that drives motherboard fan headers the way a MacBook manages its
-fans: silent flat floor at idle, no reaction to short temperature spikes, smooth
-ramp only under sustained load (class-level default slew 8 %/s both directions; the Quiet preset's CPU channel runs 9 up / 8 down since 2026-07-22). Built for Kuba's 2026 PC
-(ASRock X870 Steel Legend WiFi + 9950X3D + NH-D15 + Arctic P14 Pro chain in a
-Phanteks P600S), but hardware-agnostic.
+Temperature-only: every channel follows its temperature staircase through the
+response filter, full stop. The power-budget controller and everything around
+it was removed on 2026-08-06.
 
-**Temperature-only since 2026-08-06** (Kuba's ask: "remove all modes except the
-temperature mode"): the thermal-budget controller, power-curve mode, control-mode
-switch, hard-override fuse, learned thermal model, futility probe, downward
-relief, power floor and every power sensor/knob were removed wholesale. Every
-channel follows its temperature staircase through `ResponseFilter`, full stop.
-The removed machinery's documentation and rationale live in `docs/history.md`
-(dated entry 2026-08-06); the code is in git history before that date.
+History, journals and the documentation of removed parts live in
+`docs/history.md`. The original WPF/.NET app was removed on 2026-11-13 (Kuba:
+"Clean it up. Don't keep backward compatibility."); its last tree is tag
+`v0.3.1`. Do not reintroduce compatibility shims for it or for older daemons.
 
-Development history and harness logs live in `docs/history.md`.
+## Repo
 
-## Repo / releases
-
-**Public GitHub repo `qqubica/fan-curves`** (MIT) since 2026-07-22 — nested repo
-gitignored by the workspace parent; earlier history stays in the workspace repo.
-No PRs, push straight to main. Public-facing docs = `README.md` + `docs/*.png`
-(CLAUDE.md is published too — keep it accurate, nothing secret in it).
-
-- README screenshots: exit the running instance (`exit.signal`), move
-  `profile.json` aside so the pristine defaults show (Quiet preset checked), run
-  the built **DLL** — `dotnet src/FanCurves/bin/Debug/net8.0-windows/FanCurves.dll
-  --sim --screenshot docs/screenshot-simple.png` (+ `--dev` for the second shot) —
-  which bypasses the requireAdministrator manifest (it lives only in the apphost
-  exe), then restore profile.json and `schtasks /Run /TN FanCurves`.
-- Release: bump `<Version>` in `src/FanCurves/FanCurves.csproj` →
-  `dotnet publish src/FanCurves -c Release -r win-x64 --self-contained
-  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish`
-  → `Compress-Archive` the exe as `FanCurves-X.Y.Z-win-x64.zip` →
-  `gh release create vX.Y.Z <zip>`. publish/ and *.zip are gitignored.
-  `gh release create` makes the tag remotely — run `git fetch --tags` right
-  after, so the tag exists locally (git-solo and other history tools only see
-  local refs; the v0.1.0 tag was missed this way once).
-
-## Rust port (`rust/`, started 2026-08-06)
-
-Kuba's decision: port the app to Rust for minimal resource usage and a
-universal Windows + Linux build. Target architecture: headless engine daemon +
-on-demand egui UI + native per-OS hardware backends (PawnIO + NCT6686D on
-Windows, hwmon/sysfs on Linux) — LibreHardwareMonitorLib eventually drops out.
-Cargo workspace `rust/`: `crates/fan-core` (one module per C# Core file;
-serde-compatible with the SAME `%AppData%\FanCurves\profile.json` — PascalCase
-names, unknown fields ignored, missing fields take the C# defaults) and
-`crates/fan-daemon` (jittered tick loop, auto-assign port, `--sim` / `--ticks` /
-`--profile` / `--no-apply`, BIOS handback on drop/Ctrl+C). The WPF app stays
-the shipping app until the port reaches feature parity.
-
-- **Parity is enforced, not assumed**: `rust/parity-harness` (C# console app
-  referencing FanCurves.Core) writes golden per-tick traces into
-  `crates/fan-core/tests/golden/`; `cargo test` replays them through the port
-  and compares every output column at 1e-9 (in practice bit-identical).
-  **After any intentional behaviour change in FanCurves.Core, regenerate**
-  (`dotnet run --project rust/parity-harness`) — otherwise the golden tests
-  pin the old behaviour and fail honestly.
-- The daemon must never save the real profile from a sim run (same hazard as
-  C# `Profile.ReadOnly`): it only writes the profile when `--profile` names an
-  explicit path.
-- Engine components take monotonic `now` seconds as parameters — the daemon
-  owns the clock; tests replay any timeline deterministically.
-- Toolchain (installed 2026-08-06): rustup + VS Build Tools via winget. cargo
-  is NOT on PATH in this harness's shells — use
-  `& "$env:USERPROFILE\.cargo\bin\cargo.exe"` from `rust/`.
-- **Deploying the live Rust stack** (which runs from `rust\target\release`):
-  the UI and tray are non-elevated — swap them in place by renaming the
-  locked exe aside (`Move-Item` works on a running image), rebuilding, then
-  kill + relaunch; delete the renamed copy after. The daemon runs ELEVATED,
-  so a non-elevated session cannot restart it — `rust\deploy-daemon.ps1`
-  from an elevated shell does the shutdown-over-IPC → rebuild → start cycle
-  (fans sit on the BIOS curve during the gap, the Pause state). Do NOT
-  register the autostart task just to trampoline elevation — registration
-  stays an explicit act. If the `FanCurvesDaemon` task IS already registered,
-  a non-elevated session can restart the elevated daemon via
-  `schtasks /Run /TN FanCurvesDaemon` — but **stop fan-ui FIRST**: an
-  offline UI auto-spawns a sim daemon that grabs the IPC socket
-  (single-instance lock), and the task-launched real daemon then exits
-  (happened 2026-08-07; symptom: ping says `"simulated":true` on real
-  hardware). Order: kill UI/tray → IPC `shutdown` → wait for exit →
-  `schtasks /Run` → verify ping shows the NCT6686D backend → relaunch tray/UI.
-  **Known stale path (2026-08-07)**: the registered task points at
-  `.claude\worktrees\wise-wibbling-cocoa\rust\target\release\fan-daemon.exe`
-  (autostart registers `current_exe`, and it was registered from a worktree
-  run); the fresh main-checkout build is copied over that path for now.
-  Proper fix — re-register from the main-checkout exe — needs an elevated
-  shell (`--install-autostart` or `schtasks /Change`).
-- **Footprint rules** (the port's reason to exist): release profile runs fat
-  LTO + `codegen-units 1` + symbol strip, but `panic` stays **"unwind" on
-  purpose** — a panicking daemon must unwind through `FanEngine::drop` so the
-  headers go back to the BIOS; `panic = "abort"` would freeze the Super I/O at
-  the last written PWM (the failure the C# engine treats as worse than dying).
-  The daemon prints CHANGES ONLY by default (fan ON/OFF, target steps, reason
-  transitions minus pure None↔Ramp flips — behavior.txt vocabulary);
-  `--verbose` restores the per-tick line. No async runtime — one thread and a
-  jittered sleep is the whole scheduler.
-- **UI performance rules for the egui phase**, translated from the WPF render
-  rules ahead of time so they bind when the UI is built: repaint via
-  `request_repaint()` once per engine tick only (egui otherwise repaints on
-  input); any perpetual animation (the fan glyph) capped at ≤ 20 fps; while
-  hidden/minimized feed histories only, paint nothing; the UI is a separate
-  process that fully exits on close — the daemon is the only resident part.
-- **Phase 2 (done 2026-08-06): telemetry + IPC.** The daemon writes the review
-  log with the SAME schema/formats/vocabulary as the C# `TelemetryLog` (sim
-  runs append to the same `telemetry-sim-*.csv` files interchangeably; local
-  UTC offset captured once at startup — DST flips shift timestamps until
-  restart). IPC = local socket `fan-curves-daemon.sock` (named pipe on
-  Windows), line-delimited JSON: ping / status / profile / set_profile /
-  update_profile / inventory / preset / apply / pause / set_autostart /
-  history / clear_history / shutdown; binding doubles as the single-instance
-  lock; `--send <json>` is the built-in client. The socket name lives in ONE
-  place, `fan_core::ipc_socket_name()` (daemon, UI and tray all call it), and
-  the `FAN_CURVES_SOCKET` env var overrides it — that is how a development
-  daemon+UI pair runs beside the live stack without cross-talk (2026-08-07).
-  **Read-only commands never take the engine lock (2026-10-24**, Kuba: "When
-  I start the UI it's loading for at least a second"): a tick holds it
-  through ~600 ms of EC write handshakes, so ping/status/profile/inventory
-  answer from `Shared::view` (republished after every tick and every
-  mutating command), and the autostart state is a cached background check —
-  details in `docs/lessons/ipc-reads-never-wait-for-the-tick.md`.
-  Service/autostart wiring deferred to the hardware-backend phase
-  (autostarting a sim-only daemon is pointless).
-- **UI feature parity with the WPF app is TRACKED, not assumed.** Done:
-  simple mode, **developer mode** (`devpanel.rs`, all eleven groups with the
-  WPF labels/ranges/step snapping/value formats/tooltips, master-checkbox
-  headers, 45 % dim when off but still editable, SOURCES with live readings
-  and header exclusivity), **curve editing** (drag / double-click add /
-  right-click remove, committing on RELEASE so one drag is one undo entry),
-  **undo-redo** (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z, CurveEdit + TuningEdit), and
-  the **why-chip** in the chart corner with the original wordings.
-  Also done: the **app icon** (window/taskbar icon from `fan_core::icon` via
-  fan-ui's `icon.rs`), the strip's **hover crosshair +
-  readout chip**, **stopped-time spans**, and **CLEAR**.
-  **Developer mode is the launch default and the in-app title row is gone
-  (2026-08-07**, "move the developer mode button under the pause button and
-  enable developer mode" + "remove the logo and app name from the top left
-  corner"): fan-ui opens at DEV_SIZE with the panel showing (`--dev` is
-  accepted but redundant), the Developer chip is a full-width button in the
-  sidebar directly under Pause (labelled "Developer Mode" and sized like the
-  Pause button — 34 px / 12 pt — since later that day, Kuba: "Unify the size
-  of the buttons under mode selection"), and the glyph + "Fan Curves" row above the
-  grid was deleted — the OS caption still carries the icon and name (native
-  chrome; removing it would cost the caption buttons). fan-ui's `draw_glyph`
-  went with the row; the drawn geometry survives in `fan_core::icon`.
-  **No size button at all since 2026-08-07** (Kuba: "Remove completely the
-  button to change window size" — earlier the same day the quarter-of-screen
-  step went, then the whole Fixed ↔ Max toggle): the egui window has exactly
-  one size per mode (SIMPLE_SIZE / DEV_SIZE, switched by the Developer chip),
-  no drag-resize, no maximize; the `SizeMode` enum, `cycle_size` and the
-  maximize/drag-restore watcher were deleted with the button. The WPF app
-  keeps its three sizes and its drag-restore `Chrome` hook.
-  **One window only (2026-08-07)**: the first fan-ui binds a lock socket named
-  `<ipc_socket_name()>.ui` (so a `FAN_CURVES_SOCKET` dev stack locks
-  separately) and a later launch connects to it — which tells the first
-  window to unminimize + focus — and exits; two windows were two mirrors
-  polling the daemon for nothing.
-  **Edge glow (2026-08-07, "make the edges of areas glow")**: `GLOW` in
-  main.rs — a zero-offset white `Shadow` (blur 18, spread 1, premultiplied
-  13/13/13/13) on the two big cards, preset cards, status pill and the
-  segmented channel control, with the card hairline brightened to
-  white-alpha 28. Amber stays live-data-only; the glow is white.
-  **History-strip render rules** (2026-08-07, "weird artifacts"): the fan-%
-  under-fill must NOT go through `Shape::convex_polygon` — the staircase
-  outline is concave and egui fills it with criss-crossing triangles; it is a
-  hand-built triangle-strip `Mesh` down to the baseline. And every trace that
-  can contain NaN (avg on missing readings — backfilled data has them) must
-  BREAK into line-runs at NaN like the raw trace, never feed NaN vertices to
-  the tessellator (one NaN smears the whole strip).
-  Also done: **two-tier history + scrollback** (`fan-core/src/history.rs` —
-  exact 600-sample ring plus a per-channel spill file of fixed 10-byte
-  quantized records, delete-on-close, silent RAM-only degradation on any file
-  error; the viewport anchors on ABSOLUTE indices so incoming ticks never move
-  a scrolled window and CLEAR strands an anchor harmlessly; wheel ≈1 min/notch,
-  10× with Shift, drag with a fractional remainder, double-click / LIVE back
-  to now).
-- **History is DAEMON-owned since 2026-08-07** ("the graph history should not
-  start from scratch when you launch the UI"): the daemon records a
-  `HistorySample` per channel per tick into the shared two-tier store (which
-  moved from fan-ui into fan-core for exactly this), retains ~24 h (`KEEP` =
-  86 400 samples; the spill compacts to the newest day once it holds two, so a
-  weeks-long daemon never grows the file past ~1.7 MB/channel), and serves it
-  over IPC: `status` gains per-channel `{first,total}` bounds and `history`
-  pages samples by absolute index (≤4096/reply, compact `[wall,avg,raw,out]`
-  rows, nulls for missing readings). The UI keeps only a MIRROR: on every
-  (re)connect it wipes the local store and backfills from the daemon (chunked,
-  oldest→newest — a 24 h backfill is ~21 round-trips, under a second), then
-  follows along one sample per poll (served from the daemon's ring, no disk
-  I/O on either side). Steady-state samples come from daemon TICKS, not UI
-  polls, so two UI launches see the same series. CLEAR sends `clear_history`
-  (a mirror-only clear would refill on the next launch) and wipes the mirror
-  regardless of the reply; against a daemon too old to serve history the UI
-  falls back to the old poll-synthesized samples, detected per status reply.
-  `HistorySample` lost its UI-relative `t` field — wall-clock differences
-  drive the "ago"/stopped-span math, which is also what makes backfilled
-  timestamps correct.
-- **Tray = launcher only** (`crates/fan-tray`, Windows): the daemon is the
-  resident part and the UI is disposable, so there is nothing to minimise INTO
-  the tray. Runs **non-elevated on purpose** — the daemon has admin, and
-  anything IT spawned would inherit that token and silently run the UI
-  elevated. Hand-rolled `Shell_NotifyIcon` over `windows-sys` (313 KB, ~10 MB).
-  Double-click opens the UI; menu = open / pause-resume over IPC / close tray,
-  and closing the tray does NOT stop the daemon. Icon comes from
-  `fan_core::icon` so tray and window cannot drift.
-  Windows 11 files new tray icons into the overflow flyout — drag it onto the
-  taskbar to pin it.
-  **Still missing, deliberate**: custom borderless chrome (cosmetic).
-- **Autostart** (`fan-daemon/src/autostart.rs`): Task Scheduler logon task
-  `FanCurvesDaemon`, `/RL HIGHEST` (a Run key cannot elevate, and the daemon
-  needs admin) — its own name so it and the WPF app's `FanCurves` task can be
-  toggled independently. **Never registered automatically**: two controllers
-  writing the same headers is last-writer-wins, so it is an explicit act
-  (`--install-autostart`, the `set_autostart` IPC command, or the sidebar's
-  "Start with Windows"). The daemon prints residency at startup and warns when
-  BOTH tasks exist; the UI shows the same warning above the switch. Residency
-  belongs to the daemon — the UI is on-demand and exits, which is why there is
-  no close-to-tray. Full inventory of the WPF UI — every control, range and interaction
-  rule — was extracted before porting; work from it rather than from memory
-  (guessed ranges were wrong).
-- **The layout follows the WPF grid `252 | * | Auto`** (verified by
-  screenshotting the running .NET app and comparing): sidebar = hero label,
-  int/frac hero numeral, status-chip pill, PROFILE, preset CARDS, full-width
-  pause, then the Developer chip (since 2026-08-07 — no in-app title row);
-  middle = **ONE card** holding the segmented channel header, the
-  detail line, the curve, the hint and the history strip; dev panel on the
-  **RIGHT** as one card with letter-spaced headers. Do not reintroduce
-  per-group boxes or move the panel between the hero and the chart.
-  - egui: a `Frame` inside a horizontal row does NOT constrain its width — a
-    right-to-left layout inside it claims the whole row (it ate the dev
-    panel's space). Allocate the exact region with `allocate_ui_with_layout`
-    first, then draw the card inside it.
-  - egui: a `Frame` also GROWS to its child — `set_width` on the frame's ui
-    is a floor, not a cap, and a vertical `ScrollArea` does not clip the
-    cross axis. The dev panel's old inner `set_width(PANEL_WIDTH - 16)`
-    (wider than the card's `PANEL_WIDTH - 36` content) silently widened the
-    card ~20 px past its allocation, parking the right border past the
-    window edge — "invisible" no matter how the row math was fixed
-    (2026-08-07; found by scanning screenshot pixel columns for the stroke).
-    Inner content must size from `available_width()`, never a constant.
-  - The default font has no U+2713; the preset tick is drawn with two line
-    segments, not typed.
-  - Edits go through **`update_profile`**, never `set_profile`: the latter
-    calls `replace_profile`, which clears the filters and turns a slider nudge
-    into an averaging-window reset.
-  - A **tuning** edit (curve, response knobs, floor value) renames the profile
-    "Custom"; app-level switches and sensor/header assignment do not.
-  - egui gotchas that cost time: a child `Ui` inside a horizontal parent
-    inherits horizontal flow (the panel column needs an explicit
-    `allocate_ui_with_layout(top_down)`), and `with_layout(right_to_left)`
-    inside a vertical `Ui` claims ALL remaining height — put value labels in a
-    `horizontal` row or the group stretches to fill the window.
-- **Phase 3 (done 2026-08-06): egui UI v1** (`crates/fan-ui`) — on-demand
-  viewer/controller over the IPC socket: hero average numeral, channel
-  selector, readouts + why-chip, staircase chart with amber live overlay,
-  10-min history strip, preset/apply/pause. Repaints ONLY when the 1 Hz poll
-  delivers (the repaint rules hold), and the FIRST `status` is fetched
-  immediately on (re)connect — waiting for the first recv_timeout instead left
-  a tray-launched window on "NO CHANNEL" for a full second (fixed 2026-08-07);
-  auto-spawns a sibling `fan-daemon --sim`; exits fully on close. ~115 MB working set while OPEN (egui + GPU context —
-  the on-demand/exit design is what keeps that off the resident budget).
-  Curve editing/undo/dev panel/scrollback stay WPF-only for now. egui gotcha
-  recorded in `main.rs`: `Color32` is PREMULTIPLIED — white-at-alpha needs
-  equal components (`from_rgba_premultiplied(a,a,a,a)`); components above
-  alpha render as solid/additive white (the "white pill" bug).
-- **Phase 4 (done 2026-08-06): native Windows backend** (`fan-daemon/src/
-  pawnio.rs` + `nct6686.rs`) — LibreHardwareMonitorLib replaced. PawnIO is
-  reached by **DeviceIoControl on `\\?\GLOBALROOT\Device\PawnIO`** (no DLL
-  link; IOCTLs 0xA1B22084 load / 0xA1B22104 execute), with the **official
-  signed 0.2.10 `LpcIO.bin` + `AMDFamily17.bin` embedded** via `include_bytes!`
-  — the driver rejects unsigned modules, so self-compiled ones are impossible.
-  Super I/O detect on 0x2E/0x4E (NCT6686D = id 0xD4 rev 0x4x; **`ioctl_find_bars`
-  must run while still in config mode** or every later port read is
-  ACCESS_DENIED) → EC window at `base+4/5/6` with the wait-for-0xFF /
-  force-after-500 ms / always-release-to-0xFF page handshake → temps
-  `0x100+2i`, tach `0x140+2i`, duty `0x160+i`; PWM writes are
-  `0xA01=0x80 → 50 ms → set bit i in 0xA00 → 0xA28+i=duty → 0xA01=0x40 → 50 ms`,
-  with the firmware's mode bit and duty saved on first write and restored on
-  release. CPU temps over SMN: Tctl `0x59800` (>>21 ×0.125, −49 on range/tj
-  bits), CCDs `0x59B08+4n` (&0xFFF ×0.125 −305). Mutexes
-  `Global\Access_ISABUS.HTP.Method` + `Global\Access_PCI`, held around every
-  sequence; a busy bus SKIPS the operation (never write unlocked), except
-  handback which waits 1 s.
-  - **Identifiers are LHM-compatible on purpose**: `/lpc/nct6686d/0/{temperature,
-    fan,control}/N` and `/amdcpu/0/temperature/{2,3,4}` (Tctl, CCD1, CCD2) —
-    one profile.json for both apps. Diverging makes each app prune the other's
-    assignments (that is how a manual Pump Fan pick disappears). All 8 headers
-    are exposed like LHM; the FANOUT_CFG capability probe hid two real ones.
-  - The daemon treats the shared profile as **read-only unless `--save-profile`**
-    while the WPF app is the shipping controller.
-  - **Fully verified on the real board** (2026-08-06), reads AND writes.
-    Detect + EC reads + Tctl/CCD matched the running WPF app tick-for-tick
-    (same temps, same 20%/10% outputs); non-elevated runs refuse cleanly and
-    fall back to simulation. The write self-test
-    (`fan-daemon --selftest-write 7 40` elevated — header 7 has no fan and is
-    in no channel) drove ch7's command register 0x80 → 0x66 → 0x80 with every
-    other channel untouched: write handshake and handback both correct.
-  - **What the register dump taught us** (`--selftest-write` prints all eight
-    channels before/after/restore): `0xA28+i` is the COMMAND byte (what we
-    write), `0x160+i` is the EC's ACTUAL output duty — they agree on driven
-    headers (ch0/1 read 0x33 = the WPF app's 20%, ch2–5 read 0x19 = its 10%),
-    but an unused header holds a command while reporting 0 output, so
-    `0x160+i` alone can never prove a write landed. The mode register `0xA00`
-    reads **0xFF on this board — every channel already "manual" from the
-    BIOS**, so the `mode | (1<<i)` step is a no-op here and the restore
-    correctly leaves the bit set rather than clearing state the firmware owns.
-  - **The IPC pipe needs an explicit security descriptor** (found 2026-08-06
-    during the first live handover): the daemon runs ELEVATED and the UI is a
-    normal user process, so the default DACL on a high-integrity named pipe
-    locks the UI out entirely ("access denied", UI shows OFFLINE and its
-    auto-spawned sim daemon can't bind either). `ipc::bind` now creates the
-    pipe with `D:(A;;GA;;;IU)` — generic-all for Interactive Users (whoever is
-    logged in at the console; not Everyone, so a service or remote session
-    cannot command the fans).
-  - Never run both control loops at once: last writer wins per header.
-  - **Live handover verified 2026-08-06** (Kuba's ask "run it and close the
-    .NET version"): exit.signal stopped the WPF app, the Rust daemon took the
-    same profile and drove the real headers through the full MacBook sequence
-    — 40% → 25 s step-down hold → hysteresis → slew ramp to 20%, both NH-D15
-    fans at ~330/373 rpm, exactly what the C# app produced at the same duty.
-    **The Rust daemon is the reboot default since 2026-08-07** (Kuba: "remove
-    wpf"): the `FanCurvesDaemon` logon task is registered (pointing at the
-    wise-wibbling-cocoa worktree's release build) and the WPF `FanCurves`
-    task was deleted, with `AutostartEnabled: false` written into
-    profile.json so a stray WPF launch does not re-register it (App.xaml.cs
-    gates `Autostart.Ensure()` on that flag; the Rust code deserializes the
-    field but never reads it). Re-enabling the WPF app = tick its "Start
-    with Windows" checkbox, and then the daemon task must go.
-- **Phase 5 (done 2026-08-06): Linux hwmon backend** (`fan-core/src/hwmon.rs`)
-  — sysfs enumeration, millidegree temps, tach, pwm 0–255 writes with
-  `pwmN_enable` saved on first write and restored on release (the SetDefault
-  equivalent). Daemon `Backend` enum picks hwmon on Linux without `--sim`.
-  Compile-checked via `cargo check --target x86_64-unknown-linux-gnu`; NOT yet
-  run on real Linux hardware (nct6683 needs `force=1` for PWM writes on many
-  boards).
+- **Public GitHub repo `qqubica/fan-curves`** (MIT), a nested repo gitignored
+  by the workspace parent. No PRs, push straight to main. CLAUDE.md and
+  `docs/` are published — keep them accurate, nothing secret in them.
+- Commits carry no `Co-Authored-By` / `Claude-Session` trailers.
+- `AGENTS.md` only points here. Project instructions live in this file;
+  reusable lessons go in `docs/lessons/`, one per file with a one-line summary
+  first. Do not duplicate one in the other.
+- Releases so far (v0.1.0–v0.3.1) are WPF builds. The Rust app is installed
+  from source with `windows/install.ps1`; there is no packaged Rust release
+  yet. Workspace version is in `Cargo.toml` (`[workspace.package]`).
+  `gh release create` makes the tag remotely — run `git fetch --tags` after.
 
 ## Layout
 
-- `src/FanCurves.Core` — engine, no UI deps:
-  - `FanCurve` — STAIRCASE curve: each point opens a flat band (at ≥ TempC run at
-    Percent until the next point). No interpolation between points.
-  - `ResponseFilter` — **the MacBook feel lives here, not in the curve shape**:
-    the curve is driven by the rolling AVERAGE temp over AveragingSeconds (default
-    20 s — spikes barely move it), the target may jump multiple steps at once,
-    step-down hold timer starts the moment the avg ITSELF maps lower (2026-07-29,
-    Kuba's ask — was: timer only ran once the offset was met, so the total wait
-    was offset + full hold); the drop fires once StepDownHoldSeconds (default
-    10 s) are served AND (avg + HysteresisC) maps lower at that moment (time
-    served but offset unmet shows the Hysteresis why-chip; timer resets if the
-    average pops back into the band) — no flapping at band edges,
-    slew-rate limit (%/s, default 8 up and 8 down) for gradual audible ramps.
-  - `FanEngine` — ~1 s tick, jittered (2026-07-22: each tick re-arms a one-shot timer
-    with a random 850–1150 ms delay so sampling never phase-locks onto periodic system
-    activity; safe because all time logic — averaging window, step-down hold, slew dt,
-    idle kick — runs on the monotonic clock, not tick counts): read temps (max of
-    assigned sensors) → filter → write PWM.
-    `StopApplying()`/`Dispose()` hand every header back to the BIOS (`Control.SetDefault`).
-  - `LhmBackend` — real hardware via LibreHardwareMonitorLib (needs admin for the
-    kernel driver / Super I/O access). `SimulatedBackend` — fake AM5-ish CPU with
-    spikes + load phases (a real thermal plant: sink 420 J/°C behind fan-dependent
-    resistance, die ~0.055 °C/W above sink — written PWM actually changes the
-    temperature), used automatically when not elevated or nothing controllable.
-- `src/FanCurves` — WPF UI, **two modes**. Under the curve chart sits the
-  **history strip** (`HistoryChart.cs`, Developer mode only — collapsed in
-  simple mode, the curve chart takes the freed space): a 10-min window of the
-  selected channel's rolling-average temp (bright trace), raw "now" temp (faint
-  dashed) and commanded fan % (dim trace + under-fill), one sample per engine
-  tick. **Storage is two-tier** (2026-08-04, "scrollable, don't keep everything
-  in memory"): `ChannelHistory` keeps only the last 600 samples in a RAM ring
-  (the live window, fed from `MainWindow.OnEngineTicked` in both modes so
-  history is already populated when dev mode opens) and appends every sample to
-  a per-channel binary spill file in `%TEMP%\FanCurves\` (fixed 10-byte
-  QUANTIZED records — tenths int16 for temps/percent, whole-second uint32 time
-  — the ring keeps exact doubles, only the disk is lossy, below display
-  resolution; `FileOptions.DeleteOnClose` so it vanishes with the process even
-  on a crash, ~24 h ≈ 0.9 MB/channel retention via a once-a-day compaction at
-  2×; any file error silently degrades to the RAM-only ring). `HistorySample`
-  carries the wall-clock `Time` of the measurement since the same change.
-  **The strip scrolls back** through the spill via a `HistoryViewport` (in
-  StripChart.cs, owned by MainWindow): wheel ≈1 min/notch (Shift 10×), drag
-  pans, double-click or the **LIVE text-button** (appears next to CLEAR only
-  while scrolled) returns to the live edge; scrolled reads go through a
-  one-window cache so hover redraws don't touch the disk, reaching "now" snaps
-  back to following live, channel switch resets to live, and a scrolled window
-  is anchored to absolute sample indices so incoming ticks don't move it. The
-  time axis prints wall-clock `HH:mm` labels at 5-minute boundaries with "now"
-  (live) or the window-end `HH:mm:ss` (scrolled) at the right edge. Right edge
-  = now when live (amber live dots — the only amber there; they and the live
-  counting-up stopped-span vanish while scrolled); hover crosshair with a
-  `clock · ago · avg · now · %` chip. Fan turn-ON events get a baseline tick,
-  turn-OFF a dimmer one, with the m:ss stopped time (turn-OFF → next turn-ON)
-  on a dim span between them (label seats on the card background; skipped only
-  when it would overlap the previous span's label; an ongoing stop counts up
-  live; no span when the stop predates the window). Left/right padding matches
-  `CurveEditor` so the plots align. `StripChart.cs` holds the shared skeleton
-  (padding, title, legend, wall-clock time axis, scroll/drag handling, hover
-  crosshair/chip, trace + under-fill helpers); `TakeSnapshot()` at the top of
-  `OnRender` fills the protected `Win`/`WinCount`/`IsLive` from the viewport.
-  Dev mode's fixed window is **1336×830**; `EnterFixed` clamps both dimensions
-  to the work area on small screens. A **CLEAR text-button** right of the
-  HISTORY title (dev mode only) wipes ring + spill file on EVERY channel so the
-  strip restarts from the right edge — a XAML overlay in the chart-card grid
-  row (the strip is OnRender-only and can't host children), position tuned to
-  seat beside the drawn title; the LIVE button is the same pattern one seat
-  further right. Hover chips take several wordings and draw the widest that
-  fits the plot (`DrawChip(dc, x, wide, narrow)`; `FormattedText` honours `\n`)
-  so quarter-screen windows get a two-line chip.
-  **Render robustness**: every chart render bails out below a minimum plot size
-  (`StripChart.TooSmallToRender` / CurveEditor's inline check),
-  every computed-range label clamp uses the `Math.Max(lo, hi)` guard, and
-  `App.DispatcherUnhandledException` logs (throttled to one entry / 5 s) and
-  **swallows** UI faults instead of dying — fan control must outlive the UI.
-  **Render/tick performance rules** (2026-08-04, "very lightweight and fast"):
-  (1) every chart pen/brush/typeface is a FROZEN static (`Paint.cs` builders;
-  per-chart `static readonly` fields) — never allocate a Freezable inside
-  OnRender, the charts repaint every tick and on every hover move; (2) while the
-  window is hidden in the tray or minimized, `OnEngineTicked` only feeds the
-  histories and the tray tooltip (deduped — Shell_NotifyIcon is called only when
-  the whole-degree text changed) — ALL painting lives in `RefreshLiveUi()`, run
-  per tick when visible and once from `IsVisibleChanged`/`StateChanged` to
-  catch up on reopen/restore; (3) the title-bar fan spin (the app's one
-  perpetual animation) is capped at 20 fps via `Timeline.SetDesiredFrameRate` —
-  at the default 60 it forces a composition pass per frame the whole time the
-  window shows.
-  **Why-chip**: notification-style chip in the curve chart's top-left
-  corner (`WhyChip` in MainWindow.xaml, both modes) explaining why the commanded %
-  differs from the curve's configured level; hidden when they match. The engine
-  classifies every tick (`OutputReason` in `FanEngine.cs`, most-specific-wins chain
-  fed by diagnostics `ResponseFilter` exposes — CurveLevel/TargetLevel/
-  PendingDownLevel/DownHoldRemaining/HysteresisHolding/SnappedToZero): slew ramp
-  up/down (with target %), step-down hold (pending level + countdown), hysteresis,
-  zero snap (names the sub-threshold curve %), safety floor, idle kick, stop probe.
-  - Simple (default): two preset buttons (`Quiet · MacBook-like` — default,
-    `Performance`), the two fan channels, read-only curve illustration with live
-    overlay, Apply/Stop. No settings visible.
-  - Developer (top-bar toggle, or `--dev`): **single-column panel, 300 px
-    wide**. Every toggleable feature is a titled group whose **master checkbox
-    IS the group header** (MicroLabel-styled content inside the checkbox;
-    explanations in tooltips): CHANNEL RESPONSE (per-channel filter knobs,
-    always active, no checkbox — the one deliberate exception: following the
-    curve at all has no switch, its knobs can be flattened individually),
-    SAFETY FLOOR ("Never below" slider; see the behaviour contract),
-    STOPPED-FAN KICK, STOP INSTEAD OF SLOW (zero snap), TRIAL STOPS (stop
-    probe), INSTANT APPLY (bare header checkbox), then SOURCES, REVIEW LOGGING
-    and HIGH PROCESS PRIORITY (bare header checkboxes — app plumbing, not
-    control), SENSOR HISTORY, BACKEND. A group whose switch is off **dims to
-    45 % opacity but stays editable** (settings must be reachable with the
-    checkbox off).
-    Curve editing: drag points, double-click add, right-click remove; edits snap
-    to whole °C / whole %, bands stay ≥1 °C wide, max 12 points per channel;
-    Ctrl+Z / Ctrl+Y (also Ctrl+Shift+Z) undo/redo — see the undo entry in the
-    behaviour contract.
-    Behaviour sliders: the averaging window covers 0–5 min on a non-linear
-    slider — its Value is a notch index (5 s steps up to 2 min, 30 s beyond;
-    mapping in `MainWindow.AvgNotchToSeconds`). Sensor/header assignment: each
-    sensor row leads with its live temp and each header row with its live rpm
-    (value column left-aligned so the reading hugs the checkbox, refreshed per
-    engine tick via `RefreshSourceReadouts`, "—" when unreadable); the whole
-    row renders in Cascadia Mono 11.5; long names **wrap** so the full name is
-    always visible — no horizontal scrollers, and the shared CheckBox template's
-    root is a Grid with a star content column because a horizontal StackPanel
-    measures content at infinite width and silently disables wrapping. Backend +
-    config-path info. Any manual tweak marks the profile "Custom" (preset
-    highlight clears). Presets overwrite tuning but keep sensor/header
-    assignments (`Profile.AdoptTuning`).
-  Dark theme, code-behind (no MVVM framework).
-  **Design language = "precision instrument"**: borderless window with custom
-  chrome (`WindowChrome`, DWM rounded corners + dark frame via `Chrome.Apply` in
-  `Ui.cs`, custom caption buttons, title-bar fan glyph that spins while applying).
-  **Exactly three window sizes**: the fixed floating window
-  (1010×660, 1336×830 in dev mode), quarter-of-screen (half work-area width × height, snapped to the nearest
-  screen corner), and maximized — cycled in that order by the maximize caption
-  button (its glyph previews the next size); drag-resize disabled
-  (`ResizeMode=CanMinimize`, `ResizeBorderThickness=0`), and a `WM_GETMINMAXINFO` hook
-  in `Chrome` clamps maximize to the work area (borderless windows otherwise cover the
-  taskbar). Dragging the maximized window's title bar restores it under the cursor and
-  keeps moving it (2026-08-07): without a maximize style Windows won't drag-restore, so
-  `Chrome`'s WndProc catches `WM_NCLBUTTONDOWN`/`HTCAPTION` while maximized, restores
-  (StateChanged → `EnterFixed`), repositions proportionally, and hands off to the OS
-  move loop via `WM_SYSCOMMAND` `SC_MOVE+HTCAPTION`. Further elements: layered near-black surfaces (canvas `#0a0a0d`, cards `#111116` with light-from-above
-  gradient hairline + drop shadow), monochrome white at graded opacities, and ONE
-  accent — warm amber `#FF9E5E` — reserved strictly for live thermal state (chart
-  operating dot + crosshair with axis readout chips, status-chip dot, and the
-  dev-mode raw-temp dashed line + its "now …°" label). Hero = large
-  Segoe UI Variable Display Light numeral of the selected channel's rolling average;
-  micro-labels letter-spaced via `Tracked.Text` (hair spaces, `Ui.cs`); numerals in
-  Cascadia Mono with invariant "." decimals. Channels switch via a segmented control
-  (restyled ListBox) in the chart-card header; presets are selectable cards; global
-  state lives in a status chip under the hero (no status bar). Chart: sparse horizontal
-  grid only, glow-under white staircase, dashed amber vertical = raw temp (dev mode).
-  Keep everything else monochrome — the amber stays live-data-only.
+- `crates/fan-core` — the engine, no platform code except the Linux backend:
+  `curve` (staircase), `filter` (the MacBook feel), `kick`, `probe`, `profile`,
+  `engine` (the tick), `backend` (hardware trait), `sim` (thermal-plant
+  simulation), `hwmon` (Linux sysfs backend), `history` (two-tier strip
+  history), `icon` (the app mark as pixels, shared by UI and tray).
+- `crates/fan-daemon` — the resident process: tick loop, IPC server, telemetry
+  log, autostart, and the Windows backends (`pawnio` + `nct6686` for the
+  motherboard, `nvml` for NVIDIA GPU fans).
+- `crates/fan-tray` — Windows tray launcher (hand-rolled `Shell_NotifyIcon`).
+- `crates/fan-ui` — on-demand egui UI over the IPC socket.
+- `windows/` — `install.ps1`, and the two files it copies beside the binaries:
+  `register-autostart.ps1` (creates the logon tasks) and `start-daemon.vbs`
+  (hidden launcher + crash restart).
+- `docs/` — `history.md`, `lessons/`, README screenshot.
 
-## Build / run
+## Build, test, run
+
+cargo is NOT on PATH in agent shells: use `%USERPROFILE%\.cargo\bin\cargo.exe`.
 
 ```
-dotnet build                                # needs the .NET 8 SDK
-dotnet run --project src/FanCurves          # real hardware if elevated, else simulation
-dotnet run --project src/FanCurves -- --sim # force simulation
-dotnet run --project src/FanCurves -- --sim --screenshot out.png      # UI verify aid (4 s, then exits)
-dotnet run --project src/FanCurves -- --sim --screenshot out.png 330  # …after 330 s, so the strip has history
+cargo test --workspace                       # unit tests + reference traces
+cargo clippy --workspace --all-targets       # keep at zero warnings
+cargo check -p fan-core -p fan-daemon --target x86_64-unknown-linux-gnu
+cargo run --release -p fan-ui -- --sim       # full UI on simulated hardware
+cargo run -p fan-daemon -- --sim --ticks 10  # headless simulation
 ```
 
-`dotnet` may not be on PATH in Git Bash — use `/c/Program Files/dotnet/dotnet`.
+- **Reference traces**: `crates/fan-core/tests/golden/*.csv` pin the curve,
+  filter, kick and probe behaviour tick by tick (compared at 1e-9). They were
+  generated by the C# core and are frozen now that it is gone. A failing
+  trace means control behaviour changed — if intended, update the trace and
+  say so in the commit; never loosen the comparison.
+- **Simulation is explicit and isolated**: `fan-ui --sim` picks its own socket
+  (`fan-curves-sim-<pid>.sock`) and spawns a sibling `fan-daemon --sim`. A
+  simulation runs the built-in default profile and saves nothing unless
+  `--profile <path>` names a file of its own; its logs get `-sim` names. A
+  production UI never spawns a simulator — it waits for the hardware daemon.
+- **Running a second stack beside the live one**: set `FAN_CURVES_SOCKET` for
+  the daemon and UI. The socket name lives in one place,
+  `fan_core::ipc_socket_name()`; binding it is the daemon's single-instance
+  lock, and the UI's own lock is `<socket>.ui`.
+- Screenshot the UI without stealing focus with `PrintWindow(hwnd, hdc, 2)`
+  (`PW_RENDERFULLCONTENT`). README screenshot: `fan-ui --sim`, wait a few
+  minutes for history, capture to `docs/screenshot.png`.
+- PowerShell 5.1 strips the quotes from JSON arguments; use bare command
+  words (`fan-daemon --send status`) or run from Bash.
 
-Continuous rebuild while developing: `.\dev-watch.ps1` from an **elevated** terminal —
-rebuilds + relaunches on every source save using the clean cycle (exit.signal → fans
-to BIOS → build → start), safe on real hardware. Don't use `dotnet watch run` against
-real fans: its hard-kill restart skips the fans-to-BIOS handback, so a failed build
-leaves the Super I/O frozen at the last written PWM. (`dotnet watch` is fine with `--sim`.)
+## Install and deploy (Windows)
 
-## Behaviour contract
+`windows/install.ps1` builds the release binaries, stops the running stack,
+copies it into `%LOCALAPPDATA%\Programs\FanCurvesRust`, starts it and verifies
+that a non-simulated daemon answers.
 
-- **Admin-only**: `app.manifest` sets `requireAdministrator` (Super I/O access needs
-  the kernel driver). Dev runs from a non-elevated shell trigger a UAC prompt.
-- Default profile `Quiet (MacBook-like)` (**Kuba's hand-tuned settings promoted to
-  default**): **all fans fully stopped at idle** (0% floor, 0% bottom step): CPU
-  cooler 0% through <50°C avg, then 10/20/40% at 50/55/62°C — Kuba's hand-tuned
-  low/mid bands — topped since 2026-08-06 with the original temperature-only
-  ladder 50/65/81/90/100% at 70/76/84/88/92°C (restored from v0.1.0 when the
-  power side, which used to carry sustained load above the old 50% cap, was
-  removed), with a **90 s averaging window**, 1.5°C hysteresis, 25 s step-down
-  hold, slew 9 %/s up / 8 down; case fans 0% below 40°C avg, then
-  5/10/20/40/60/82/100% at 40/42/60/70/75/82/86°C, 25 s averaging, 4°C
-  hysteresis, slew 7 %/s (whisper bands are fine on the NF-A14s, which start at
-  any duty >0%).
-- **Stopped-fan kick**: any channel the engine is actually driving that has sat at
-  0% output for `IdleKickStoppedSeconds` gets spun to `IdleKickPercent` for
-  `IdleKickSeconds`, then stops again (repeats after each stillness period). Curve
-  demand >0% cancels the kick and resets the clock.
-  `IdleKick` in Core (per-channel state in `FanEngine.Tick`, bypasses the slew
-  filter); not active while paused/BIOS-controlled. Configurable in the dev panel
-  (all global/app-level like the tray/autostart toggles — don't mark the profile
-  "Custom", presets don't touch them): the STOPPED-FAN KICK group's master checkbox
-  (`Profile.IdleKickEnabled`, **default false** — Kuba runs with the kick off)
-  plus three sliders — idle time before
-  kick (`IdleKickStoppedSeconds`, 10–300 s, default 10), kick speed
-  (`IdleKickPercent`, 5–100 %, default 5), kick duration (`IdleKickSeconds`,
-  5–60 s, default 5); engine pushes them into
-  each `IdleKick` every tick. Sliders stay editable while the kick is disabled
-  (settings must be reachable with the checkbox off). Gotcha: slider `ValueChanged` fires mid-XAML-parse
-  (setting `Minimum`), so `OnKickParamChanged` bails while `KickTimeValue == null` —
-  removing that guard crashes the app at startup.
-- **Safety floor switch**: `Profile.SafetyFloorEnabled` (default true,
-  app-level like the other feature toggles — doesn't mark "Custom", presets don't
-  touch it) is the master switch of the per-channel `MinPercent`. Implemented in
-  `FanEngine.Tick` as ONE gated local — `double minPct = Profile.SafetyFloorEnabled
-  ? ch.MinPercent : 0` — that every floor read in the tick uses (the output/target,
-  the `MinFloor` why-chip, the stop probe's `minPct <= 0` gate), and the settings
-  fingerprint reads the gated value too, so flipping the switch snaps instantly
-  like any other edit. With it off a floored channel can go to a full stop AND
-  becomes trial-stoppable (the probe gate is the floor's, not a separate rule);
-  the per-channel value itself is kept, so switching back restores it. Dev-panel
-  group SAFETY FLOOR (master checkbox) + the "Never below" slider (0–60%, per
-  channel, still marks the profile "Custom"); the behavior log's settings line
-  prints `min off` in place of `min NN%`.
-- **Zero snap (stop instead of running slow)**: any filter target
-  above 0% but strictly below the threshold (default 20%) runs the fan at 0% —
-  meaningful speed or fully stopped, never a slow crawl. Implemented in
-  `ResponseFilter` (`ZeroSnapPercent`, snap applied to BOTH curve evaluations so
-  hysteresis/step-down hold reason about the snapped level; slew still glides
-  to/from real steps, so ramps pass through the low range transiently — that's
-  intended). Channel `MinPercent` is applied after the filter and still wins while
-  the safety floor is on (Performance CPU keeps its 30% floor);
-  a snapped-to-0 channel counts as stopped
-  for the idle kick. App-level like the kick (doesn't mark "Custom", presets don't
-  touch it): `Profile.ZeroSnapEnabled` (default true) + `Profile.ZeroSnapPercent`
-  (default 20), dev-panel group STOP INSTEAD OF SLOW (master checkbox) + "Stop
-  below" slider (1–50%). With the 20% threshold and the
-  default curves, no band is snapped (the snap is strictly-below, so
-  the CPU's 20% band runs at 20%) — the feature only bites when a curve/threshold
-  edit puts a band under the threshold.
-- **Stop probe (trial-stop steadily running fans)**: once a driven
-  channel has run continuously for `StopProbeRunSeconds` (default 30) with its RAW
-  temp inside a `StopProbeStableRangeC` band (default 3.5°C), the fan is stopped
-  as a trial. While stopped, the 5 s-average temp is compared to the pre-stop
-  baseline every tick (continuous is safer than a periodic recheck):
-  rise beyond the band, or curve demand above the level at stop → immediate resume.
-  A stop that dies within `ProbeSeconds + RunSeconds` (~60 s at the defaults —
-  trial length `StopProbeSeconds` default 30 s) counts as FAILED and
-  arms a `StopProbeRetrySeconds` backoff (default 60 s) so a loaded fan never
-  settles into an on/off cycle; a later rise resumes without backoff. `StopProbe`
-  in Core (per-channel state in `FanEngine.Tick`, runs BEFORE the idle kick →
-  probe-stopped counts as stopped for the kick, same choice as zero snap); channels
-  with `MinPercent > 0` are never probed (safety floor wins — Performance CPU;
-  unless `SafetyFloorEnabled` is off, which drops the floor to 0 everywhere).
-  App-level like kick/zero-snap (doesn't mark "Custom", presets don't touch it):
-  `Profile.StopProbeEnabled` (**default true**) + the five params, dev-panel
-  group TRIAL STOPS (master checkbox) + sliders
-  "Steady running before trial" (10–300 s), "Trial stop length" (5–60 s), "Stable
-  band · rise to resume" (0.5–5°C), "Retry after failed trial" (60–900 s), "No
-  trials above" (`StopProbeMaxTempC`, 50–90°C, default 78 —
-  no trial starts while any raw-temp sample in the stability window is above it,
-  and a running trial resumes the moment the 5 s average crosses it even inside
-  the stable band, arming the failed-trial backoff as usual). The max-temp guard
-  is also what keeps a die-limited load (CPU clamping its own temperature reads
-  perfectly "stable" at full draw) from being trial-stopped — the clamped die
-  sits near TjMax, far above the 78° ceiling.
-- **Instant apply on settings change**: the engine fingerprints every
-  control-shaping setting each tick (`FanEngine.SettingsSignature` — zero snap,
-  per-channel tuning, the curve, sensor assignments; kick/probe params
-  deliberately excluded — a false positive jumps the fan). A changed fingerprint
-  means a user edit landed (slider, curve drag, preset), and every live
-  `ResponseFilter` gets a one-shot `ApplyNow()`: on that tick the new settings'
-  verdict is adopted immediately — no step-down hold, no hysteresis carry-over,
-  no slew glide (before this an edit was read within ~1 s but *felt* only after
-  the 25 s hold + ramp). Measurement state — the averaging window — is
-  untouched: it encodes evidence, not settings.
-  Switchable: `Profile.InstantApplyEnabled` (default true,
-  app-level) — off, the fingerprint is still tracked but no `ApplyNow()` is sent,
-  so an edit is read within a tick and *felt* after the normal hold + ramp.
-  Dev-panel group INSTANT APPLY (bare header checkbox);
-  settings line logs `instantApply on/off`.
-- **Process priority High**: set best-effort in `App.OnStartup` (via
-  `App.ApplyProcessPriority`, called right after the profile loads so the
-  `Profile.HighPriorityEnabled` switch — dev panel HIGH PROCESS PRIORITY, default
-  true — is honoured; toggling it applies High/Normal immediately). High priority
-  keeps both the UI and the engine tick scheduled under full load (a 32-core load
-  can otherwise starve the normal-priority UI thread until Windows ghosts the
-  window); the app uses a few % of one core. Note: the 2026-07-28 Kernel-Power 41
-  reboot was an OS-level hard crash, not the app — watch for recurrence, it may
-  be platform instability under load on the new build.
-- **Sensor-history cap (RAM)**: LibreHardwareMonitor keeps a rolling
-  `List<SensorValue>` history for EVERY sensor it tracks internally (~150+ on this
-  machine — all clocks, loads, voltages, not just the ones the app exposes), default
-  window 1 day, appended ~every 4th `Update()` — tens of MB the app never reads
-  (the 2026-08-05 "why is this 120+ MB" finding: 280 MB private bytes after 26 h).
-  `Profile.SensorHistoryHours` (app-level, default **0 = off**) → the engine applies
-  `IHardwareBackend.SetSensorHistoryWindow` at the top of `TickCore`, BEFORE
-  `Update()` and on the tick thread — the setter mutates the same per-sensor lists
-  the update appends to, so a UI-thread set would race. Dev-panel SENSOR HISTORY
-  slider (plumbing area above BACKEND), notches off · 5/10/15/30 min · 1/2/4/8/12/24 h,
-  value label shows the estimated RAM from the backend's real
-  `InternalSensorCount` (sensors × windowSec/4 × 16 B). `LhmBackend` walks all
-  hardware incl. SubHardware and hooks `SensorAdded` so late-appearing sensors
-  inherit the window; `SimulatedBackend` is a no-op (nothing behind it keeps
-  history).
-- Changing ChannelConfig field names breaks saved `%AppData%\FanCurves\profile.json`
-  (old fields silently ignored, defaults kick in) — delete it after schema changes.
-  (The 2026-08-06 power removal only DELETED fields — remaining names unchanged,
-  so existing profiles load fine; the orphaned power fields are dropped on the
-  next save.)
-- Sensor/control IDs are backend-specific; `AutoAssign` prunes IDs the current backend
-  doesn't know and re-assigns empty channels on every launch (a profile saved in `--sim`
-  works on real hardware and vice versa).
-- **Dev flows never write the config** (`Profile.ReadOnly`, set from `--sim` /
-  `--screenshot` in `App.OnStartup`): `Save()` is a no-op and the sensor dump goes to
-  `sensors.sim.txt` instead of overwriting `sensors.txt` — a saving `--sim` run
-  would let AutoAssign prune the hardware IDs the sim backend doesn't know and
-  write `sim/*` in their place; auto-assignable headers heal on the next real
-  launch, but **manual assignments (like Kuba's Pump Fan header) do not**.
-  Keyed off the flags, not `hw.IsSimulated`, so an elevated launch that falls back to
-  simulation because the kernel driver failed still saves the user's edits.
-- Temperature display: simple mode shows only the rolling average (the thing that
-  actually drives the steps) — hero numeral + segment readouts; Developer mode adds
-  the raw "now" temp (amber dashed line on the chart, "now …°" in the card header).
-- **Undo/redo covers preset switches, not just curve points** (2026-07-30, Kuba's
-  ask — a preset click used to be unrecoverable: it overwrites every curve AND every
-  behaviour knob, and it cleared the undo stack on the way through). One stack in
-  MainWindow (`Edit`, Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z) carries two entry kinds:
-  `CurveEdit` (per-channel point lists) and `TuningEdit`, a pair of
-  whole-profile `TuningSnapshot`s. The snapshot type lives in Core next to
-  `Profile.CaptureTuning()` / `ApplyTuning()`, and `AdoptTuning(preset)` is
-  `ApplyTuning(preset.CaptureTuning())` — so what a preset overwrites and what an
-  undo restores are one list that cannot drift apart. It carries curve +
-  averaging/hysteresis/hold/slew/floor per channel and the profile name; sensor and
-  header assignments (the machine) are deliberately outside it. Notes: record
-  equality compares the point Lists by
-  reference, so `TuningSnapshot.Matches` does the value comparison — re-clicking the
-  preset you are already on must not push an entry; the stacks are no longer cleared
-  on preset adoption (undo is LIFO, so a curve edit below a `TuningEdit` is only
-  reached once that entry has put its state back); and stepping a `TuningEdit`
-  re-captures the live tuning as the opposite stack's snapshot, so behaviour-slider
-  edits made after the switch survive the round trip instead of being silently
-  reverted (the sliders themselves are still not undoable). Restoring runs
-  `OnChannelSelected` so the dev-panel sliders follow, and the engine picks the
-  restored values up through the instant-apply fingerprint like any other edit.
-- **Curves apply automatically from launch**; preset switches and point edits take
-  effect within one engine tick (the engine reads the live Profile objects).
-  **Pause (BIOS control)** hands headers back to the BIOS; app exit does too.
-- Close button hides to tray by default (persisted `Profile.MinimizeToTrayOnClose`,
-  default true since 2026-07-21 — matches Kuba's setting); unchecking the sidebar
-  checkbox "Keep running in tray on close" makes X exit (fans back to BIOS). Sidebar checkbox "Start with Windows"
-  (persisted `Profile.AutostartEnabled`, default true) registers/removes the Task
-  Scheduler task immediately on toggle. Tray tooltip shows live temps→%.
-- **Restart cycle without UAC** (Claude can do this for the user): create
-  `%AppData%\FanCurves\exit.signal` → the running elevated instance exits cleanly
-  within ~1 s (fans to BIOS); `dotnet build`; `schtasks /Run /TN FanCurves` starts
-  the new bin exe elevated (hidden in tray — user clicks the tray icon to open).
-- **Autostart**: every normal launch registers/refreshes a Task Scheduler logon task
-  `FanCurves` (`/RL HIGHEST`, runs `<exe> --tray` = hidden start). A HKCU Run key
-  can't elevate, so the task is the only mechanism (old Run entries are cleaned up).
-  Dev flows (`--sim` / `--screenshot`) skip registration.
-- Config: `%AppData%\FanCurves\profile.json` (auto-saved on every edit).
+- **First install needs an elevated PowerShell** (registering the tasks).
+  **Updates need no elevation**: the tasks already point at the install
+  directory, so the script only swaps files and runs the tasks.
+- Production binaries never run from the checkout or a worktree. A task that
+  captured a build-directory path was the cause of a stale deployment once.
+- Two logon tasks: `FanCurvesDaemon` (`/RL HIGHEST`, runs
+  `wscript start-daemon.vbs`, hidden) and `FanCurvesTray` (limited
+  privilege). Only the tray icon appears at logon; the UI opens from the tray
+  and closing it leaves daemon and tray running. Changing a task's action
+  needs elevation, so behaviour fixes belong in the binaries and the launcher
+  script, which an unelevated update can replace
+  (`docs/lessons/tray-only-startup.md`).
+- Registration is always explicit: the installer, `fan-daemon
+  --install-autostart`, or the UI's "Start with Windows" (the `set_autostart`
+  IPC command; the daemon is already elevated). Both tasks are registered and
+  removed together.
+- **The launcher restarts the daemon after a crash** (any exit code other
+  than 0, 1, 2; at most five quick ones in a row). A fault inside a driver
+  library kills the process without unwinding, so nothing hands the headers
+  back — see `docs/lessons/daemon-crash-restart.md`.
+- Between shutdown and restart the fans are on the BIOS curve (the Pause
+  state). The profile is never touched by the installer.
+- The install directory keeps the name `FanCurvesRust`: the registered tasks
+  point at it, and renaming it requires an elevated reinstall.
+- Windows 11 Memory Integrity (HVCI) blocks WinRing0; the daemon needs
+  **PawnIO** (https://pawnio.eu, silent install flags `-install -silent`).
+  If locally built binaries fail to start with 0x800711C7, Smart App Control
+  went back to enforcement (registry `VerifiedAndReputablePolicyState`).
 
-## Status / open items (2026-07-21)
+## Engine behaviour contract
 
-- **RESOLVED 2026-08-06: the Smart App Control blocker.** SAC flipped to
-  enforcement overnight 2026-08-05 and blocked every locally built binary; Kuba
-  turned it off (registry `VerifiedAndReputablePolicyState` = 0 confirmed
-  2026-08-06) and the app is running again via the scheduled task. If local
-  builds ever start failing with 0x800711C7 again, check that key first — SAC
-  cannot be re-enabled without an OS reinstall, but Windows can re-evaluate on
-  major updates.
+- **Staircase curves**: each point opens a flat band (at ≥ TempC run at
+  Percent until the next point). No interpolation.
+- **The MacBook feel lives in `ResponseFilter`, not the curve shape**: the
+  curve is driven by the rolling AVERAGE over `AveragingSeconds`; the target
+  may jump several steps at once; the step-down hold timer starts the moment
+  the average itself maps lower, and the drop fires once
+  `StepDownHoldSeconds` are served AND (average + `HysteresisC`) maps lower
+  (time served but offset unmet shows the Hysteresis why-chip; the timer
+  resets if the average pops back into the band); a slew limit (%/s up and
+  down) makes every change a glide.
+- **Tick**: ~1 s, jittered 850–1150 ms so sampling never phase-locks onto
+  periodic system activity. All time logic runs on the monotonic clock the
+  daemon passes in as `now`, never on tick counts, so tests replay any
+  timeline. Per channel: max of the assigned sensors → filter → write PWM.
+- **Handback on every exit path**: `stop_applying()` and `FanEngine::drop`
+  release every control (motherboard headers to the firmware's saved state,
+  GPU fans to the driver's automatic policy). A disabled channel, a lost
+  temperature or a failed write releases that channel's controls too.
+  `panic` stays **"unwind"** in the release profile for this reason.
+- **Default profile `Quiet (MacBook-like)`** (Kuba's hand-tuned values): CPU
+  cooler 0 % below 50 °C average, then 10/20/40/50/65/81/90/100 % at
+  50/55/62/70/76/84/88/92 °C, 90 s averaging, 1.5 °C hysteresis, 25 s hold,
+  slew 9 up / 8 down; case fans 0 % below 40 °C, then 5/10/20/40/60/82/100 %
+  at 40/42/60/70/75/82/86 °C, 25 s averaging, 4 °C hysteresis, 10 s hold,
+  slew 7. `Performance` is the louder preset (CPU floor 30 %).
+- **Presets overwrite tuning, never the machine**: `adopt_tuning` copies
+  curve, averaging, hysteresis, hold, slew and floor per channel (matched by
+  index) and the profile name; sensor and header assignments and app-level
+  switches stay. A GPU channel beyond the preset's two channels is untouched.
+- **A tuning edit renames the profile "Custom"** (curve, response knobs,
+  floor value); app-level switches and assignments do not.
+- **Safety floor** (`SafetyFloorEnabled`, default on) is the master switch of
+  the per-channel `MinPercent`: one gated value feeds the output, the
+  `MinFloor` why-chip and the stop probe's gate. Off, a floored channel can
+  stop and becomes trial-stoppable; the per-channel value is kept.
+- **Zero snap** (`ZeroSnapEnabled` default on, `ZeroSnapPercent` default 20):
+  a filter target above 0 % but strictly below the threshold runs at 0 % —
+  meaningful speed or stopped, never a crawl. Applied to both curve
+  evaluations so hysteresis and hold reason about the snapped level; slew
+  still glides through the low range. With the default threshold the Quiet
+  preset's 5 % and 10 % bands are snapped; Kuba's own profile runs with the
+  snap off.
+- **Stop probe** (`StopProbeEnabled` default on): after `StopProbeRunSeconds`
+  (30) of continuous running with the raw temp inside
+  `StopProbeStableRangeC` (3.5 °C), the fan is trial-stopped. While stopped,
+  the 5 s average is compared to the pre-stop baseline every tick; a rise
+  beyond the band or curve demand above the level at stop resumes at once. A
+  stop that dies within probe + run time counts as failed and arms a
+  `StopProbeRetrySeconds` (60) backoff. No trial starts above
+  `StopProbeMaxTempC` (78) — that guard is also what keeps a die-limited load
+  (temperature pinned, perfectly "stable") from being trial-stopped. Channels
+  with an active floor are never probed. Runs before the idle kick.
+- **Stopped-fan kick** (`IdleKickEnabled` default OFF): a driven channel at
+  0 % for `IdleKickStoppedSeconds` spins to `IdleKickPercent` for
+  `IdleKickSeconds`. Bypasses the slew filter; curve demand cancels it.
+- **Instant apply** (`InstantApplyEnabled` default on): the engine
+  fingerprints every control-shaping setting each tick (zero snap, per-channel
+  tuning, curve, sensor assignments — kick and probe parameters are
+  deliberately excluded, a false positive jumps the fan). A changed
+  fingerprint sends every filter a one-shot `apply_now()`: no hold, no
+  hysteresis carry-over, no slew. The averaging window is never reset — it is
+  evidence, not a setting.
+- **Full-speed override**: a temporary daemon state driving EVERY discovered
+  control at 100 %, including unassigned ones, even while paused or without a
+  valid sensor. Not stored in the profile; turning it off releases the
+  controls and the next tick resumes curves only if they were applying
+  before. Pause and shutdown cancel it (`docs/lessons/full-speed-override.md`).
+- **A fan header belongs to exactly ONE channel.** A header obeys one PWM
+  value; with the same id on two channels the last writer silently wins every
+  tick and a fan "won't turn on" with nothing to explain it.
+  `Profile::assign_control` moves a header rather than duplicating it, and
+  auto-assign de-duplicates on every launch (first channel listed keeps it).
+  Sensors are deliberately not exclusive.
+- **Auto-assign** (daemon startup): keeps ids the backend cannot currently
+  see (a transient backend failure must not erase them); wires empty channels
+  by name; **never auto-assigns pump headers** (a case curve once slewed a
+  live pump toward 0 %); the case channel only takes
+  System/Case/Chassis/CHA-named headers. When the driver exposes GPU fan
+  controls that no channel claims, a `GPU fans` channel is added (floor 30 %,
+  10 s averaging, GPU core temperature).
+- **Never run two controllers on the same headers** — last writer wins.
 
-- **Defaults track Kuba's hand-tuned profile** ("make the current settings the
-  default ones", 2026-07-21 and again 2026-07-22): his profile.json values are the
-  `Quiet (MacBook-like)` preset and the app-level defaults (kick off, zero snap
-  20%) — see Behaviour contract. Since the 2026-08-06 power removal the Quiet CPU
-  staircase adds the v0.1.0 top steps above his 62°C:40% band (the power side used
-  to carry sustained load); **his live profile.json is untouched by that change** —
-  at the time of the removal it held a hand-made high-duty test curve (90% from
-  ~21–24°C avg), presumably part of the chassis-header investigation below.
-  One unreconciled 2026-07-21 point remains: his "restart setting button" ask was
-  interpreted as the "Start with Windows" checkbox — if he meant an in-app restart
-  button, it doesn't exist.
-- **Windows 11 Memory Integrity (HVCI) blocks LHM's WinRing0 driver** → no CPU temp
-  (Tctl reads 0), no motherboard sensors, no fan headers; only GPU data (via the GPU
-  driver) survives. Fix: install **PawnIO** (signed, HVCI-compatible;
-  https://pawnio.eu) — LibreHardwareMonitorLib 0.9.7-pre (referenced since
-  2026-07-20) uses it automatically. Required on any HVCI-on machine, incl. the
-  new X870 build.
-- GPU fan controls are filtered out in LhmBackend — this app drives motherboard
-  headers only; GPU temps still appear as sensors for case-fan curves.
-- **Pump headers are never auto-assigned** (a case curve once slewed a live pump
-  toward 0%); the case channel only auto-takes System/Case/Chassis/CHA-named
-  headers. Manual dev-mode assignment can still pick anything.
-- **A fan header belongs to exactly ONE channel** (2026-07-29). A header obeys a
-  single PWM value, so with the same id on two channels `FanEngine.Tick` writes
-  both in `Profile.Channels` order and the LAST one silently wins every tick —
-  the symptom is a fan that will not turn on, with no why-chip and nothing in the
-  UI to explain it (Kuba's Pump Fan header ended up on Case fans too, whose curve
-  was flat 0%, so the second NH-D15 fan sat at 0 rpm while the CPU pinned at
-  85.3°). Enforced in two places: the dev-panel header checkbox's `Checked`
-  handler removes the id from every OTHER channel first (`RebuildSourceChecks` in
-  MainWindow — it must NOT rebuild the lists from inside that handler, the panel
-  only shows the selected channel and clearing `ControlChecks.Items` there is
-  re-entrant), and `AutoAssign` de-duplicates across channels on every launch
-  (first channel listed keeps the header) so an existing bad profile heals.
-  Sensors are deliberately NOT exclusive — two channels may read one temp.
-- Kuba's current test PC: the second CPU fan sits on the board's "Pump Fan"
-  header — manually assigned to the CPU cooler channel (lives in profile.json,
-  survives because pruning only drops IDs the backend doesn't know).
-- **Two low-duty header faults (2026-07-29) — RESOLVED 2026-07-30: BIOS
-  per-header drive mode, not the board, not the fans, not LHM.** The Pump Fan
-  header dropped its fan at the curve's 20% step (0 ↔ ~370 rpm) and
-  `System Fan #1` was dead below ~40% duty; both reproduced under BIOS control
-  (never an app bug — full diagnosis journal in `docs/history.md`: swap test,
-  per-hour dropout stats, sustain-vs-startup analysis, DC-mode sweep). Root
-  cause: headers left on ASRock's **Auto** drive mode, which re-probes
-  3-pin vs 4-pin at each boot and can guess DC — in DC mode "20%" is ~2.4 V,
-  below the fans' stall voltage, while PWM pulses full 12 V. Fix applied in the
-  BIOS that night: **every header set explicitly to PWM, never Auto** (the
-  water-pump header has its own menu entry — easy to miss in a "set everything
-  to PWM" pass). Verified over the following morning's telemetry: Pump header
-  0% dropouts in 28 336 samples at 20% duty (was 64–98% the previous
-  afternoon), all four chassis headers statistically identical at every duty.
-  Enduring rules: (a) if a low-duty fault reappears, suspect a header reverted
-  to Auto/DC first — falsifiable check: at 27% from a stop all four case fans
-  break away to ~350 rpm within ~15 s; only if one refuses while its siblings
-  run suspect the board. (b) From a dead stop the P14s need ~27% duty and up
-  to ~15 s to break away, but once spinning they sustain down to ~5% — a curve
-  whose bottom band is below break-away only keeps fans turning if they were
-  already turning. (c) If the chassis headers ever run DC again: slowest
-  sustainable point ~28% (~600 rpm; enforce with zero snap 28–30), and
-  `rpm_per_header` reads garbage (>2500 rpm) below break-away. (d)
-  Cross-session `rpm_per_header` comparisons: LHM's `System Fan #N` numbering
-  does NOT map onto ASRock's CHA_FAN labels, and the `ControlIds` order (= the
-  column order) changes when AutoAssign re-assigns — split analysis per app
-  session.
-- **OPEN (2026-07-30 afternoon): chassis-group kill events + the low-duty
-  break-away trap.** Distinct from the resolved sustain fault. With a test
-  curve holding the case fans at 5–10% duty, every ~30–45 min ALL FOUR chassis
-  headers cut out within one tick (~475 rpm → 0 with no coast-down; garbage
-  tach reads — 907, 10 810 — exactly at the transition) at CONSTANT commanded
-  duty. Kills observed 12:47:42, 13:19:42, 13:47:39, 14:31:05, 15:04:34. The
-  CPU headers on the same NCT6686D, written identically every tick, show zero
-  anomalies in 96k samples over the same hours; behavior.txt and the Windows
-  System log are silent at those instants; no other monitoring software
-  running. The same signature exists in the 2026-07-29 telemetry (pre-PWM-fix),
-  including one kill at 53% duty that self-healed within seconds — so the kill
-  pulses likely fire at every duty and only become visible outages below
-  break-away (~27%), where a stalled P14 needs stochastic minutes to restart
-  (measured at 10%: 2–7.5 min; at 5%: never). Emergent limit cycle follows:
-  kill → stall → case temp climbs → curve steps 5→10% → break-away minutes
-  later → cools → back to 5% → next kill ("once working, once not"). Prime
-  suspect: the ASRock EC periodically re-asserting its own chassis-group fan
-  config — a re-assert on the CPU group would command ≈ the app's own duty and
-  stay invisible, which explains the group asymmetry. Diagnostic + likely fix:
-  set the BIOS chassis fan curve to a constant moderate duty (~50–60%), so a
-  re-assert pulse spins the fans UP for a second (visible spike, self-rescuing)
-  instead of down to 0 — if the outages become 1 s rpm spikes, the theory is
-  proven. App-side hardening either way: keep case bands out of the 1–27% trap
-  zone (zero snap ~28–30; OFF in the current test profile) — 0% or ≥28% means
-  a kill either costs nothing or self-heals in seconds.
-  **Update 2026-08-02 (three more days of telemetry, 07-30→08-02):** the kills
-  persist every ~5–15 min whenever the case band sits at 10–20% (42 group stops
-  on 07-31, 24 on 08-01; at 20% duty the fans stood still for 53–90% of all
-  samples), CPU headers still spotless across all four days — and the
-  "≥28% self-heals in seconds" rule is now DISPROVEN: on 08-02 15:55–16:25+,
-  headers control/3 + control/4 sat at 0 rpm at a commanded 37% for 30+ minutes
-  while `FanEngine` rewrote duty to all four headers every tick (unconditional
-  `SetControl` loop) and control/2 + control/5 ran ~985 rpm alongside. So the
-  override can LATCH individual chassis channels for tens of minutes, not just
-  pulse the group; which pair is affected varies between events. The tach-freeze
-  alternative was ELIMINATED by eye 2026-08-02 ~16:30: during the latched
-  episode Kuba saw two chassis fans spinning, one fully still and one
-  repeatedly twitching — jerking slightly and falling back — i.e. the fans are
-  physically stalled and the twitcher is getting brief drive pulses that are
-  immediately cut, consistent with the app's 1 Hz duty write landing for a
-  fraction of a second before the EC re-zeros the channel (a write-fight the
-  app loses). Note this also caps what the stall-rescue feature can promise:
-  a 100% rescue pulse fights the same fight. SCEWIN nvram dumps CANNOT audit any of this — ASRock's H/W
-  Monitor per-header config is not in the AMI setup NVRAM (the whole 391 KB
-  export contains only 3 AMD-CBS fan items). Next steps unchanged (BIOS
-  chassis curve at constant 50–60% as the EC-re-assert litmus test) plus a
-  candidate app feature: per-header stall rescue — commanded >0 with tach 0
-  for N s → pulse that one header high for a few seconds, then restore.
-  **Tach floor (2026-08-03, verified by eye):** the NCT6686D reads 0 rpm below
-  roughly ~300 rpm — at 10% duty both NH-D15 fans visibly spin (~250–280 rpm)
-  while the app and `rpm_per_header` show 0. A zero read is only proof of a
-  stopped fan when the expected speed is comfortably above ~300 rpm; below
-  that, telemetry cannot distinguish slow-spinning from stopped (matters for
-  any stall-rescue feature and for kill-event analysis at very low duties).
-  Case fans replaced 2026-08-03 with 4× used Noctua NF-A14 PWM (OLX, 270 zł
-  set) — min ~300 rpm, documented start at any duty >0%, no fan-stop trap;
-  the Arctic P14 Pros (27% break-away) are retired from the chassis headers.
-  **Update 2026-08-02 evening (after Kuba's new BIOS settings, reboot 21:27):
-  the override is active FROM BOOT and its release correlates with the case
-  temp crossing 50 °C.** From 21:31:33 the app commanded a constant 27% and all
-  four chassis fans sat at 0 rpm for a full 30 min — the same 27% that
-  breaks these fans away from a dead stop in ~15 s when the headers are free.
-  At 22:01:22 the raw case temp touched 50.0° (curve dipped the duty
-  27→10→27 over the next 40 s) and at 22:02:04 THREE of the four headers
-  released simultaneously (0 → ~630 rpm within 2 s at the same 27%);
-  control/4 stayed in the fight — for the rest of the 22h hour it read 0 in
-  37% of samples and only ~390 rpm (vs siblings' ~630) when turning, i.e. the
-  visible "twitcher": drive pulses landing between EC re-zeros. Same-day
-  earlier sessions fit the same picture: h16–h17 had control/4+3 pinned at 0
-  through TWO reboots (17:27, 17:41) and every duty change, while case temps
-  stayed below ~50°. Working hypothesis sharpened: the EC enforces the BIOS
-  chassis-fan state — including its own fan-stop/zero region below a ~50 °C
-  board temp — against the app's writes; the group releases when the EC's own
-  temp source crosses its threshold and the EC starts commanding nonzero
-  itself. Duty-change dislodging is the weaker alternative (contradicted by
-  h17: reboots + ramps didn't free control/4+3). Consequence: BIOS chassis
-  settings must have NO fan-stop / 0% / "silent" low-temp region — a constant
-  50–60% chassis curve (the standing litmus test) makes an EC win spin fans
-  UP instead of down, and per-header "Allow Fan Stop"-style toggles must be
-  off. CPU channel remains spotless all day, incl. the Pump header at 20%
-  (~370 rpm steady — the 07-29 fault stays fixed).
-  **Continuation 22:30–22:35 (this session's telemetry check):** Kuba's curve
-  edit landed 22:30:48–55 (dropped the 50:10 and 58:20 points, bumped
-  37:27 → 37:28); within seconds ALL FOUR headers jumped ~640 → ~725 rpm
-  (+~90 rpm for a 1-point duty change — more than PWM scaling explains,
-  consistent with an EC state flip at the same moment) and control/4's
-  0↔~300 rpm cycling STOPPED: continuous clean spin from 22:31:00 (last
-  stall 22:30:44), still ~715 rpm at 22:35 with the case temp back at 43° —
-  well BELOW the ~50° release point, and the EC zero-enforcement did not
-  re-engage. So either the EC's own curve has wide hysteresis / releases
-  latch-like once tripped, or the 50° correlation was coincidental with the
-  duty wiggle. Watch item: if control/4 resumes cycling at 28% duty while
-  the case temp stays in the 40s, the temp-threshold theory is out and
-  per-header hardware (fan or header on control/4 — also half of the
-  afternoon latched pair) moves up; distinguishing test remains the July
-  method: physically swap the fans on control/4 and control/2 and see
-  whether the cycling follows the header or the fan. Not DC mode: only 9
-  garbage tach reads (>2500 rpm) in 13 199 Case rows all day — rule (c)'s
-  DC signature is absent.
-- Real hardware wins over simulation whenever it reads any temp sensor, even with
-  zero controllable headers (channels then show "[no fan header]").
-- Diagnostics in `%AppData%\FanCurves\`: `sensors.txt` (all sensors + values at
-  launch and +15 s), `events.txt` (startup/backend/crash/exit log), and since
-  2026-07-27 the **review log** in `logs\` (`TelemetryLog.cs` in Core, hooked to
-  `engine.Ticked` in App on the engine thread so it records even if the UI faults;
-  Kuba's ask "log the data and the behavior so I can explain which parts I don't
-  like"): `telemetry-YYYY-MM-DD.csv` — one row per channel per tick with every
-  controller input/output (raw/avg temp, out/target %, why-chip reason + its
-  level/seconds), daily rotation, 7 days kept. The `rpm` column is only
-  `ControlIds[0]`; the trailing
-  **`rpm_per_header`** column (`ChannelStatus.Rpms`, added 2026-07-29) carries
-  EVERY assigned header's rpm `|`-joined in `ControlIds` order — a channel driving
-  six headers can have one fan stalled or spinning up far slower than its
-  siblings, and the single-header column made that invisible (it also read 0 for a
-  whole day once because `ControlIds[0]` happened to be an empty header). The
-  header line is written when the day's file is created, so a schema change needs
-  the day's CSV deleted, not just a restart (done 2026-08-06 for the power-removal
-  schema).
-  Also written: `behavior.txt` (4 MB cap → `behavior-old.txt`) with
-  CHANGES only: fan ON/OFF, target steps, reason transitions (pure
-  None↔Ramp flips suppressed — the target line already implies the ramp),
-  driving/released flips, `·· <event>` markers (`App.Telemetry?.Event`), and a
-  full settings line whenever any tuning knob or curve point changes (snapshot
-  diffed every tick — catches presets/sliders/edits with no per-handler wiring).
-  Dev flows write
-  `telemetry-sim-*.csv` / `behavior-sim.txt` (same rule as sensors.sim.txt).
-  UTF-8 **with BOM** — Windows PowerShell 5.1 reads BOM-less UTF-8 as ANSI and
-  mangles °/·/∞. Writers buffer (CSV flushed every 5 s, behavior per event);
-  first failed write disables logging for the session — it must never take the
-  engine down. Switchable since 2026-07-29: `Profile.TelemetryLoggingEnabled`
-  (default true, dev-panel REVIEW LOGGING above BACKEND) gates the `engine.Ticked`
-  hook in `App`; the toggle writes a `·· review logging on/off` marker and calls
-  `TelemetryLog.Flush()` when switching off, so the ≤5 s of buffered CSV
-  rows are not stranded until process exit.
-- **Installed & verified on real hardware** (the X870 Steel Legend / 9950X3D
-  build): exe at `%LOCALAPPDATA%\Programs\FanCurves\FanCurves.exe`, autostart
-  task registered, PawnIO 2.2.0 (silent flags are `-install -silent`, dash-style —
-  `/S` fails with exit 87). LhmBackend sees the NCT6686D: 8 controllable headers +
-  all board temps; CPU temp from `/amdcpu/0/temperature/2` (Tctl/Tdie). The
-  "Pump Fan" header (`/lpc/nct6686d/0/control/1`, physically the second NH-D15
-  fan) is manually assigned to the CPU cooler channel.
+## Profile
+
+`%AppData%\FanCurves\profile.json` (Linux: `$XDG_CONFIG_HOME/FanCurves`),
+PascalCase field names, saved on every edit. Missing fields take the defaults
+in `profile.rs`; unknown fields are ignored and dropped on the next save. A
+missing, corrupt or channel-less file falls back to the Quiet preset.
+Renaming a field silently resets it to its default for every existing
+profile — there is no migration layer, by decision.
+
+Sensor and control ids are backend-specific strings stored in the profile.
+On Windows they follow LibreHardwareMonitor's scheme
+(`/lpc/nct6686d/0/{temperature,fan,control}/N`,
+`/amdcpu/0/temperature/{2,3,4}` = Tctl, CCD1, CCD2, `/nvidiagpu/0/...`).
+Changing them orphans every saved assignment; manual ones do not come back.
+
+## Daemon
+
+- Flags: `--sim`, `--no-apply`, `--verbose`, `--ticks N`, `--profile <path>`,
+  `--probe` (read-only inventory dump), `--selftest-write HEADER [%]`,
+  `--selftest-gpu FAN [%]`, `--install-autostart` / `--uninstall-autostart`,
+  `--send <command word or JSON>`. Anything else is an error.
+- Without `--sim` a daemon that finds no hardware backend exits; it never
+  falls back to simulation. On Windows it also refuses to start without the
+  motherboard backend (GPU-only is not a supported mode).
+- Console output is CHANGES ONLY (fan on/off, target steps, reason
+  transitions minus pure None↔Ramp flips); `--verbose` prints every tick. No
+  async runtime — one thread and a jittered sleep is the whole scheduler.
+- **IPC**: local socket `fan-curves-daemon.sock` (named pipe on Windows),
+  line-delimited JSON, one request line → one reply line. Commands: `ping`,
+  `status`, `profile`, `inventory`, `history`, `clear_history`,
+  `update_profile`, `preset`, `apply`, `pause`, `set_full_speed`,
+  `toggle_full_speed`, `set_autostart`, `shutdown` (list with reply shapes at
+  the top of `ipc.rs`).
+- **Read-only commands never take the engine lock.** A tick holds it through
+  ~600 ms of EC write handshakes, so `ping`/`status`/`profile`/`inventory`
+  answer from `Shared::view`, republished after every tick and every mutating
+  command; the autostart state is a cached background check. Lock order:
+  engine, then view (`docs/lessons/ipc-reads-never-wait-for-the-tick.md`).
+- **Edits go through `update_profile`**, which applies settings in place and
+  keeps filter state. Nothing may swap the engine's profile wholesale — that
+  turns a slider nudge into an averaging-window reset.
+- **The pipe needs an explicit security descriptor**: the daemon is elevated,
+  the UI and tray are not, and the default DACL of a high-integrity pipe
+  locks them out. `D:(A;;GA;;;IU)` grants Interactive Users (not Everyone, so
+  a service or remote session cannot command the fans).
+- **History is daemon-owned**: one `HistorySample` per channel per tick into
+  the two-tier store (exact 600-sample ring + a spill file of 10-byte
+  quantized records, delete-on-close, compacted to the newest ~24 h, silent
+  RAM-only degradation on any file error). `status` carries per-channel
+  `{first,total}` bounds; `history` pages by absolute index (≤ 4096 per
+  reply, compact `[wall,avg,raw,out]` rows, nulls for missing readings). The
+  UI only mirrors it.
+- **Telemetry** (`<config>/logs/`, switch `TelemetryLoggingEnabled`):
+  `telemetry-YYYY-MM-DD.csv`, one row per channel per tick with every
+  controller input and output, daily rotation, 7 days kept — the trailing
+  `rpm_per_header` column carries every assigned header's rpm (`rpm` alone is
+  only the first and hides a single stalled fan); `behavior.txt` (4 MB cap)
+  with changes only plus a full settings line whenever a knob moves. UTF-8
+  WITH BOM (PowerShell 5.1 mangles °/· otherwise). The first failed write
+  disables logging for the session; it must never take the engine down. The
+  UTC offset is captured once at startup, so a DST flip shifts timestamps
+  until restart. The CSV header is written when the day's file is created — a
+  schema change needs that file deleted.
+
+## Hardware backends
+
+- **PawnIO** is reached by `DeviceIoControl` on
+  `\\?\GLOBALROOT\Device\PawnIO` (IOCTLs 0xA1B22084 load / 0xA1B22104
+  execute), with the official signed 0.2.10 `LpcIO.bin` and
+  `AMDFamily17.bin` embedded via `include_bytes!` (LGPL-2.1,
+  namazso/PawnIO.Modules). The driver rejects unsigned modules, so they cannot
+  be self-compiled. Needs administrator.
+- **NCT6686D** (protocol from LibreHardwareMonitor's `Nct677X.cs`, checked
+  against Linux `nct6683.c`): Super I/O detect on 0x2E/0x4E (id 0xD4 rev
+  0x4x); **`ioctl_find_bars` must run while still in config mode** or every
+  later port read is ACCESS_DENIED; EC window at `base+4/5/6` with the
+  wait-for-0xFF / force-after-500 ms / always-release-to-0xFF page handshake;
+  temps `0x100+2i`, tach `0x140+2i`, duty `0x160+i`. A PWM write is
+  `0xA01=0x80 → 50 ms → set bit i in 0xA00 → 0xA28+i=duty → 0xA01=0x40 →
+  50 ms`; the firmware's mode bit and command byte are saved on first write
+  and restored on release.
+- `0xA28+i` is the COMMAND byte and the proof a write landed; `0x160+i` is
+  the EC's actual output duty and legitimately reads 0 on a header with
+  nothing attached. `0xA00` reads 0xFF on this board (every channel "manual"
+  from the BIOS), so the mode-bit step is a no-op and the restore leaves it.
+  All eight headers are exposed; a FANOUT_CFG capability probe hid two real
+  ones.
+- **CPU temps over SMN**: Tctl `0x59800` (>>21 ×0.125, −49 on range/tj bits),
+  CCDs `0x59B08+4n` (&0xFFF ×0.125 −305).
+- **Bus mutexes** `Global\Access_ISABUS.HTP.Method` and `Global\Access_PCI`
+  are held around every sequence. A busy bus SKIPS the operation (never write
+  unlocked), except handback, which waits 1 s.
+- **Tach floor**: the NCT6686D reads 0 rpm below roughly 300 rpm. A zero read
+  proves a stopped fan only when the expected speed is well above that.
+- `fan-daemon --selftest-write 7 40` (elevated; header 7 has no fan and is in
+  no channel) drives one header and dumps all eight channels before, after
+  and after restore.
+- **NVML** (`docs/lessons/gpu-capability-verification.md`): controls come
+  from the driver-reported fan endpoints, not the blade count — this
+  three-fan RTX 5080 reports two. A reported range does not prove writes
+  work; a failed write restores automatic control and disables that fan for
+  the session, and `applied` is reported only after a successful write.
+  **A 0 % GPU target means driver automatic control** and is shown as such:
+  this card accepts manual 0 % but keeps spinning at ~1,400 rpm, so the
+  firmware's own policy owns zero-rpm idle. Positive targets go out unchanged.
+  Only current temperatures the driver actually supports are exposed
+  (thresholds are not sensors); here that is the GPU core only.
+  `fan-daemon --selftest-gpu 0 50` is the bounded write test — never run it
+  beside a daemon that owns the fans.
+- **Linux hwmon** (`fan-core/src/hwmon.rs`): sysfs enumeration, millidegree
+  temps, tach, pwm 0–255 with `pwmN_enable` saved on first write and restored
+  on release. Compile-checked only; `nct6683` needs `force=1` for PWM writes
+  on many boards.
+
+## Tray
+
+Launcher only: the daemon is resident and the UI disposable, so there is
+nothing to minimise into the tray. It runs **non-elevated on purpose** —
+anything the elevated daemon spawned would inherit its token and the UI would
+silently run as admin. Double-click opens the UI; the menu offers open,
+pause/resume over IPC, and close tray, which does NOT stop the daemon. `--open`
+launches the UI and exits; every other argument is ignored. Windows 11 files
+new tray icons into the overflow flyout — drag it onto the taskbar to pin it.
+
+## UI
+
+- A separate process that exits fully on close. ~115 MB working set while
+  open (egui + GPU context), which is why it is on-demand.
+- **Repaint only when the 1 Hz poll delivers** (`request_repaint()` once per
+  engine tick) or on input. No perpetual animation. The first `status` is
+  fetched immediately on (re)connect, and status + inventory are painted
+  before a large history backfill.
+- **One window**: the first instance holds the `<socket>.ui` lock; a later
+  launch tells it to unminimize + focus and exits.
+- **History mirror**: on every (re)connect the UI wipes its local store and
+  backfills from the daemon, then follows one sample per poll. CLEAR sends
+  `clear_history` (a mirror-only clear would refill on the next launch).
+- **Design language, "precision instrument"**: layered near-black surfaces
+  (canvas `#0a0a0d`, cards `#111116`), monochrome white at graded opacities,
+  and ONE accent — warm amber `#FF9E5E` — reserved strictly for live thermal
+  state (operating dot, raw-temp dashed line, status-chip dot, live history
+  dots). The edge glow on cards is white, never amber.
+- **Layout `252 | * | 300`**: sidebar (hero label, hero numeral of the
+  selected channel's rolling average, status chip, PROFILE, preset cards,
+  Pause, Developer Mode, full-speed button, "Start with Windows", footer);
+  middle = ONE card holding the segmented channel header, detail line, curve,
+  hint and history strip; developer panel on the RIGHT as ONE card. No
+  per-group boxes, no in-app title row (the OS caption carries icon and
+  name).
+- **Exactly one window size per mode** (`SIMPLE_SIZE` 1010×660, `DEV_SIZE`
+  1336×830), switched by the Developer Mode button; no drag-resize, no
+  maximize. Developer mode is the launch default.
+- **Developer panel**: every toggleable feature is a titled group whose
+  master checkbox IS the header; explanations live in tooltips; a group whose
+  switch is off dims to 45 % but stays editable. Groups: CHANNEL RESPONSE (no
+  switch), SAFETY FLOOR, STOPPED-FAN KICK, STOP INSTEAD OF SLOW, TRIAL STOPS,
+  INSTANT APPLY, SOURCES (live temp/rpm per row, header exclusivity), REVIEW
+  LOGGING, BACKEND. The averaging slider is a notch index (5 s steps to
+  2 min, 30 s steps to 5 min).
+- **Curve editing**: drag, double-click adds, right-click removes; whole °C
+  and whole %, bands ≥ 1 °C, 2–12 points; commits on RELEASE so one drag is
+  one undo entry. The hover crosshair follows the pointer freely on both axes
+  with full-plot white guides and no dot (`docs/lessons/free-curve-hover.md`).
+- **Undo/redo** (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z) covers curve edits AND
+  preset switches. A preset entry holds whole-profile `TuningSnapshot`s;
+  `adopt_tuning` is built on the same snapshot so what a preset overwrites
+  and what undo restores cannot drift. Snapshots compare by value, so
+  re-clicking the current preset pushes nothing.
+- **Why-chip**: explains, in the chart corner, why the commanded % differs
+  from the curve's level (ramp, step-down hold with countdown, hysteresis,
+  zero snap, safety floor, idle kick, stop probe, full speed).
+- **Full-speed button**: shows each click immediately from the parity of
+  unacknowledged toggles, then reconciles with the daemon's reply; the daemon
+  toggle stays atomic. Never run a status/inventory poll between queued
+  toggle clicks.
+- **History strip**: 10-minute window of average (bright), raw (faint
+  dashed) and commanded % (dim + under-fill); wheel ≈ 1 min/notch (Shift
+  10×), drag pans, double-click or LIVE returns to now. The viewport anchors
+  on ABSOLUTE sample indices so incoming ticks never move a scrolled window.
+  The under-fill is a hand-built triangle-strip mesh (the staircase outline
+  is concave; `convex_polygon` fills it with criss-crossing triangles), and
+  every trace that can contain NaN must break into runs — one NaN vertex
+  smears the whole strip.
+- **egui gotchas that cost time**:
+  - `Color32` is PREMULTIPLIED: white-at-alpha needs equal components
+    (`from_rgba_premultiplied(a,a,a,a)`); components above alpha render as
+    solid white.
+  - A `Frame` in a horizontal row does not constrain its width, and a
+    right-to-left layout inside it claims the whole row. Allocate the exact
+    region with `allocate_ui_with_layout` first, then draw the card inside.
+  - A `Frame` GROWS to its child; `set_width` is a floor, not a cap, and a
+    vertical `ScrollArea` does not clip the cross axis. Inner content must
+    size from `available_width()`, never a constant.
+  - A child `Ui` in a horizontal parent inherits horizontal flow, and
+    `with_layout(right_to_left)` inside a vertical `Ui` claims all remaining
+    height — put value labels in a `horizontal` row.
+  - The default font has no U+2713; the preset tick is two line segments.
+
+## This machine
+
+- CPU cooler channel: headers `control/0` and `control/1` — the second
+  NH-D15 fan sits on the board's "Pump Fan" header, a manual assignment.
+  Its sensors are the CPU CCD temperatures, not the hotter Tctl; a 0 % command
+  with Tctl in the 60s is consistent with the profile
+  (`docs/lessons/cpu-temperature-selection.md`). Preserve the user's curves
+  and assignments in every deployment.
+- **BIOS: every fan header explicitly on PWM, never Auto** (the water-pump
+  header has its own menu entry). Auto re-probes at boot and can pick DC,
+  where low duties sit below stall voltage. If a low-duty fault reappears,
+  suspect a header reverted to Auto/DC first.
+- **Open, not re-tested since the case fans became NF-A14s (2026-08-03)**:
+  the ASRock EC appears to enforce its own chassis-fan state against the
+  daemon's writes at low board temperatures, stalling or latching chassis
+  headers at 0 rpm. BIOS chassis settings must have no fan-stop / 0 % /
+  "silent" region. Full journal in `docs/history.md`.
+- LibreHardwareMonitor-style `System Fan #N` names do not map onto ASRock's
+  CHA_FAN labels, and the per-header rpm column order follows `ControlIds`.
+- The GPU driver is unstable on this build (bugcheck 0x116 TDR, 2026-11-13);
+  an NVML fault took the daemon down the same morning.

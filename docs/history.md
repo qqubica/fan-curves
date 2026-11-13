@@ -971,3 +971,150 @@ cannot restart it — registering the autostart task just to trampoline
 elevation was deliberately not done (autostart stays an explicit act). The
 old daemon keeps running from `fan-daemon-old.exe` until an elevated shell
 swaps it; history accumulation starts at that moment.
+
+## Chassis-group kill events — investigation journal (2026-07-30 → 2026-08-03)
+
+Moved here verbatim from CLAUDE.md on 2026-11-13. CLAUDE.md keeps only the
+enduring rules; this is the full journal. The Arctic P14 Pro case fans were
+replaced with Noctua NF-A14 PWM on 2026-08-03, which removed the low-duty
+break-away trap; whether the EC override itself still occurs was not re-tested
+after that.
+
+- **OPEN (2026-07-30 afternoon): chassis-group kill events + the low-duty
+  break-away trap.** Distinct from the resolved sustain fault. With a test
+  curve holding the case fans at 5–10% duty, every ~30–45 min ALL FOUR chassis
+  headers cut out within one tick (~475 rpm → 0 with no coast-down; garbage
+  tach reads — 907, 10 810 — exactly at the transition) at CONSTANT commanded
+  duty. Kills observed 12:47:42, 13:19:42, 13:47:39, 14:31:05, 15:04:34. The
+  CPU headers on the same NCT6686D, written identically every tick, show zero
+  anomalies in 96k samples over the same hours; behavior.txt and the Windows
+  System log are silent at those instants; no other monitoring software
+  running. The same signature exists in the 2026-07-29 telemetry (pre-PWM-fix),
+  including one kill at 53% duty that self-healed within seconds — so the kill
+  pulses likely fire at every duty and only become visible outages below
+  break-away (~27%), where a stalled P14 needs stochastic minutes to restart
+  (measured at 10%: 2–7.5 min; at 5%: never). Emergent limit cycle follows:
+  kill → stall → case temp climbs → curve steps 5→10% → break-away minutes
+  later → cools → back to 5% → next kill ("once working, once not"). Prime
+  suspect: the ASRock EC periodically re-asserting its own chassis-group fan
+  config — a re-assert on the CPU group would command ≈ the app's own duty and
+  stay invisible, which explains the group asymmetry. Diagnostic + likely fix:
+  set the BIOS chassis fan curve to a constant moderate duty (~50–60%), so a
+  re-assert pulse spins the fans UP for a second (visible spike, self-rescuing)
+  instead of down to 0 — if the outages become 1 s rpm spikes, the theory is
+  proven. App-side hardening either way: keep case bands out of the 1–27% trap
+  zone (zero snap ~28–30; OFF in the current test profile) — 0% or ≥28% means
+  a kill either costs nothing or self-heals in seconds.
+  **Update 2026-08-02 (three more days of telemetry, 07-30→08-02):** the kills
+  persist every ~5–15 min whenever the case band sits at 10–20% (42 group stops
+  on 07-31, 24 on 08-01; at 20% duty the fans stood still for 53–90% of all
+  samples), CPU headers still spotless across all four days — and the
+  "≥28% self-heals in seconds" rule is now DISPROVEN: on 08-02 15:55–16:25+,
+  headers control/3 + control/4 sat at 0 rpm at a commanded 37% for 30+ minutes
+  while `FanEngine` rewrote duty to all four headers every tick (unconditional
+  `SetControl` loop) and control/2 + control/5 ran ~985 rpm alongside. So the
+  override can LATCH individual chassis channels for tens of minutes, not just
+  pulse the group; which pair is affected varies between events. The tach-freeze
+  alternative was ELIMINATED by eye 2026-08-02 ~16:30: during the latched
+  episode Kuba saw two chassis fans spinning, one fully still and one
+  repeatedly twitching — jerking slightly and falling back — i.e. the fans are
+  physically stalled and the twitcher is getting brief drive pulses that are
+  immediately cut, consistent with the app's 1 Hz duty write landing for a
+  fraction of a second before the EC re-zeros the channel (a write-fight the
+  app loses). Note this also caps what the stall-rescue feature can promise:
+  a 100% rescue pulse fights the same fight. SCEWIN nvram dumps CANNOT audit any of this — ASRock's H/W
+  Monitor per-header config is not in the AMI setup NVRAM (the whole 391 KB
+  export contains only 3 AMD-CBS fan items). Next steps unchanged (BIOS
+  chassis curve at constant 50–60% as the EC-re-assert litmus test) plus a
+  candidate app feature: per-header stall rescue — commanded >0 with tach 0
+  for N s → pulse that one header high for a few seconds, then restore.
+  **Tach floor (2026-08-03, verified by eye):** the NCT6686D reads 0 rpm below
+  roughly ~300 rpm — at 10% duty both NH-D15 fans visibly spin (~250–280 rpm)
+  while the app and `rpm_per_header` show 0. A zero read is only proof of a
+  stopped fan when the expected speed is comfortably above ~300 rpm; below
+  that, telemetry cannot distinguish slow-spinning from stopped (matters for
+  any stall-rescue feature and for kill-event analysis at very low duties).
+  Case fans replaced 2026-08-03 with 4× used Noctua NF-A14 PWM (OLX, 270 zł
+  set) — min ~300 rpm, documented start at any duty >0%, no fan-stop trap;
+  the Arctic P14 Pros (27% break-away) are retired from the chassis headers.
+  **Update 2026-08-02 evening (after Kuba's new BIOS settings, reboot 21:27):
+  the override is active FROM BOOT and its release correlates with the case
+  temp crossing 50 °C.** From 21:31:33 the app commanded a constant 27% and all
+  four chassis fans sat at 0 rpm for a full 30 min — the same 27% that
+  breaks these fans away from a dead stop in ~15 s when the headers are free.
+  At 22:01:22 the raw case temp touched 50.0° (curve dipped the duty
+  27→10→27 over the next 40 s) and at 22:02:04 THREE of the four headers
+  released simultaneously (0 → ~630 rpm within 2 s at the same 27%);
+  control/4 stayed in the fight — for the rest of the 22h hour it read 0 in
+  37% of samples and only ~390 rpm (vs siblings' ~630) when turning, i.e. the
+  visible "twitcher": drive pulses landing between EC re-zeros. Same-day
+  earlier sessions fit the same picture: h16–h17 had control/4+3 pinned at 0
+  through TWO reboots (17:27, 17:41) and every duty change, while case temps
+  stayed below ~50°. Working hypothesis sharpened: the EC enforces the BIOS
+  chassis-fan state — including its own fan-stop/zero region below a ~50 °C
+  board temp — against the app's writes; the group releases when the EC's own
+  temp source crosses its threshold and the EC starts commanding nonzero
+  itself. Duty-change dislodging is the weaker alternative (contradicted by
+  h17: reboots + ramps didn't free control/4+3). Consequence: BIOS chassis
+  settings must have NO fan-stop / 0% / "silent" low-temp region — a constant
+  50–60% chassis curve (the standing litmus test) makes an EC win spin fans
+  UP instead of down, and per-header "Allow Fan Stop"-style toggles must be
+  off. CPU channel remains spotless all day, incl. the Pump header at 20%
+  (~370 rpm steady — the 07-29 fault stays fixed).
+  **Continuation 22:30–22:35 (this session's telemetry check):** Kuba's curve
+  edit landed 22:30:48–55 (dropped the 50:10 and 58:20 points, bumped
+  37:27 → 37:28); within seconds ALL FOUR headers jumped ~640 → ~725 rpm
+  (+~90 rpm for a 1-point duty change — more than PWM scaling explains,
+  consistent with an EC state flip at the same moment) and control/4's
+  0↔~300 rpm cycling STOPPED: continuous clean spin from 22:31:00 (last
+  stall 22:30:44), still ~715 rpm at 22:35 with the case temp back at 43° —
+  well BELOW the ~50° release point, and the EC zero-enforcement did not
+  re-engage. So either the EC's own curve has wide hysteresis / releases
+  latch-like once tripped, or the 50° correlation was coincidental with the
+  duty wiggle. Watch item: if control/4 resumes cycling at 28% duty while
+  the case temp stays in the 40s, the temp-threshold theory is out and
+  per-header hardware (fan or header on control/4 — also half of the
+  afternoon latched pair) moves up; distinguishing test remains the July
+  method: physically swap the fans on control/4 and control/2 and see
+  whether the cycling follows the header or the fan. Not DC mode: only 9
+  garbage tach reads (>2500 rpm) in 13 199 Case rows all day — rule (c)'s
+  DC signature is absent.
+
+## 2026-11-13 — repository cleanup: the WPF app is gone, Rust is the app
+
+Kuba: "This is your repository. Clean it up. Don't keep backward compatibility."
+
+- **Removed the WPF/.NET implementation** (`src/`, `FanCurves.sln`,
+  `dev-watch.ps1`) and the C# `parity-harness`. The last tree with the WPF app
+  is tag `v0.3.1`; its CLAUDE.md there documents the WPF layout, design
+  language, three window sizes, tray behaviour and release procedure.
+  Everything in this file above the Rust port sections describes that app.
+- **The Rust workspace moved from `rust/` to the repository root**; the
+  Windows install scripts moved to `windows/`. Workspace version 0.1.0 → 0.4.0
+  (the repo's tags were already at v0.3.1).
+- **Golden traces are frozen.** They were generated by the C# core; with it
+  gone they are plain reference traces replayed by `tests/golden.rs`.
+- **Compatibility code removed**: the `--save-profile` flag (a real daemon
+  always saves; only a simulation is read-only), the `set_profile` IPC command
+  and `FanEngine::replace_profile`, the WPF-task conflict detection and its
+  `autostart_conflict` IPC field, the UI's fallback for daemons without
+  history, `Backend::Nct` (the Windows backend wraps the NCT6686D), and the
+  profile fields only the WPF app read (`AutostartEnabled`,
+  `MinimizeToTrayOnClose`, `HighPriorityEnabled`, `SensorHistoryHours`) with
+  the two dev-panel controls that edited them and did nothing in the daemon
+  (HIGH PROCESS PRIORITY, SENSOR HISTORY).
+- **A simulation no longer loads the real profile.** Since auto-assign started
+  preserving unknown ids, `fan-ui --sim` on a configured machine showed
+  channels with no readings. It now runs the built-in defaults, unsaved.
+- **One installer**: `windows/install.ps1` handles both the first elevated
+  install and an unelevated update (the tasks already point at the install
+  directory). `deploy-daemon.ps1`, `start-daemon.ps1`, the per-install profile
+  backup and the WPF handover steps are gone. `fan-daemon --send <word>`
+  accepts a bare command word so scripts need no JSON quoting.
+- **Found during the work: the live daemon had crashed.** At 09:42 the
+  installed daemon died with an access violation inside `nvml.dll`, minutes
+  after an NVIDIA driver blue screen (bugcheck 0x116). An access violation
+  does not unwind, so the headers stayed at the last written duty (CPU 40 %,
+  case 20 %) with nothing managing them for 12 minutes until it was restarted
+  by hand. `start-daemon.vbs` now restarts the daemon after a crash; see
+  `docs/lessons/daemon-crash-restart.md`.

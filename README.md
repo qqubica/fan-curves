@@ -1,19 +1,11 @@
-# FanCurves
+# Fan Curves
 
-The actively developed Rust app is in [`rust/`](rust/README.md). On Windows,
-run `rust/install-windows.ps1` in an elevated PowerShell session to install it
-at `%LOCALAPPDATA%\Programs\FanCurvesRust`. It starts a hidden hardware daemon
-and a tray icon at logon; open the UI from the tray when needed.
-The Rust app supports NVIDIA GPU fan
-control through NVML, including both fans on the RTX 5080. The older .NET
-release described below controls motherboard fans only.
-
-MacBook-like fan control for Windows desktops. Fans sit **fully stopped at idle**,
+MacBook-like fan control for desktops. Fans sit **fully stopped at idle**,
 ignore short temperature spikes entirely, and ramp up smoothly only under
 *sustained* load — the way Apple laptops manage their fans, applied to your
-motherboard's fan headers.
+motherboard's fan headers and NVIDIA GPU fans.
 
-![FanCurves — simple mode](docs/screenshot-simple.png)
+![Fan Curves](docs/screenshot.png)
 
 ## Why
 
@@ -23,7 +15,7 @@ opens, so the fans audibly surge and settle all day — the classic desktop
 "whoosh… whoosh…" that a MacBook never does. A MacBook drives its fans from a
 slow-moving average and simply doesn't care about spikes.
 
-FanCurves does the same for a desktop:
+Fan Curves does the same for a desktop:
 
 - **The curve is driven by a rolling average** (up to 5 minutes; the default
   Quiet preset uses 90 s for the CPU). A brief compile or a game loading screen
@@ -34,95 +26,109 @@ FanCurves does the same for a desktop:
 - **Stepping down is deliberate**: the average must fall below the band by a
   hysteresis margin *and stay there* for a hold period before the fan slows.
   No flapping at band edges.
-- **Slew-rate limiting** (default 8 %/s) makes every change a gradual, barely
-  audible glide instead of a jump.
+- **Slew-rate limiting** makes every change a gradual, barely audible glide
+  instead of a jump.
 - **Stopped means stopped**: a 0 % floor at idle, plus *zero snap* — any target
   below a threshold (default 20 %) runs the fan at 0 % instead of a slow crawl.
-  Meaningful speed or silence, never a faint whirr.
 - **Stop probe**: a fan that has been running steadily with stable temperatures
   gets trial-stopped; if the temperature holds, it stays off. If the trial fails,
   a backoff prevents on/off cycling.
 - **Stopped-fan kick** (optional, off by default): periodically spins stopped
-  fans for a few seconds to keep bearings moving.
+  fans for a few seconds.
 
-## Download & run
+## How it is built
 
-Grab the latest zip from [Releases](../../releases), unzip anywhere, run
-`FanCurves.exe`. No installer, no .NET required (self-contained build).
+Three small Rust programs:
 
-- **Administrator required** — fan control needs kernel-level Super I/O access,
-  so the app always asks for elevation.
-- **Windows 11 with Memory Integrity (HVCI) on** — the default driver is blocked;
-  install [PawnIO](https://pawnio.eu) (signed, HVCI-compatible) and FanCurves
-  uses it automatically. Symptom without it: CPU temp reads 0 and no fan headers
-  appear.
-
-First launch auto-detects temperature sensors and motherboard fan headers,
-applies the default **Quiet (MacBook-like)** preset immediately, and keeps
-running in the tray when you close the window (the tray tooltip shows live
-temps → fan %). A Task Scheduler entry starts it with Windows (toggleable
-in-app). **Pause** in the app — or quitting — hands every fan header back to
-the BIOS.
-
-### Modes
-
-- **Simple** (default): pick a preset — `Quiet · MacBook-like` or
-  `Performance` — see the live curve and the rolling average that drives it.
-  Nothing to configure. A preset overwrites your curves and tuning, so Ctrl+Z
-  takes the switch back (Ctrl+Y reapplies it).
-- **Developer** (top-bar toggle or `--dev`): edit curve points by dragging
-  (double-click to add, right-click to remove, Ctrl+Z/Y undo/redo), tune the
-  averaging window / hysteresis / hold / slew per channel, assign temperature
-  sensors and fan headers manually, and watch a 10-minute history strip —
-  average temp, raw temp, commanded fan %, and a marker for every fan
-  stop/start. The strip scrolls back through the last ~24 h (scroll wheel —
-  hold Shift for 10× — or drag; double-click or the LIVE button returns to
-  now) without holding the day in RAM: older samples spill to a temp file that
-  disappears with the app, and the time axis and hover chips show the
-  wall-clock time of each measurement.
-
-![FanCurves — developer mode](docs/screenshot-dev.png)
-
-A notification chip on the chart explains *why* the current fan speed differs
-from the configured curve level (ramping, step-down hold with countdown,
-hysteresis, zero snap, stop probe…) whenever it does.
+- **`fan-daemon`** — the only resident part. Runs elevated and hidden, reads
+  the sensors, runs the control loop about once a second and writes the fan
+  duties. On pause, exit or a failed write it hands every fan back to the
+  BIOS or the GPU driver. About 1 MB on disk.
+- **`fan-tray`** — a tray icon at ordinary privilege: live temperatures in the
+  tooltip, pause/resume, and a way to open the window.
+- **`fan-ui`** — the window. Opens on demand, talks to the daemon over a local
+  socket, and exits completely when closed; fan control carries on without it.
 
 ## Hardware support
 
-Sensors and fan headers come from
-[LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor),
-so any Super I/O chip it can drive works (Nuvoton, ITE, Fintek — most consumer
-boards). Notes:
+| | |
+|---|---|
+| Motherboard headers (Windows) | Nuvoton **NCT6686D** Super I/O (the NCT6683D and NCT6687D share the code path but are untested), driven natively through [PawnIO](https://pawnio.eu). Verified on an ASRock X870 Steel Legend WiFi. |
+| CPU temperature (Windows) | AMD Tctl and per-CCD temperatures (verified on a 9950X3D). |
+| GPU fans (Windows) | NVIDIA cards through the driver's NVML library. Verified on an RTX 5080. A 0 % target hands the fan to the driver's own idle fan-stop. |
+| Linux | `hwmon` sysfs backend. It compiles, but has not been run on real hardware yet. |
 
-- **GPU fans are deliberately excluded** — this app drives motherboard headers
-  only. GPU temperatures are still available as inputs for case-fan curves.
-- **Pump headers are never auto-assigned** (you can still assign them manually
-  in Developer mode, at your own risk).
-- Channels keep a configurable minimum-% safety floor; the `Performance` preset
-  keeps the CPU fan at ≥30 % at all times.
+Other Super I/O chips are not supported. **Pump headers are never assigned
+automatically** — you can assign one by hand, at your own risk.
 
-Config lives in `%AppData%\FanCurves\profile.json` (auto-saved). Diagnostics:
-`sensors.txt` (everything detected at launch) and `events.txt` (lifecycle log)
-in the same folder.
+## Install (Windows)
 
-## Build from source
+Requirements: Windows 10/11, [PawnIO](https://pawnio.eu) installed, the
+[Rust toolchain](https://rustup.rs), and an elevated PowerShell for the first
+install.
 
-Requires the .NET 8 SDK.
-
-```
-dotnet build
-dotnet run --project src/FanCurves          # real hardware if elevated, else simulation
-dotnet run --project src/FanCurves -- --sim # force the simulated backend (no admin needed)
+```powershell
+git clone https://github.com/qqubica/fan-curves
+cd fan-curves
+powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\install.ps1
 ```
 
-The simulated backend fakes a modern CPU with idle spikes and load phases —
-the full UI and filtering pipeline work without touching hardware, which is
-also how the screenshots above were taken
-(`--sim --screenshot out.png` renders for 4 s and exits).
+The script builds the three programs, copies them to
+`%LOCALAPPDATA%\Programs\FanCurvesRust`, registers two logon tasks (the daemon,
+elevated and hidden; the tray icon) and starts them. Run the same script again
+to update; an update needs no elevation.
 
-Layout: `src/FanCurves.Core` is the engine (curves, response filter, engine
-tick, hardware backends — no UI dependencies); `src/FanCurves` is the WPF app.
+Only the tray icon appears at logon. Double-click it to open the window. On
+first start the daemon detects sensors and fans and applies the
+**Quiet (MacBook-like)** preset; every later edit is saved to
+`%AppData%\FanCurves\profile.json`.
+
+To uninstall: untick **Start with Windows** in the window (or run
+`fan-daemon.exe --uninstall-autostart` elevated), choose *Close tray*, stop the
+daemon with `fan-daemon.exe --send shutdown`, and delete the install folder.
+
+## Using it
+
+- **Presets**: `Quiet` (the default) or `Performance`. A preset overwrites the
+  curves and tuning but keeps your sensor and fan assignments; Ctrl+Z takes
+  the switch back.
+- **Curve**: drag points, double-click to add, right-click to remove,
+  Ctrl+Z / Ctrl+Y to undo and redo.
+- **Developer panel**: per-channel averaging window, hysteresis, hold and ramp
+  rates; safety floor, stop threshold, trial stops; which sensors and fans
+  each channel uses, with live readings.
+- **History strip**: ten minutes of average temperature, raw temperature and
+  commanded fan speed, with a marker for every fan stop and start. Scroll or
+  drag to look back over the last ~24 hours.
+- **Why-chip**: whenever the fan speed differs from what the curve says, a
+  chip on the chart explains why (ramping, waiting out a step-down, stopped
+  below the threshold, trial stop…).
+- **Pause** hands every fan back to the BIOS. **Run all fans at full speed**
+  is a temporary override for testing airflow or noise.
+
+Logs for reviewing behaviour are in `%AppData%\FanCurves\logs`: a CSV row per
+channel per tick, and `behavior.txt` with only the changes.
+
+## Build and test
+
+```
+cargo test --workspace
+cargo run --release -p fan-ui -- --sim    # the full UI on simulated hardware
+```
+
+`--sim` fakes a modern CPU with idle spikes and load phases, so the whole UI
+and control loop can be tried without touching real fans. Nothing a simulation
+does is saved.
+
+Layout: `crates/fan-core` is the engine (curves, response filter, tick,
+simulation, Linux backend), `crates/fan-daemon` the daemon and Windows
+backends, `crates/fan-tray` and `crates/fan-ui` the tray and window,
+`windows/` the install scripts.
+
+The first versions of this project (v0.1.0–v0.3.1) were a .NET/WPF app; that
+code is in the git history at tag `v0.3.1`.
 
 ## License
 
-MIT
+MIT. The daemon embeds the signed PawnIO modules `LpcIO` and `AMDFamily17`
+from [PawnIO.Modules](https://github.com/namazso/PawnIO.Modules) (LGPL-2.1).

@@ -7,7 +7,7 @@ the engine, each one waited for the tick to finish (600–850 ms measured on
 2026-10-24). A UI connect issues five of them in sequence, so the window stayed
 empty for well over a second.
 
-`inventory` also ran `schtasks` twice and `powershell.exe` once (~800 ms) while
+`inventory` also spawned `schtasks` and `powershell.exe` (~800 ms) while
 holding the engine lock, on every one of the UI's once-a-second polls. That
 delayed the fan tick loop for as long as the UI was open.
 
@@ -19,9 +19,6 @@ Rules now in `fan-daemon/src/ipc.rs`:
 - Start-with-Windows state is cached (`AutostartCache`). It is seeded by the
   startup check, re-checked on a background thread when older than 30 s, and
   re-checked immediately after `set_autostart`.
-- The WPF-task conflict check uses `schtasks /Query /XML` (not localized,
-  ~40 ms) instead of PowerShell's `Get-ScheduledTask`. Only `<Settings>` holds
-  the task-level `<Enabled>false</Enabled>`; triggers carry their own.
 - The UI paints status and inventory before a large history backfill. The
   backfill replays up to ~24 h per channel and can take a second.
 

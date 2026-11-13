@@ -1,6 +1,2 @@
-bin/
-obj/
-*.user
-publish/
-*.zip
+target/
 .claude/
