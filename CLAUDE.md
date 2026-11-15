@@ -420,8 +420,14 @@ new tray icons into the overflow flyout — drag it onto the taskbar to pin it.
   Inno3D RTX 5080, subsystem `1771:2096`). NVAPI reports zero illumination
   devices and zero illumination zones, and the legacy logo/SLI brightness
   attributes are unsupported. Inno3D's own TuneIT V5.02 contains no LED
-  control, and OpenRGB has no Inno3D support. There is no "GPU LED" toggle in
-  the app for this reason — do not add one that cannot do anything here, and
-  never write to the card's I2C bus on a guess (VRM controllers sit on it).
+  control, and OpenRGB has no Inno3D support. The I2C bus was checked the same
+  day with a read-only scan through NVAPI (unelevated; ports 0–7, addresses
+  0x08–0x77): the official `NvAPI_I2CRead` reads a monitor's EDID correctly
+  but the driver refuses every non-DDC port (-104, not supported), and the
+  undocumented `NvAPI_I2CReadEx` that OpenRGB uses gets no answer from any
+  address on any port. No LED controller is reachable, so the LED is most
+  likely wired straight to power. There is no "GPU LED" toggle in the app for
+  this reason — do not add one that cannot do anything here, and never write
+  to the card's I2C bus on a guess (VRM controllers sit on it).
 - The GPU driver is unstable on this build (bugcheck 0x116 TDR, 2026-11-13);
   an NVML fault took the daemon down the same morning.
