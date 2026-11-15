@@ -421,7 +421,8 @@ new tray icons into the overflow flyout — drag it onto the taskbar to pin it.
   devices and zero illumination zones, and the legacy logo/SLI brightness
   attributes are unsupported. Inno3D's own TuneIT V5.02 contains no LED
   control, and OpenRGB has no Inno3D support. The I2C bus was checked the same
-  day with a read-only scan through NVAPI (unelevated; ports 0–7, addresses
+  day with a read-only scan through NVAPI (unelevated and elevated, same
+  result; ports 0–7, addresses
   0x08–0x77): the official `NvAPI_I2CRead` reads a monitor's EDID correctly
   but the driver refuses every non-DDC port (-104, not supported), and the
   undocumented `NvAPI_I2CReadEx` that OpenRGB uses gets no answer from any
