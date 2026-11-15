@@ -416,5 +416,12 @@ new tray icons into the overflow flyout — drag it onto the taskbar to pin it.
   "silent" region. Full journal in `docs/history.md`.
 - LibreHardwareMonitor-style `System Fan #N` names do not map onto ASRock's
   CHA_FAN labels, and the per-header rpm column order follows `ControlIds`.
+- **The GPU's LED has no software switch** (checked 2026-11-15; the card is an
+  Inno3D RTX 5080, subsystem `1771:2096`). NVAPI reports zero illumination
+  devices and zero illumination zones, and the legacy logo/SLI brightness
+  attributes are unsupported. Inno3D's own TuneIT V5.02 contains no LED
+  control, and OpenRGB has no Inno3D support. There is no "GPU LED" toggle in
+  the app for this reason — do not add one that cannot do anything here, and
+  never write to the card's I2C bus on a guess (VRM controllers sit on it).
 - The GPU driver is unstable on this build (bugcheck 0x116 TDR, 2026-11-13);
   an NVML fault took the daemon down the same morning.
