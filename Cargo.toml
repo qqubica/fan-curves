@@ -3,7 +3,7 @@ members = ["crates/fan-core", "crates/fan-daemon", "crates/fan-tray", "crates/fa
 resolver = "2"
 
 [workspace.package]
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/qqubica/fan-curves"

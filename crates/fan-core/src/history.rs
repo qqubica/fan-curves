@@ -9,14 +9,21 @@
 //!
 //! Hours of samples do not belong in a resident process's RAM, so only
 //! [`RING`] samples (the live window) stay in memory at full precision.
-//! Everything is also appended to a fixed-size binary record on disk, which is
-//! what scrollback reads. The disk copy is lossy — tenths of a degree/percent,
+//! Everything also goes to a fixed-size binary record on disk, which is what
+//! scrollback reads. The disk copy is lossy — tenths of a degree/percent,
 //! whole seconds — deliberately below display resolution. The spill is capped
 //! at ~24 h by compaction (once a day, when the file holds twice that), which is what
 //! keeps a daemon that runs for weeks from growing a file forever.
 //!
+//! Records reach the file in batches of [`SPILL_BATCH`], not one per tick: a
+//! resident process that writes every second never lets the drive go idle,
+//! and it shows up as a top disk user on a machine that is doing nothing
+//! else. The batch waits in memory and a read that needs it writes it out
+//! first, so readers never see the difference.
+//!
 //! The file vanishes with the process (delete-on-close on Windows, unlinked
-//! immediately on Unix), so a crash cannot leave it behind. Any file error
+//! immediately on Unix), so a process crash cannot leave it behind (a system
+//! crash can leave an empty name in the temp directory). Any file error
 //! silently degrades to the RAM-only ring: history is a convenience, and it
 //! must never take the engine or the UI down.
 
@@ -31,6 +38,9 @@ pub const RING: usize = 600;
 pub const KEEP: usize = 86_400;
 /// Bytes per spilled sample: u32 time + three i16 tenths.
 const RECORD: usize = 10;
+/// Records collected in memory before one append to the spill file: a 6 KB
+/// write per channel roughly every 10–15 minutes.
+pub const SPILL_BATCH: usize = RING;
 /// Seconds from the Unix epoch to 2020-01-01, so the u32 stamp lasts.
 const EPOCH_2020: f64 = 1_577_836_800.0;
 /// Sentinel for "no reading" in a quantized field.
@@ -66,7 +76,12 @@ fn from_tenths(v: i16) -> f64 {
 /// One channel's history.
 pub struct ChannelHistory {
     ring: VecDeque<HistorySample>,
+    /// Opened by the first batch that is written.
     spill: Option<File>,
+    /// The newest records, not in the file yet (see [`SPILL_BATCH`]).
+    pending: Vec<u8>,
+    /// A file error ended the spill for this session; only the ring is left.
+    spill_failed: bool,
     /// Absolute index of the next sample — never rewinds, so a scrolled
     /// viewport keeps pointing at the same data across a compaction.
     total: usize,
@@ -83,7 +98,14 @@ impl Default for ChannelHistory {
 
 impl ChannelHistory {
     pub fn new() -> Self {
-        Self { ring: VecDeque::with_capacity(RING), spill: None, total: 0, first: 0 }
+        Self {
+            ring: VecDeque::with_capacity(RING),
+            spill: None,
+            pending: Vec::new(),
+            spill_failed: false,
+            total: 0,
+            first: 0,
+        }
     }
 
     pub fn total(&self) -> usize {
@@ -99,11 +121,31 @@ impl ChannelHistory {
         self.total - self.first
     }
 
-    fn ensure_spill(&mut self) -> Option<&mut File> {
+    /// Append the waiting batch to the spill file.
+    fn flush_pending(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
         if self.spill.is_none() {
             self.spill = open_spill();
         }
-        self.spill.as_mut()
+        let written = self
+            .spill
+            .as_mut()
+            .is_some_and(|f| f.seek(SeekFrom::End(0)).is_ok() && f.write_all(&self.pending).is_ok());
+        if written {
+            self.pending.clear();
+        } else {
+            self.fail_spill();
+        }
+    }
+
+    /// Degrade to the ring for the rest of the session; never take the caller
+    /// down.
+    fn fail_spill(&mut self) {
+        self.spill = None;
+        self.spill_failed = true;
+        self.pending = Vec::new();
     }
 
     pub fn push(&mut self, s: HistorySample) {
@@ -119,10 +161,10 @@ impl ChannelHistory {
         buf[4..6].copy_from_slice(&to_tenths(s.avg).to_le_bytes());
         buf[6..8].copy_from_slice(&to_tenths(s.raw.unwrap_or(f64::NAN)).to_le_bytes());
         buf[8..10].copy_from_slice(&to_tenths(s.out).to_le_bytes());
-        if let Some(f) = self.ensure_spill() {
-            // A failed write disables the spill for the session; the ring lives on.
-            if f.seek(SeekFrom::End(0)).is_err() || f.write_all(&buf).is_err() {
-                self.spill = None;
+        if !self.spill_failed {
+            self.pending.extend_from_slice(&buf);
+            if self.pending.len() >= SPILL_BATCH * RECORD {
+                self.flush_pending();
             }
         }
         if self.total - self.first > 2 * KEEP {
@@ -134,6 +176,7 @@ impl ChannelHistory {
     /// newest records. Absolute indices are preserved — `first` moves up.
     fn compact(&mut self) {
         let keep_from = self.total - KEEP;
+        self.flush_pending();
         let Some(f) = self.spill.as_mut() else {
             self.first = keep_from;
             return;
@@ -146,7 +189,7 @@ impl ChannelHistory {
             && f.write_all(&tail).is_ok()
             && f.set_len(tail.len() as u64).is_ok();
         if !ok {
-            self.spill = None; // degrade to the ring; never take the caller down
+            self.fail_spill();
         }
         self.first = keep_from;
     }
@@ -156,6 +199,7 @@ impl ChannelHistory {
     pub fn clear(&mut self) {
         self.ring.clear();
         self.first = self.total;
+        self.pending.clear();
         if let Some(f) = self.spill.as_mut() {
             let _ = f.set_len(0);
         }
@@ -172,13 +216,17 @@ impl ChannelHistory {
     }
 
     /// `count` samples ending at absolute index `end` (exclusive), read from
-    /// the spill file. Returns an empty vec if the file is gone.
+    /// the spill file. Returns an empty vec if the file is gone. A range that
+    /// reaches into the waiting batch writes the batch out first.
     pub fn window_at(&mut self, end: usize, count: usize) -> Vec<HistorySample> {
         let end = end.clamp(self.first, self.total);
         let start = end.saturating_sub(count).max(self.first);
         let n = end - start;
         if n == 0 {
             return Vec::new();
+        }
+        if end > self.total - self.pending.len() / RECORD {
+            self.flush_pending();
         }
         let Some(f) = self.spill.as_mut() else { return Vec::new() };
         // The file starts at absolute index 0 of the CURRENT file (cleared
@@ -207,7 +255,7 @@ impl ChannelHistory {
     /// one-sample catch-up never touches the file.
     pub fn read(&mut self, start: usize, count: usize) -> (usize, Vec<HistorySample>) {
         let ring_start = self.total - self.ring.len();
-        let floor = if self.spill.is_some() { self.first } else { ring_start.max(self.first) };
+        let floor = if self.spill_failed { ring_start.max(self.first) } else { self.first };
         let start = start.max(floor).min(self.total);
         let count = count.min(self.total - start);
         if count == 0 {
@@ -431,6 +479,54 @@ mod tests {
         let (start, w) = h.read(h.total() + 5, 10);
         assert_eq!(start, h.total());
         assert!(w.is_empty());
+    }
+
+    #[test]
+    fn a_read_sees_the_batch_that_is_not_in_the_file_yet() {
+        let mut h = ChannelHistory::new();
+        let n = SPILL_BATCH + 50;
+        for i in 0..n {
+            h.push(sample(i));
+        }
+        // One batch is in the file; the rest waits in memory.
+        assert_eq!(h.pending.len(), 50 * RECORD);
+        // A range inside the file leaves the batch alone…
+        assert_eq!(h.window_at(100, 100).len(), 100);
+        assert_eq!(h.pending.len(), 50 * RECORD);
+        // …and one that crosses into it reads every record at its own index.
+        let w = h.window_at(SPILL_BATCH + 40, 80);
+        assert_eq!(w.len(), 80);
+        assert!(h.pending.is_empty());
+        for (k, s) in w.iter().enumerate() {
+            let expect = sample(SPILL_BATCH - 40 + k);
+            assert_eq!(s.wall, expect.wall);
+            assert!((s.out - expect.out).abs() < 0.05);
+        }
+        // Pushes after the flush land behind it, in order.
+        for i in n..(n + 20) {
+            h.push(sample(i));
+        }
+        let w = h.window_at(n + 20, 30);
+        assert_eq!(w.len(), 30);
+        assert_eq!(w[0].wall, sample(n - 10).wall);
+        assert_eq!(w[29].wall, sample(n + 19).wall);
+    }
+
+    #[test]
+    fn clear_drops_the_waiting_batch() {
+        let mut h = ChannelHistory::new();
+        for i in 0..100 {
+            h.push(sample(i));
+        }
+        h.clear();
+        assert!(h.pending.is_empty());
+        for i in 100..(100 + RING + 30) {
+            h.push(sample(i));
+        }
+        // The spill starts at the first sample after the clear.
+        let (start, w) = h.read(100, 5);
+        assert_eq!(start, 100);
+        assert_eq!(w[0].wall, sample(100).wall);
     }
 
     #[test]

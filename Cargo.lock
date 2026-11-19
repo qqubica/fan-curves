@@ -662,7 +662,7 @@ checksum = "dea2df4cf52843e0452895c455a1a2cfbb842a1e7329671acf418fdc53ed4c59"
 
 [[package]]
 name = "fan-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -670,7 +670,7 @@ dependencies = [
 
 [[package]]
 name = "fan-daemon"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "ctrlc",
  "fan-core",
@@ -684,7 +684,7 @@ dependencies = [
 
 [[package]]
 name = "fan-tray"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "fan-core",
  "interprocess",
@@ -694,7 +694,7 @@ dependencies = [
 
 [[package]]
 name = "fan-ui"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "eframe",
  "fan-core",

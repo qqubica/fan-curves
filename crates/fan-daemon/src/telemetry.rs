@@ -4,6 +4,8 @@
 //!
 //! - `telemetry-YYYY-MM-DD.csv` — one row per channel per engine tick with every
 //!   controller input and output. Rotated daily; the last 7 days are kept.
+//!   Rows reach the file once a minute, and at once when the behavior log
+//!   gets a line.
 //! - `behavior.txt` — human-readable CHANGES only: fan start/stop, target steps,
 //!   reason transitions, driving/released flips, `·· <event>` markers, and a full
 //!   settings line whenever any tuning knob or the curve changes.
@@ -39,6 +41,8 @@ pub struct TelemetryLog {
     csv: Option<BufWriter<fs::File>>,
     csv_day: Option<Day>,
     behavior: Option<BufWriter<fs::File>>,
+    /// The behavior log has lines that are not in the file yet.
+    behavior_dirty: bool,
     last_flush: Instant,
     dead: bool,
 
@@ -47,6 +51,14 @@ pub struct TelemetryLog {
 }
 
 const KEEP_DAYS: u64 = 7;
+/// How long CSV rows wait in memory. A resident process that writes every few
+/// seconds never lets the drive go idle; a fault that kills the daemon without
+/// unwinding loses at most this much of the CSV, and nothing of the behavior
+/// log.
+const CSV_FLUSH: Duration = Duration::from_secs(60);
+/// Room for more than one `CSV_FLUSH` of rows, so the buffer does not write
+/// itself out in between.
+const CSV_BUFFER: usize = 64 * 1024;
 const BEHAVIOR_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const CSV_HEADER: &str = "time,channel,applied,out_pct,target_pct,reason,reason_level,reason_s,\
 raw_c,avg_c,rpm,rpm_per_header";
@@ -65,6 +77,7 @@ impl TelemetryLog {
             csv: None,
             csv_day: None,
             behavior: None,
+            behavior_dirty: false,
             last_flush: Instant::now(),
             dead: false,
             prev: Vec::new(),
@@ -78,14 +91,8 @@ impl TelemetryLog {
             return;
         }
         let stamp = self.timestamp();
-        if self.write_behavior(&stamp, &format!("·· {message}")).is_err() {
+        if self.write_behavior(&stamp, &format!("·· {message}")).is_err() || self.flush_if_due().is_err() {
             self.dead = true;
-            return;
-        }
-        if let Some(b) = &mut self.behavior {
-            if b.flush().is_err() {
-                self.dead = true;
-            }
         }
     }
 
@@ -118,13 +125,23 @@ impl TelemetryLog {
             }
         }
         self.prev = statuses.to_vec();
+        self.flush_if_due()
+    }
 
+    /// A behavior line goes to disk at once, and takes the CSV rows up to that
+    /// moment with it, so the two files agree wherever something happened.
+    /// Without one, the CSV waits for `CSV_FLUSH`.
+    fn flush_if_due(&mut self) -> std::io::Result<()> {
+        if !self.behavior_dirty && self.last_flush.elapsed() < CSV_FLUSH {
+            return Ok(());
+        }
+        self.behavior_dirty = false;
+        self.last_flush = Instant::now();
         if let Some(b) = &mut self.behavior {
             b.flush()?;
         }
-        if self.last_flush.elapsed() >= Duration::from_secs(5) {
-            self.last_flush = Instant::now();
-            self.csv.as_mut().expect("rotate_csv opened it").flush()?;
+        if let Some(c) = &mut self.csv {
+            c.flush()?;
         }
         Ok(())
     }
@@ -154,10 +171,16 @@ impl TelemetryLog {
             self.csv_prefix, day.year, day.month, day.day
         ));
         let fresh = !path.exists();
-        let mut file = BufWriter::new(fs::OpenOptions::new().create(true).append(true).open(&path)?);
+        let mut file = BufWriter::with_capacity(
+            CSV_BUFFER,
+            fs::OpenOptions::new().create(true).append(true).open(&path)?,
+        );
         if fresh {
             file.write_all("\u{FEFF}".as_bytes())?; // BOM
             writeln!(file, "{CSV_HEADER}")?;
+            // At once: a daemon killed before the first flush would leave an
+            // empty file, and the restart would never give that day a header.
+            file.flush()?;
         }
         self.csv = Some(file);
         self.prune();
@@ -204,6 +227,7 @@ impl TelemetryLog {
             }
             self.behavior = Some(file);
         }
+        self.behavior_dirty = true;
         writeln!(self.behavior.as_mut().unwrap(), "{stamp}  {line}")
     }
 
@@ -479,6 +503,51 @@ mod tests {
         assert_eq!(n01(Some(f64::INFINITY)), "inf");
         assert_eq!(n10(Some(48.0)), "48.0"); // "0.0" keeps it
         assert_eq!(n0(Some(89.6)), "90");
+    }
+
+    #[test]
+    fn csv_rows_wait_until_the_behavior_log_gets_a_line() {
+        let dir = std::env::temp_dir().join(format!("fan-curves-telemetry-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let profile = Profile::mac_book_like();
+        let status = |out: f64| ChannelStatus {
+            name: "CPU cooler".into(),
+            raw_temp: Some(40.0),
+            effective_temp: 40.0,
+            output_percent: out,
+            rpm: Some(0.0),
+            applied: true,
+            target_percent: out,
+            reason: OutputReason::None,
+            reason_level: 0.0,
+            reason_seconds: 0.0,
+            rpms: vec![Some(0.0)],
+        };
+        let rows_on_disk = |dir: &std::path::Path| {
+            let csv = fs::read_dir(dir.join("logs"))
+                .unwrap()
+                .flatten()
+                .find(|e| e.file_name().to_string_lossy().ends_with(".csv"))
+                .expect("the day's CSV exists");
+            fs::read_to_string(csv.path()).unwrap().lines().count().saturating_sub(1) // minus the header
+        };
+
+        let mut log = TelemetryLog::new(dir.clone(), true, 0);
+        // The first tick announces the channel in the behavior log.
+        log.record(&profile, &[status(0.0)]);
+        assert_eq!(rows_on_disk(&dir), 1);
+        // Quiet ticks stay in memory.
+        log.record(&profile, &[status(0.0)]);
+        log.record(&profile, &[status(0.0)]);
+        assert_eq!(rows_on_disk(&dir), 1);
+        // A change writes its behavior lines and every row up to it.
+        log.record(&profile, &[status(30.0)]);
+        assert_eq!(rows_on_disk(&dir), 4);
+        // Shutdown leaves nothing behind in the buffer.
+        log.record(&profile, &[status(30.0)]);
+        drop(log);
+        assert_eq!(rows_on_disk(&dir), 5);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

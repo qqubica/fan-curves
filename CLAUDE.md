@@ -9,12 +9,10 @@ Phanteks P600S, RTX 5080); Windows is the verified platform, Linux (hwmon)
 compiles but has never run on real hardware.
 
 Temperature-only: every channel follows its temperature staircase through the
-response filter, full stop. The power-budget controller and everything around
-it was removed on 2026-08-06.
+response filter, full stop.
 
 History, journals and the documentation of removed parts live in
-`docs/history.md`. The original WPF/.NET app was removed on 2026-11-13 (Kuba:
-"Clean it up. Don't keep backward compatibility."); its last tree is tag
+`docs/history.md`. The original WPF/.NET app was removed; its last tree is tag
 `v0.3.1`. Do not reintroduce compatibility shims for it or for older daemons.
 
 ## Repo
@@ -206,7 +204,7 @@ PascalCase field names, saved on every edit. Missing fields take the defaults
 in `profile.rs`; unknown fields are ignored and dropped on the next save. A
 missing, corrupt or channel-less file falls back to the Quiet preset.
 Renaming a field silently resets it to its default for every existing
-profile — there is no migration layer, by decision.
+profile — there is no migration layer.
 
 Sensor and control ids are backend-specific strings stored in the profile.
 On Windows they follow LibreHardwareMonitor's scheme
@@ -237,6 +235,10 @@ Changing them orphans every saved assignment; manual ones do not come back.
   answer from `Shared::view`, republished after every tick and every mutating
   command; the autostart state is a cached background check. Lock order:
   engine, then view (`docs/lessons/ipc-reads-never-wait-for-the-tick.md`).
+- **No file write per tick.** The daemon is resident, so anything it writes
+  every second keeps the drive from going idle and puts it at the top of the
+  disk-activity list of an idle PC. History and telemetry both batch
+  (below); keep it that way when adding a log.
 - **Edits go through `update_profile`**, which applies settings in place and
   keeps filter state. Nothing may swap the engine's profile wholesale — that
   turns a slider nudge into an averaging-window reset.
@@ -247,7 +249,9 @@ Changing them orphans every saved assignment; manual ones do not come back.
 - **History is daemon-owned**: one `HistorySample` per channel per tick into
   the two-tier store (exact 600-sample ring + a spill file of 10-byte
   quantized records, delete-on-close, compacted to the newest ~24 h, silent
-  RAM-only degradation on any file error). `status` carries per-channel
+  RAM-only degradation on any file error). Records go to the spill file in
+  batches of 600 (one 6 KB write per channel every 10–15 minutes); a read
+  that needs the waiting batch writes it out first. `status` carries per-channel
   `{first,total}` bounds; `history` pages by absolute index (≤ 4096 per
   reply, compact `[wall,avg,raw,out]` rows, nulls for missing readings). The
   UI only mirrors it.
@@ -256,7 +260,10 @@ Changing them orphans every saved assignment; manual ones do not come back.
   controller input and output, daily rotation, 7 days kept — the trailing
   `rpm_per_header` column carries every assigned header's rpm (`rpm` alone is
   only the first and hides a single stalled fan); `behavior.txt` (4 MB cap)
-  with changes only plus a full settings line whenever a knob moves. UTF-8
+  with changes only plus a full settings line whenever a knob moves. A
+  behavior line is written to disk at once and takes the CSV rows up to that
+  moment with it; without one the CSV rows wait in memory for up to 60 s
+  (a fault that kills the daemon loses that much of the CSV). UTF-8
   WITH BOM (PowerShell 5.1 mangles °/· otherwise). The first failed write
   disables logging for the session; it must never take the engine down. The
   UTC offset is captured once at startup, so a DST flip shifts timestamps
